@@ -5,6 +5,7 @@ import Auth
 enum LibraryMode: String, CaseIterable {
     case notes
     case materials
+    case tasks
 }
 
 struct LibraryView: View {
@@ -34,6 +35,7 @@ struct LibraryView: View {
                 Picker("视图", selection: $mode) {
                     Text("笔记").tag(LibraryMode.notes)
                     Text("素材").tag(LibraryMode.materials)
+                    Text("任务").tag(LibraryMode.tasks)
                 }
                 .pickerStyle(.segmented)
             }
@@ -124,10 +126,11 @@ struct LibraryView: View {
                         Haptics.shared.play(.selection)
                     }
                 } label: {
-                    Text(item == .notes ? "Notes" : "Assets")
+                    Text(tabTitle(for: item))
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
                         .foregroundStyle(mode == item ? Theme.ink : Theme.secondaryInk)
-                        .frame(width: 80, height: 38)
+                        .frame(height: 38)
+                        .padding(.horizontal, 14)
                         .background {
                             if mode == item {
                                 Capsule()
@@ -166,6 +169,19 @@ struct LibraryView: View {
             }
         case .materials:
             MaterialsLibraryView(model: materialsModel)
+        case .tasks:
+            TasksOverviewView()
+        }
+    }
+
+    private func tabTitle(for mode: LibraryMode) -> String {
+        switch mode {
+        case .notes:
+            return "Notes"
+        case .materials:
+            return "Assets"
+        case .tasks:
+            return "Tasks"
         }
     }
     
