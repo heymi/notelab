@@ -901,11 +901,20 @@ struct NoteEditorView: View {
         .buttonStyle(.plain)
     }
 
+    private func handleClose() {
+        onClose?()
+        if !router.path.isEmpty {
+            router.pop()
+        } else {
+            dismiss()
+        }
+    }
+
     private var editorTopBar: some View {
         GlassEffectContainer(spacing: 12) {
             HStack(spacing: 10) {
                 toolbarButton(systemName: "chevron.left") {
-                    onClose?() ?? dismiss()
+                    handleClose()
                 }
                 Spacer(minLength: 0)
                 toolbarButton(systemName: "textformat") {
