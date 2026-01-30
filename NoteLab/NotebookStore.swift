@@ -219,6 +219,7 @@ final class NotebookStore: ObservableObject {
             content: ""
         )
         notebooks[index].notes.insert(newNote, at: 0)
+        sortNotes(in: index)
 
         if let ownerId, let modelContext {
             upsertLocalNote(ownerId: ownerId, notebookId: notebookId, note: newNote, context: modelContext)
@@ -246,6 +247,7 @@ final class NotebookStore: ObservableObject {
         )
         newNote.updateMetrics()
         notebooks[index].notes.insert(newNote, at: 0)
+        sortNotes(in: index)
 
         if let ownerId, let modelContext {
             upsertLocalNote(ownerId: ownerId, notebookId: notebookId, note: newNote, context: modelContext)
