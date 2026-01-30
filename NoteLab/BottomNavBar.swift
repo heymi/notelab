@@ -29,8 +29,8 @@ struct BottomNavBar: View {
                         }
                         Haptics.shared.play(.selection)
                     }) {
-                        Image(systemName: "square.and.pencil")
-                            .font(.system(size: 22, weight: .semibold, design: .rounded))
+                        Image(systemName: "pencil")
+                            .font(.system(size: 24, weight: .semibold, design: .rounded))
                             .foregroundStyle(selection == .whiteboard ? Theme.ink : Theme.secondaryInk)
                             .opacity(selection == .whiteboard ? 1 : 0.65)
                             .scaleEffect(selection == .whiteboard ? 1.02 : 1)
