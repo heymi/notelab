@@ -8,6 +8,7 @@ import AppKit
 struct NotebookCardView: View {
     let notebook: Notebook
     var size: CGSize = CGSize(width: 160, height: 220)
+    var previewItems: [NotebookPreviewItem] = []
     var previewImages: [Data] = [] // 可选的预览图片数据
 
     var body: some View {
@@ -24,8 +25,6 @@ struct NotebookCardView: View {
         
         // Horizontal offsets for the stacked paper effect
         let backPaperOffsetX: CGFloat = size.width * 0.118
-        
-        let latestNote = notebook.notes.max { $0.createdAt < $1.createdAt }
         
         // 为每个笔记本生成一个基于 ID 的伪随机旋转角度 (-2 到 2 度)
         let rotationAngle: Double = {
@@ -50,7 +49,7 @@ struct NotebookCardView: View {
 
             // 3. Content Layer (The actual note page - Page 1)
             // Sitting directly under the cover
-            NoteContentPreviewView(note: latestNote, size: CGSize(width: size.width, height: pageHeight), cornerRadius: cornerRadius, previewImages: previewImages)
+            NoteContentPreviewView(previewItems: previewItems, size: CGSize(width: size.width, height: pageHeight), cornerRadius: cornerRadius, previewImages: previewImages)
                 .offset(y: pageCenterOffsetY)
                 .blur(radius:10.0) 
             
@@ -74,7 +73,7 @@ struct NotebookCardView: View {
 // MARK: - Subviews
 
 private struct NoteContentPreviewView: View {
-    let note: Note?
+    let previewItems: [NotebookPreviewItem]
     let size: CGSize
     let cornerRadius: CGFloat
     var previewImages: [Data] = []
@@ -86,9 +85,8 @@ private struct NoteContentPreviewView: View {
                 .fill(Theme.paper)
             
             VStack(alignment: .leading, spacing: 6) {
-                if let note = note {
-                    let items = previewItems(for: note)
-                    ForEach(items) { item in
+                if !previewItems.isEmpty {
+                    ForEach(previewItems) { item in
                         switch item.kind {
                         case .image(let data):
                             if let image = platformImage(from: data) {
@@ -141,52 +139,6 @@ private struct NoteContentPreviewView: View {
         #else
         return nil
         #endif
-    }
-    
-    private func previewItems(for note: Note) -> [PreviewItem] {
-        let document = NoteDocument.fromMarkdown(note.content)
-        var results: [PreviewItem] = []
-        var numberedIndex = 0
-        var isInNumberedSequence = false
-        
-        // Limit the total number of preview items
-        let maxItems = 8
-
-        for block in document.blocks {
-            if block.kind == .attachment {
-                guard let attachment = block.attachment, attachment.type == .image else {
-                    continue
-                }
-                if let data = attachment.data {
-                    results.append(.image(data))
-                } else if let cached = AttachmentCache.load(attachmentId: attachment.id, fileName: attachment.fileName) {
-                    results.append(.image(cached))
-                }
-                if results.count >= maxItems { break }
-                continue
-            }
-            
-            let trimmed = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if block.kind != .table && trimmed.isEmpty {
-                continue
-            }
-
-            var numberIndex: Int?
-            if block.kind == .numbered {
-                numberedIndex = isInNumberedSequence ? numberedIndex + 1 : 1
-                isInNumberedSequence = true
-                numberIndex = numberedIndex
-            } else {
-                isInNumberedSequence = false
-                numberedIndex = 0
-            }
-
-            results.append(.block(block: block, numberIndex: numberIndex))
-            if results.count >= maxItems {
-                break
-            }
-        }
-        return results
     }
 }
 
@@ -269,25 +221,6 @@ private struct FrostedCoverView: View {
 }
 
 // MARK: - Helper Models & Views
-
-private struct PreviewItem: Identifiable {
-    let id = UUID()
-    let kind: PreviewItemKind
-    
-    enum PreviewItemKind {
-        case image(Data)
-        case block(block: Block, numberIndex: Int?)
-    }
-    
-    static func image(_ data: Data) -> PreviewItem {
-        PreviewItem(kind: .image(data))
-    }
-    
-    static func block(block: Block, numberIndex: Int?) -> PreviewItem {
-        PreviewItem(kind: .block(block: block, numberIndex: numberIndex))
-    }
-}
-
 private struct NotebookPreviewBlockView: View {
     let block: Block
     let numberIndex: Int?

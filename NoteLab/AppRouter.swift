@@ -9,72 +9,55 @@ enum AppRoute: Hashable {
 }
 
 final class AppRouter: ObservableObject {
-    @Published var path = NavigationPath()
+    @Published var path: [AppRoute] = []
     @Published private(set) var isTransitioning = false
-    
-    /// Keeps track of routes for validation purposes
-    private var routeStack: [AppRoute] = []
+    private var transitionResetTask: Task<Void, Never>?
 
     func push(_ route: AppRoute) {
         isTransitioning = true
-        routeStack.append(route)
         path.append(route)
-        // 延迟重置，等待转场动画完成
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-            self.isTransitioning = false
-        }
+        scheduleTransitionReset()
     }
 
     func pop() {
-        if !path.isEmpty {
-            isTransitioning = true
-            path.removeLast()
-            if !routeStack.isEmpty {
-                routeStack.removeLast()
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                self.isTransitioning = false
-            }
-        }
+        guard !path.isEmpty else { return }
+        isTransitioning = true
+        path.removeLast()
+        scheduleTransitionReset()
     }
 
     func reset() {
-        path = NavigationPath()
-        routeStack = []
+        path = []
         isTransitioning = false
+        transitionResetTask?.cancel()
+        transitionResetTask = nil
     }
     
     /// Remove routes that reference non-existent notebooks or notes.
     /// Call this after data refresh to ensure navigation path is valid.
     func pruneInvalidRoutes(validNotebookIds: Set<UUID>, validNoteIds: Set<UUID>) {
-        var newStack: [AppRoute] = []
-        var needsRebuild = false
-        
-        for route in routeStack {
+        let filtered = path.filter { route in
             switch route {
             case .notebook(let id):
-                if validNotebookIds.contains(id) {
-                    newStack.append(route)
-                } else {
-                    needsRebuild = true
-                }
+                return validNotebookIds.contains(id)
             case .note(let id):
-                if validNoteIds.contains(id) {
-                    newStack.append(route)
-                } else {
-                    needsRebuild = true
-                }
+                return validNoteIds.contains(id)
             case .whiteboard, .recentFocus:
-                newStack.append(route)
+                return true
             }
         }
-        
-        if needsRebuild {
-            routeStack = newStack
-            // Rebuild NavigationPath from valid routes
-            path = NavigationPath()
-            for route in newStack {
-                path.append(route)
+        if filtered != path {
+            path = filtered
+        }
+    }
+
+    private func scheduleTransitionReset() {
+        transitionResetTask?.cancel()
+        transitionResetTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard let self, !Task.isCancelled else { return }
+            await MainActor.run {
+                self.isTransitioning = false
             }
         }
     }

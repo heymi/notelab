@@ -93,11 +93,12 @@ struct NotebookDetailView: View {
             
             if let index = notebookIndex {
                 let notebook = store.notebooks[index]
-                let images = store.previewImages(for: notebook.id, limit: 2)
+                let images = store.previewImagesCached(for: notebook.id)
+                let previewItems = store.previewItemsCached(for: notebook.id)
                 
                 ScrollView {
                     VStack(spacing: 18) {
-                        NotebookCardView(notebook: notebook, size: CGSize(width: 180, height: 250), previewImages: images)
+                        NotebookCardView(notebook: notebook, size: CGSize(width: 180, height: 250), previewItems: previewItems, previewImages: images)
                             .padding(.top, 20)
                             .scaleEffect(isContentVisible ? 1 : 0.92)
                             .animation(.spring(response: 0.5, dampingFraction: 0.7).delay(0.05), value: isContentVisible)
@@ -115,6 +116,9 @@ struct NotebookDetailView: View {
                     .padding(.top, 8)
                 }
                 .scrollEdgeEffectStyle(.hard, for: .top)
+                .task(id: notebook.id) {
+                    await store.loadPreviewImagesIfNeeded(notebookId: notebook.id, limit: 2)
+                }
                 .onAppear {
                     withAnimation(.easeOut(duration: 0.4).delay(0.1)) {
                         isContentVisible = true

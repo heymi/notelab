@@ -118,7 +118,7 @@ struct RecentFocusDetailView: View {
             Rectangle()
                 .fill(Color.blue)
                 .frame(width: 4, height: 16)
-                .cornerRadius(2)
+                .clipShape(.rect(cornerRadius: 2))
             Text(text)
                 .font(.system(size: 14, weight: .bold, design: .rounded))
                 .foregroundStyle(Theme.ink)
@@ -161,7 +161,7 @@ struct RecentFocusDetailView: View {
                 }
                 .padding(12)
                 .background(Color.blue.opacity(0.03))
-                .cornerRadius(12)
+                .clipShape(.rect(cornerRadius: 12))
             }
         }
         .padding(20)
@@ -222,7 +222,7 @@ struct RecentFocusDetailView: View {
                     }
                 }
                 .background(Theme.cardBackground)
-                .cornerRadius(12)
+                .clipShape(.rect(cornerRadius: 12))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
                         .stroke(Color.blue.opacity(0.1), lineWidth: 1)

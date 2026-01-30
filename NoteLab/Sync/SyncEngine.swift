@@ -2,8 +2,8 @@ import Foundation
 import Combine
 import SwiftData
 import Supabase
+import os
 
-@MainActor
 final class SyncEngine: ObservableObject {
     @Published private(set) var isSyncing: Bool = false
     @Published private(set) var lastSyncAt: Date?
@@ -12,6 +12,7 @@ final class SyncEngine: ObservableObject {
     private var ownerId: UUID?
     private var modelContext: ModelContext?
     private let supabase: SupabaseClient
+    private let logger = Logger(subsystem: "NoteLab", category: "Sync")
 
     init(supabase: SupabaseClient = SupabaseManager.shared) {
         self.supabase = supabase
@@ -32,35 +33,58 @@ final class SyncEngine: ObservableObject {
 
     func syncNow() async {
         guard let ownerId, let modelContext else { return }
-        if isSyncing { return }
+        if await MainActor.run(resultType: Bool.self, body: { self.isSyncing }) { return }
         if Task.isCancelled { return }
-        isSyncing = true
-        defer { isSyncing = false }
+        await MainActor.run(resultType: Void.self, body: { self.isSyncing = true })
+        defer { Task { @MainActor in self.isSyncing = false } }
 
         do {
-            try await pushDirty()
-            if Task.isCancelled { return }
-            await Task.yield()
-            try await pushDirtyAttachments()
-            if Task.isCancelled { return }
-            await Task.yield()
-            try await pullIncremental()
-            if Task.isCancelled { return }
-            await Task.yield()
-            try await pullAttachments()
-            if Task.isCancelled { return }
-            await Task.yield()
-            if modelContext.hasChanges {
-                try modelContext.save()
-                print("SyncEngine: modelContext saved")
-            } else {
-                print("SyncEngine: modelContext has no changes")
+            let syncStart = DispatchTime.now()
+            let mark = { (label: StaticString, started: DispatchTime) in
+                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000_000
+                self.logger.debug("\(label, privacy: .public) in \(elapsed, privacy: .public)s")
             }
+
+            let pushStart = DispatchTime.now()
+            try await pushDirty()
+            mark("pushDirty", pushStart)
+            if Task.isCancelled { return }
             await Task.yield()
-            lastSyncAt = Date()
-            lastError = nil
+            let pushAttStart = DispatchTime.now()
+            try await pushDirtyAttachments()
+            mark("pushDirtyAttachments", pushAttStart)
+            if Task.isCancelled { return }
+            await Task.yield()
+            let pullStart = DispatchTime.now()
+            try await pullIncremental()
+            mark("pullIncremental", pullStart)
+            if Task.isCancelled { return }
+            await Task.yield()
+            let pullAttStart = DispatchTime.now()
+            try await pullAttachments()
+            mark("pullAttachments", pullAttStart)
+            if Task.isCancelled { return }
+            await Task.yield()
+            let saveStart = DispatchTime.now()
+            let didSave = try await MainActor.run(resultType: Bool.self, body: { () throws -> Bool in
+                if modelContext.hasChanges {
+                    try modelContext.save()
+                    return true
+                }
+                return false
+            })
+            mark("modelContext.save", saveStart)
+            print(didSave ? "SyncEngine: modelContext saved" : "SyncEngine: modelContext has no changes")
+            await Task.yield()
+            await MainActor.run(resultType: Void.self, body: {
+                self.lastSyncAt = Date()
+                self.lastError = nil
+            })
+            mark("syncTotal", syncStart)
         } catch {
-            lastError = error.localizedDescription
+            await MainActor.run(resultType: Void.self, body: {
+                self.lastError = error.localizedDescription
+            })
         }
     }
 
@@ -73,7 +97,9 @@ final class SyncEngine: ObservableObject {
 
     private func pullNotebooks() async throws {
         guard let ownerId, let modelContext else { return }
-        let watermark = try getWatermark(entity: "notebooks", ownerId: ownerId, context: modelContext)
+        let watermark = try await MainActor.run(resultType: Date?.self, body: {
+            try getWatermark(entity: "notebooks", ownerId: ownerId, context: modelContext)
+        })
 
         let rows: [RemoteNotebookRow]
         if let watermark {
@@ -95,21 +121,25 @@ final class SyncEngine: ObservableObject {
         guard !rows.isEmpty else { return }
         print("SyncEngine: pullNotebooks count=\(rows.count) lastId=\(rows.last?.id.uuidString ?? "nil")")
 
-        for (index, row) in rows.enumerated() {
-            upsertLocalNotebook(from: row, ownerId: ownerId, context: modelContext)
-            if index % 10 == 0 {
-                await Task.yield()
+        try await MainActor.run(resultType: Void.self, body: {
+            for (index, row) in rows.enumerated() {
+                upsertLocalNotebook(from: row, ownerId: ownerId, context: modelContext)
+                if index % 10 == 0 {
+                    Task { await Task.yield() }
+                }
             }
-        }
 
-        if let maxUpdatedAt = rows.compactMap({ $0.updatedAtDate }).max() {
-            try setWatermark(entity: "notebooks", ownerId: ownerId, context: modelContext, date: maxUpdatedAt)
-        }
+            if let maxUpdatedAt = rows.compactMap({ $0.updatedAtDate }).max() {
+                try setWatermark(entity: "notebooks", ownerId: ownerId, context: modelContext, date: maxUpdatedAt)
+            }
+        })
     }
 
     private func pullNotes() async throws {
         guard let ownerId, let modelContext else { return }
-        let watermark = try getWatermark(entity: "notes", ownerId: ownerId, context: modelContext)
+        let watermark = try await MainActor.run(resultType: Date?.self, body: {
+            try getWatermark(entity: "notes", ownerId: ownerId, context: modelContext)
+        })
 
         let rows: [RemoteNoteRow]
         if let watermark {
@@ -131,16 +161,18 @@ final class SyncEngine: ObservableObject {
         guard !rows.isEmpty else { return }
         print("SyncEngine: pullNotes count=\(rows.count) lastId=\(rows.last?.id.uuidString ?? "nil")")
 
-        for (index, row) in rows.enumerated() {
-            upsertLocalNote(from: row, ownerId: ownerId, context: modelContext)
-            if index % 10 == 0 {
-                await Task.yield()
+        try await MainActor.run(resultType: Void.self, body: {
+            for (index, row) in rows.enumerated() {
+                upsertLocalNote(from: row, ownerId: ownerId, context: modelContext)
+                if index % 10 == 0 {
+                    Task { await Task.yield() }
+                }
             }
-        }
 
-        if let maxUpdatedAt = rows.compactMap({ $0.updatedAtDate }).max() {
-            try setWatermark(entity: "notes", ownerId: ownerId, context: modelContext, date: maxUpdatedAt)
-        }
+            if let maxUpdatedAt = rows.compactMap({ $0.updatedAtDate }).max() {
+                try setWatermark(entity: "notes", ownerId: ownerId, context: modelContext, date: maxUpdatedAt)
+            }
+        })
     }
 
     // MARK: - Push
@@ -153,11 +185,13 @@ final class SyncEngine: ObservableObject {
     private func pushDirtyNotebooks() async throws {
         guard let ownerId, let modelContext else { return }
 
-        let pred = #Predicate<LocalNotebook> { nb in
-            nb.ownerId == ownerId && nb.isDirty == true
-        }
-        let fetch = FetchDescriptor<LocalNotebook>(predicate: pred)
-        let dirty = try modelContext.fetch(fetch)
+        let dirty = try await MainActor.run(resultType: [LocalNotebook].self, body: {
+            let pred = #Predicate<LocalNotebook> { nb in
+                nb.ownerId == ownerId && nb.isDirty == true
+            }
+            let fetch = FetchDescriptor<LocalNotebook>(predicate: pred)
+            return try modelContext.fetch(fetch)
+        })
 
         for local in dirty {
             let payload = NotebookUpsert(
@@ -175,23 +209,27 @@ final class SyncEngine: ObservableObject {
                 .execute()
                 .value
 
-            if let row = returned.first {
-                local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
-            } else {
-                local.remoteUpdatedAt = Date()
-            }
-            local.isDirty = false
+            await MainActor.run(resultType: Void.self, body: {
+                if let row = returned.first {
+                    local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
+                } else {
+                    local.remoteUpdatedAt = Date()
+                }
+                local.isDirty = false
+            })
         }
     }
 
     private func pushDirtyNotes() async throws {
         guard let ownerId, let modelContext else { return }
 
-        let pred = #Predicate<LocalNote> { n in
-            n.ownerId == ownerId && n.isDirty == true
-        }
-        let fetch = FetchDescriptor<LocalNote>(predicate: pred)
-        let dirty = try modelContext.fetch(fetch)
+        let dirty = try await MainActor.run(resultType: [LocalNote].self, body: {
+            let pred = #Predicate<LocalNote> { n in
+                n.ownerId == ownerId && n.isDirty == true
+            }
+            let fetch = FetchDescriptor<LocalNote>(predicate: pred)
+            return try modelContext.fetch(fetch)
+        })
 
         for local in dirty {
             guard let notebookId = local.notebook?.id else { continue }
@@ -218,9 +256,11 @@ final class SyncEngine: ObservableObject {
                 .value
 
             if let row = updated.first {
-                local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
-                local.version = row.version ?? local.version
-                local.isDirty = false
+                await MainActor.run(resultType: Void.self, body: {
+                    local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
+                    local.version = row.version ?? local.version
+                    local.isDirty = false
+                })
                 continue
             }
 
@@ -255,13 +295,15 @@ final class SyncEngine: ObservableObject {
                     .execute()
                     .value
 
-                if let row = inserted.first {
-                    local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
-                    local.version = row.version ?? local.version
-                } else {
-                    local.remoteUpdatedAt = Date()
-                }
-                local.isDirty = false
+                await MainActor.run(resultType: Void.self, body: {
+                    if let row = inserted.first {
+                        local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
+                        local.version = row.version ?? local.version
+                    } else {
+                        local.remoteUpdatedAt = Date()
+                    }
+                    local.isDirty = false
+                })
                 continue
             }
 
@@ -280,16 +322,18 @@ final class SyncEngine: ObservableObject {
             )
 
             // Apply server version to original note (accept remote).
-            local.title = remote.title
-            local.summary = remote.summary
-            local.content = remote.content
-            local.paragraphCount = remote.paragraphCount
-            local.bulletCount = remote.bulletCount
-            local.hasAdditionalContext = remote.hasAdditionalContext
-            local.deletedAt = remote.deletedAtDate
-            local.remoteUpdatedAt = remote.updatedAtDate ?? local.remoteUpdatedAt
-            local.version = remote.version ?? local.version
-            local.isDirty = false
+            await MainActor.run(resultType: Void.self, body: {
+                local.title = remote.title
+                local.summary = remote.summary
+                local.content = remote.content
+                local.paragraphCount = remote.paragraphCount
+                local.bulletCount = remote.bulletCount
+                local.hasAdditionalContext = remote.hasAdditionalContext
+                local.deletedAt = remote.deletedAtDate
+                local.remoteUpdatedAt = remote.updatedAtDate ?? local.remoteUpdatedAt
+                local.version = remote.version ?? local.version
+                local.isDirty = false
+            })
 
             // Create a "conflict copy" note with the local snapshot.
             let conflictNote = LocalNote(
@@ -310,7 +354,9 @@ final class SyncEngine: ObservableObject {
                 conflictParentId: local.id,
                 notebook: local.notebook
             )
-            modelContext.insert(conflictNote)
+            await MainActor.run(resultType: Void.self, body: {
+                modelContext.insert(conflictNote)
+            })
             // Note: SwiftData automatically manages inverse relationships,
             // no need to manually append to notebook.notes
         }
@@ -325,11 +371,13 @@ final class SyncEngine: ObservableObject {
         try await AttachmentStorage.shared.uploadPendingAttachments(context: modelContext, ownerId: ownerId)
         
         // Now push metadata to attachments table
-        let pred = #Predicate<LocalAttachment> { att in
-            att.ownerId == ownerId && att.isDirty == true && att.isUploaded == true
-        }
-        let fetch = FetchDescriptor<LocalAttachment>(predicate: pred)
-        let dirty = try modelContext.fetch(fetch)
+        let dirty = try await MainActor.run(resultType: [LocalAttachment].self, body: {
+            let pred = #Predicate<LocalAttachment> { att in
+                att.ownerId == ownerId && att.isDirty == true && att.isUploaded == true
+            }
+            let fetch = FetchDescriptor<LocalAttachment>(predicate: pred)
+            return try modelContext.fetch(fetch)
+        })
         
         for local in dirty {
             let payload = AttachmentUpsert(
@@ -350,18 +398,22 @@ final class SyncEngine: ObservableObject {
                 .execute()
                 .value
             
-            if let row = returned.first {
-                local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
-            } else {
-                local.remoteUpdatedAt = Date()
-            }
-            local.isDirty = false
+            await MainActor.run(resultType: Void.self, body: {
+                if let row = returned.first {
+                    local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
+                } else {
+                    local.remoteUpdatedAt = Date()
+                }
+                local.isDirty = false
+            })
         }
     }
     
     private func pullAttachments() async throws {
         guard let ownerId, let modelContext else { return }
-        let watermark = try getWatermark(entity: "attachments", ownerId: ownerId, context: modelContext)
+        let watermark = try await MainActor.run(resultType: Date?.self, body: {
+            try getWatermark(entity: "attachments", ownerId: ownerId, context: modelContext)
+        })
         
         let rows: [RemoteAttachmentRow]
         if let watermark {
@@ -383,13 +435,15 @@ final class SyncEngine: ObservableObject {
         guard !rows.isEmpty else { return }
         print("SyncEngine: pullAttachments count=\(rows.count) lastId=\(rows.last?.id.uuidString ?? "nil")")
         
-        for row in rows {
-            upsertLocalAttachment(from: row, ownerId: ownerId, context: modelContext)
-        }
-        
-        if let maxUpdatedAt = rows.compactMap({ $0.updatedAtDate }).max() {
-            try setWatermark(entity: "attachments", ownerId: ownerId, context: modelContext, date: maxUpdatedAt)
-        }
+        try await MainActor.run(resultType: Void.self, body: {
+            for row in rows {
+                upsertLocalAttachment(from: row, ownerId: ownerId, context: modelContext)
+            }
+
+            if let maxUpdatedAt = rows.compactMap({ $0.updatedAtDate }).max() {
+                try setWatermark(entity: "attachments", ownerId: ownerId, context: modelContext, date: maxUpdatedAt)
+            }
+        })
     }
     
     private func upsertLocalAttachment(from row: RemoteAttachmentRow, ownerId: UUID, context: ModelContext) {

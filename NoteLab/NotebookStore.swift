@@ -7,6 +7,7 @@ final class NotebookStore: ObservableObject {
     @Published var notebooks: [Notebook]
     @Published var whiteboard: Note
     @Published private var previewImageCache: [UUID: [Data]] = [:]
+    @Published private var previewItemCache: [UUID: [NotebookPreviewItem]] = [:]
 
     private var linkBlocks: [UUID: [LinkedNoteBlock]] = [:]
     private var documents: [UUID: NoteDocument] = [:]
@@ -55,6 +56,7 @@ final class NotebookStore: ObservableObject {
         notebooks = []
         documents.removeAll()
         linkBlocks.removeAll()
+        previewItemCache.removeAll()
         ownerId = nil
         modelContext = nil
     }
@@ -109,6 +111,10 @@ final class NotebookStore: ObservableObject {
                     notebookDescription: local.notebookDescription
                 )
             }
+            .sorted {
+                if $0.isPinned != $1.isPinned { return $0.isPinned && !$1.isPinned }
+                return $0.createdAt > $1.createdAt
+            }
             
             // Differential update to preserve identity and avoid full UI rebuild
             for (index, newNotebook) in newNotebooks.enumerated() {
@@ -138,6 +144,8 @@ final class NotebookStore: ObservableObject {
             let validIds = Set(newNotebooks.map { $0.id })
             previewImageCache = previewImageCache.filter { validIds.contains($0.key) }
             previewImageLoading = previewImageLoading.filter { validIds.contains($0) }
+            previewItemCache = previewItemCache.filter { validIds.contains($0.key) }
+            refreshPreviewCaches(for: newNotebooks)
 
         } catch {
             print("NotebookStore: loadFromLocalCache failed: \(error.localizedDescription)")
@@ -219,10 +227,13 @@ final class NotebookStore: ObservableObject {
             content: ""
         )
         notebooks[index].notes.insert(newNote, at: 0)
+        sortNotes(in: index)
 
         if let ownerId, let modelContext {
             upsertLocalNote(ownerId: ownerId, notebookId: notebookId, note: newNote, context: modelContext)
         }
+
+        schedulePreviewItemsUpdate(notebook: notebooks[index])
 
         return newNote.id
     }
@@ -246,10 +257,13 @@ final class NotebookStore: ObservableObject {
         )
         newNote.updateMetrics()
         notebooks[index].notes.insert(newNote, at: 0)
+        sortNotes(in: index)
 
         if let ownerId, let modelContext {
             upsertLocalNote(ownerId: ownerId, notebookId: notebookId, note: newNote, context: modelContext)
         }
+
+        schedulePreviewItemsUpdate(notebook: notebooks[index])
 
         return newNote.id
     }
@@ -373,6 +387,8 @@ final class NotebookStore: ObservableObject {
         let note = notebooks[sourceIndex].notes.remove(at: noteIndex)
         notebooks[targetIndex].notes.insert(note, at: 0)
         sortNotes(in: targetIndex)
+        schedulePreviewItemsUpdate(notebook: notebooks[sourceIndex])
+        schedulePreviewItemsUpdate(notebook: notebooks[targetIndex])
 
         guard let ownerId, let modelContext else { return }
         let id = noteId
@@ -405,6 +421,7 @@ final class NotebookStore: ObservableObject {
         notebooks[notebookIndex].notes.remove(at: noteIndex)
         documents.removeValue(forKey: noteId)
         linkBlocks.removeValue(forKey: noteId)
+        schedulePreviewItemsUpdate(notebook: notebooks[notebookIndex])
 
         guard let ownerId, let modelContext else { return }
         let id = noteId
@@ -615,11 +632,10 @@ final class NotebookStore: ObservableObject {
         }
         
         var images: [Data] = []
-        
-        // 按创建时间倒序遍历笔记
-        let sortedNotes = notebook.notes.sorted { $0.createdAt > $1.createdAt }
-        
-        for note in sortedNotes {
+
+        let orderedNotes = Self.orderedNotesForCoverPreview(notes: notebook.notes)
+
+        for note in orderedNotes {
             // Use in-memory document if available; otherwise parse from stored markdown.
             let document = documents[note.id] ?? NoteDocument.fromMarkdown(note.content)
             for block in document.blocks {
@@ -643,6 +659,10 @@ final class NotebookStore: ObservableObject {
         previewImageCache[notebookId] ?? []
     }
 
+    func previewItemsCached(for notebookId: UUID) -> [NotebookPreviewItem] {
+        previewItemCache[notebookId] ?? []
+    }
+
     func loadPreviewImagesIfNeeded(notebookId: UUID, limit: Int = 2) async {
         guard previewImageCache[notebookId] == nil else { return }
         guard !previewImageLoading.contains(notebookId) else { return }
@@ -663,7 +683,7 @@ final class NotebookStore: ObservableObject {
     private static func previewImagesFromNotes(notes: [Note], limit: Int) -> [Data] {
         guard limit > 0 else { return [] }
         var images: [Data] = []
-        let sortedNotes = notes.sorted { $0.createdAt > $1.createdAt }
+        let sortedNotes = orderedNotesForCoverPreview(notes: notes)
 
         for note in sortedNotes {
             let document = NoteDocument.fromMarkdown(note.content)
@@ -681,6 +701,88 @@ final class NotebookStore: ObservableObject {
             }
         }
         return images
+    }
+
+    private func refreshPreviewCaches(for notebooks: [Notebook]) {
+        for notebook in notebooks {
+            schedulePreviewItemsUpdate(notebook: notebook)
+        }
+    }
+
+    private func schedulePreviewItemsUpdate(notebook: Notebook) {
+        Task.detached(priority: .utility) { [weak self] in
+            let items = Self.previewItemsFromNotebook(notebook)
+            await MainActor.run {
+                self?.previewItemCache[notebook.id] = items
+            }
+        }
+    }
+
+    private static func previewItemsFromNotebook(_ notebook: Notebook) -> [NotebookPreviewItem] {
+        if let pinnedNote = notebook.notes
+            .filter({ $0.isPinned })
+            .max(by: { $0.updatedAt < $1.updatedAt }) {
+            return previewItemsFromNote(pinnedNote)
+        }
+
+        guard let note = notebook.notes.max(by: { $0.createdAt < $1.createdAt }) else {
+            return []
+        }
+        return previewItemsFromNote(note)
+    }
+
+    private static func orderedNotesForCoverPreview(notes: [Note]) -> [Note] {
+        let pinnedNotes = notes
+            .filter { $0.isPinned }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        let unpinnedNotes = notes
+            .filter { !$0.isPinned }
+            .sorted { $0.createdAt > $1.createdAt }
+        return pinnedNotes + unpinnedNotes
+    }
+
+    private static func previewItemsFromNote(_ note: Note, maxItems: Int = 8) -> [NotebookPreviewItem] {
+        let document = NoteDocument.fromMarkdown(note.content)
+        var results: [NotebookPreviewItem] = []
+        var numberedIndex = 0
+        var isInNumberedSequence = false
+
+        for block in document.blocks {
+            if block.kind == .attachment {
+                guard let attachment = block.attachment, attachment.type == .image else {
+                    continue
+                }
+                if let data = attachment.data {
+                    results.append(.image(data))
+                } else if let cached = AttachmentCache.load(attachmentId: attachment.id, fileName: attachment.fileName) {
+                    results.append(.image(cached))
+                }
+                if results.count >= maxItems { break }
+                continue
+            }
+
+            let trimmed = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if block.kind != .table && trimmed.isEmpty {
+                continue
+            }
+
+            var numberIndex: Int?
+            if block.kind == .numbered {
+                numberedIndex = isInNumberedSequence ? numberedIndex + 1 : 1
+                isInNumberedSequence = true
+                numberIndex = numberedIndex
+            } else {
+                isInNumberedSequence = false
+                numberedIndex = 0
+            }
+
+            results.append(.block(block: block, numberIndex: numberIndex))
+            if results.count >= maxItems {
+                break
+            }
+        }
+
+        return results
     }
     
     func recentNoteDigests(limit: Int) -> [NoteDigest] {
@@ -1035,6 +1137,7 @@ final class NotebookStore: ObservableObject {
         for notebookIndex in notebooks.indices {
             if let noteIndex = notebooks[notebookIndex].notes.firstIndex(where: { $0.id == updatedNote.id }) {
                 notebooks[notebookIndex].notes[noteIndex] = updatedNote
+                schedulePreviewItemsUpdate(notebook: notebooks[notebookIndex])
                 break
             }
         }
@@ -1150,5 +1253,23 @@ private extension LocalNote {
             content: content,
             isPinned: isPinned
         )
+    }
+}
+
+struct NotebookPreviewItem: Identifiable {
+    let id = UUID()
+    let kind: Kind
+
+    enum Kind {
+        case image(Data)
+        case block(block: Block, numberIndex: Int?)
+    }
+
+    static func image(_ data: Data) -> NotebookPreviewItem {
+        NotebookPreviewItem(kind: .image(data))
+    }
+
+    static func block(block: Block, numberIndex: Int?) -> NotebookPreviewItem {
+        NotebookPreviewItem(kind: .block(block: block, numberIndex: numberIndex))
     }
 }

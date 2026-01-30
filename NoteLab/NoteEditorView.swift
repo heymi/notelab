@@ -279,19 +279,13 @@ struct NoteEditorView: View {
 
     @ViewBuilder
     private var toastOverlay: some View {
-        if let toast = undoToast {
-            UndoToastView(message: toast.message, actionTitle: toast.actionTitle) {
-                restoreUndoSnapshot()
-                undoToast = nil
-            }
-            .padding(.top, 66)
-        } else if let toast = sendToast {
-            SendToastView(text: toast.message) {
-                router.push(.note(toast.noteId))
-                sendToast = nil
-            }
-            .padding(.top, 66)
-        }
+        EditorToastOverlay(
+            undoToast: $undoToast,
+            sendToast: $sendToast,
+            onUndo: { restoreUndoSnapshot() },
+            onSend: { router.push(.note($0)) }
+        )
+        .padding(.top, 66)
     }
 
     private func triggerSend() {
@@ -901,11 +895,20 @@ struct NoteEditorView: View {
         .buttonStyle(.plain)
     }
 
+    private func handleClose() {
+        onClose?()
+        if !router.path.isEmpty {
+            router.pop()
+        } else {
+            dismiss()
+        }
+    }
+
     private var editorTopBar: some View {
         GlassEffectContainer(spacing: 12) {
             HStack(spacing: 10) {
                 toolbarButton(systemName: "chevron.left") {
-                    onClose?() ?? dismiss()
+                    handleClose()
                 }
                 Spacer(minLength: 0)
                 toolbarButton(systemName: "textformat") {
@@ -1110,6 +1113,27 @@ private struct SendToastView: View {
     }
 }
 
+private struct EditorToastOverlay: View {
+    @Binding var undoToast: UndoToast?
+    @Binding var sendToast: SendToast?
+    let onUndo: () -> Void
+    let onSend: (UUID) -> Void
+
+    var body: some View {
+        if let toast = undoToast {
+            UndoToastView(message: toast.message, actionTitle: toast.actionTitle) {
+                onUndo()
+                undoToast = nil
+            }
+        } else if let toast = sendToast {
+            SendToastView(text: toast.message) {
+                onSend(toast.noteId)
+                sendToast = nil
+            }
+        }
+    }
+}
+
 private struct SizePreferenceKey: PreferenceKey {
     static var defaultValue: CGSize = .zero
 
@@ -1264,7 +1288,7 @@ struct PDFPreviewSheet: View {
     @State private var showShare = false
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             QuickLookPreview(url: url)
                 .navigationTitle("PDF 预览")
                 .navigationBarTitleDisplayMode(.inline)
@@ -1437,7 +1461,7 @@ struct MoveNoteSheet: View {
                     .foregroundStyle(Theme.secondaryInk)
                     .padding(.top, 10)
             } else {
-                ScrollView(showsIndicators: false) {
+                ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 16)], spacing: 16) {
                         ForEach(availableNotebooks) { notebook in
                             NotebookSelectionCell(
@@ -1455,6 +1479,7 @@ struct MoveNoteSheet: View {
                     .padding(.horizontal, 20)
                     .padding(.top, 8)
                 }
+                .scrollIndicators(.hidden)
             }
 
             HStack(spacing: 12) {
@@ -1595,7 +1620,7 @@ struct FormatButton: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 16)
             .background(Theme.cardBackground)
-            .cornerRadius(12)
+            .clipShape(.rect(cornerRadius: 12))
         }
         .buttonStyle(ScaleButtonStyle())
     }
@@ -1640,7 +1665,7 @@ struct AttachmentMenuSheet: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 24)
                     .background(Theme.cardBackground)
-                    .cornerRadius(16)
+                    .clipShape(.rect(cornerRadius: 16))
                 }
                 .buttonStyle(ScaleButtonStyle())
 
@@ -1659,7 +1684,7 @@ struct AttachmentMenuSheet: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 24)
                     .background(Theme.cardBackground)
-                    .cornerRadius(16)
+                    .clipShape(.rect(cornerRadius: 16))
                 }
                 .buttonStyle(ScaleButtonStyle())
             }
@@ -1748,7 +1773,7 @@ struct MenuButton: View {
             .foregroundStyle(color)
             .padding(16)
             .background(Theme.cardBackground)
-            .cornerRadius(12)
+            .clipShape(.rect(cornerRadius: 12))
         }
         .buttonStyle(ScaleButtonStyle())
     }

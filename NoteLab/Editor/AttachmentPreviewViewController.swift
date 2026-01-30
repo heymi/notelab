@@ -15,8 +15,9 @@ final class AttachmentPreviewViewController: UIViewController, UIScrollViewDeleg
     private let imageView = UIImageView()
     private let pdfView = PDFView()
     private let toolbar = UIView()
-    private let blurView = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
+    private let blurView = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterialDark))
     private let closeButton = UIButton(type: .system)
+    private let saveButton = UIButton(type: .system)
     private let deleteButton = UIButton(type: .system)
     
     init(attachmentId: UUID, data: Data, fileName: String, type: AttachmentType, onDelete: @escaping (UUID) -> Void, onClose: @escaping () -> Void) {
@@ -86,56 +87,102 @@ final class AttachmentPreviewViewController: UIViewController, UIScrollViewDeleg
     
     private func setupToolbar() {
         toolbar.backgroundColor = .clear
+        toolbar.layer.cornerRadius = 28
+        toolbar.clipsToBounds = true
         view.addSubview(toolbar)
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         
         toolbar.addSubview(blurView)
         blurView.translatesAutoresizingMaskIntoConstraints = false
         
-        closeButton.setTitle("关闭", for: .normal)
-        closeButton.setTitleColor(.white, for: .normal)
-        closeButton.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
-        closeButton.backgroundColor = UIColor(white: 1.0, alpha: 0.15)
-        closeButton.layer.cornerRadius = 18
+        // Close Button
+        let closeConfig = UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+        closeButton.setImage(UIImage(systemName: "xmark", withConfiguration: closeConfig), for: .normal)
+        closeButton.tintColor = .white
         closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
         
-        deleteButton.setTitle("删除", for: .normal)
-        deleteButton.setTitleColor(.white, for: .normal)
-        deleteButton.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
-        deleteButton.backgroundColor = UIColor.systemRed.withAlphaComponent(0.85)
-        deleteButton.layer.cornerRadius = 18
+        // Save Button
+        let saveConfig = UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+        saveButton.setImage(UIImage(systemName: "square.and.arrow.up", withConfiguration: saveConfig), for: .normal)
+        saveButton.tintColor = .white
+        saveButton.addTarget(self, action: #selector(saveTapped), for: .touchUpInside)
+        
+        // Delete Button
+        let deleteConfig = UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+        deleteButton.setImage(UIImage(systemName: "trash", withConfiguration: deleteConfig), for: .normal)
+        deleteButton.tintColor = .systemRed
         deleteButton.addTarget(self, action: #selector(deleteTapped), for: .touchUpInside)
         
         toolbar.addSubview(closeButton)
+        toolbar.addSubview(saveButton)
         toolbar.addSubview(deleteButton)
+        
         closeButton.translatesAutoresizingMaskIntoConstraints = false
+        saveButton.translatesAutoresizingMaskIntoConstraints = false
         deleteButton.translatesAutoresizingMaskIntoConstraints = false
         
         NSLayoutConstraint.activate([
-            toolbar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            toolbar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            toolbar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
-            toolbar.heightAnchor.constraint(equalToConstant: 70),
+            // Toolbar layout (compact capsule)
+            toolbar.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            toolbar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -20),
+            toolbar.heightAnchor.constraint(equalToConstant: 56),
+            toolbar.widthAnchor.constraint(equalToConstant: 200),
             
+            // Blur view fills toolbar
             blurView.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor),
             blurView.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor),
             blurView.topAnchor.constraint(equalTo: toolbar.topAnchor),
             blurView.bottomAnchor.constraint(equalTo: toolbar.bottomAnchor),
             
-            closeButton.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 20),
+            // Buttons layout (evenly spaced)
+            closeButton.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 8),
             closeButton.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-            closeButton.heightAnchor.constraint(equalToConstant: 36),
-            closeButton.widthAnchor.constraint(equalToConstant: 90),
+            closeButton.widthAnchor.constraint(equalToConstant: 56),
+            closeButton.heightAnchor.constraint(equalToConstant: 56),
             
-            deleteButton.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor, constant: -20),
+            saveButton.centerXAnchor.constraint(equalTo: toolbar.centerXAnchor),
+            saveButton.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
+            saveButton.widthAnchor.constraint(equalToConstant: 56),
+            saveButton.heightAnchor.constraint(equalToConstant: 56),
+            
+            deleteButton.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor, constant: -8),
             deleteButton.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-            deleteButton.heightAnchor.constraint(equalToConstant: 36),
-            deleteButton.widthAnchor.constraint(equalToConstant: 90)
+            deleteButton.widthAnchor.constraint(equalToConstant: 56),
+            deleteButton.heightAnchor.constraint(equalToConstant: 56)
         ])
     }
     
     @objc private func closeTapped() {
         onClose()
+    }
+    
+    @objc private func saveTapped() {
+        var items: [Any] = []
+        
+        // Prepare items for sharing
+        if type == .image, let image = UIImage(data: data) {
+            items.append(image)
+        } else {
+            // For PDF or other data, save as file URL if possible
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+            do {
+                try data.write(to: tempURL)
+                items.append(tempURL)
+            } catch {
+                print("Failed to write temp file for sharing: \(error)")
+                items.append(data) // Fallback to data
+            }
+        }
+        
+        let activityVC = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        
+        // iPad popover support
+        if let popover = activityVC.popoverPresentationController {
+            popover.sourceView = saveButton
+            popover.sourceRect = saveButton.bounds
+        }
+        
+        present(activityVC, animated: true)
     }
     
     @objc private func deleteTapped() {

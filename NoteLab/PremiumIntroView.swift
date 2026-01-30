@@ -58,7 +58,7 @@ struct PremiumIntroView: View {
                     }
                     .padding(24)
                     .background(Theme.cardBackground)
-                    .cornerRadius(24)
+                    .clipShape(.rect(cornerRadius: 24))
                     .shadow(color: Theme.softShadow, radius: 12, x: 0, y: 6)
                     .padding(.horizontal, 20)
                     
@@ -90,7 +90,7 @@ struct PremiumIntroView: View {
                         )
                     )
                     .foregroundStyle(.white)
-                    .cornerRadius(16)
+                    .clipShape(.rect(cornerRadius: 16))
                     .shadow(color: isPremium ? .clear : Color.orange.opacity(0.4), radius: 10, x: 0, y: 5)
                 }
                 .disabled(isPremium || isPurchasing)
