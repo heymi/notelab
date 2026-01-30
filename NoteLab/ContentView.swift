@@ -68,18 +68,13 @@ struct ContentView: View {
         // Check if schema version changed - if so, reset the store
         if schemaVersion != currentSchemaVersion {
             print("Schema version changed from \(schemaVersion) to \(currentSchemaVersion), resetting store...")
-            do {
-                try PersistenceController.resetStore()
-            } catch {
-                print("Failed to reset store: \(error.localizedDescription)")
-            }
+            await resetStoreInBackground()
             schemaVersion = currentSchemaVersion
             PersistenceController.didResetForCorruption = false
         }
         
         do {
-            let container = try PersistenceController.makeContainer()
-            try PersistenceController.validateStore(container: container)
+            let container = try await buildContainerInBackground()
             // Small delay to ensure SwiftData is fully initialized
             try? await Task.sleep(nanoseconds: 100_000_000) // 0.1s
             await MainActor.run {
@@ -89,11 +84,12 @@ struct ContentView: View {
         } catch {
             if !PersistenceController.didResetForCorruption {
                 print("Store validation failed, attempting one-time reset: \(error.localizedDescription)")
-                PersistenceController.didResetForCorruption = true
+                await MainActor.run {
+                    PersistenceController.didResetForCorruption = true
+                }
                 do {
-                    try PersistenceController.resetStore()
-                    let container = try PersistenceController.makeContainer()
-                    try PersistenceController.validateStore(container: container)
+                    await resetStoreInBackground()
+                    let container = try await buildContainerInBackground()
                     try? await Task.sleep(nanoseconds: 100_000_000) // 0.1s
                     await MainActor.run {
                         self.modelContainer = container
@@ -109,6 +105,24 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func buildContainerInBackground() async throws -> ModelContainer {
+        try await Task.detached(priority: .userInitiated) {
+            let container = try PersistenceController.makeContainer()
+            try PersistenceController.validateStore(container: container)
+            return container
+        }.value
+    }
+
+    private func resetStoreInBackground() async {
+        _ = await Task.detached(priority: .utility) {
+            do {
+                try PersistenceController.resetStore()
+            } catch {
+                print("Failed to reset store: \(error.localizedDescription)")
+            }
+        }.value
     }
     
     private func resetAndRetry() {

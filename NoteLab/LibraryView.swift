@@ -12,6 +12,7 @@ struct LibraryView: View {
     @EnvironmentObject private var router: AppRouter
     @EnvironmentObject private var auth: AuthManager
     @EnvironmentObject private var avatarStore: AvatarStore
+    @StateObject private var materialsModel = MaterialsLibraryModel()
     @Binding var tabSelection: AppTab
     @State private var mode: LibraryMode = .notes
     @State private var showNewNotebook = false
@@ -164,19 +165,20 @@ struct LibraryView: View {
                 }
             }
         case .materials:
-            MaterialsLibraryView()
+            MaterialsLibraryView(model: materialsModel)
         }
     }
     
     @ViewBuilder
     private func notebookItem(notebook: Notebook) -> some View {
         let images = store.previewImagesCached(for: notebook.id)
+        let previewItems = store.previewItemsCached(for: notebook.id)
         
         Button {
             Haptics.shared.play(.tap(.light))
             router.push(.notebook(notebook.id))
         } label: {
-            NotebookCardView(notebook: notebook, previewImages: images)
+            NotebookCardView(notebook: notebook, previewItems: previewItems, previewImages: images)
         }
         .buttonStyle(.plain)
         .task(id: notebook.id) {

@@ -11,29 +11,26 @@ enum AppRoute: Hashable {
 final class AppRouter: ObservableObject {
     @Published var path: [AppRoute] = []
     @Published private(set) var isTransitioning = false
+    private var transitionResetTask: Task<Void, Never>?
 
     func push(_ route: AppRoute) {
         isTransitioning = true
         path.append(route)
-        // 延迟重置，等待转场动画完成
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-            self.isTransitioning = false
-        }
+        scheduleTransitionReset()
     }
 
     func pop() {
-        if !path.isEmpty {
-            isTransitioning = true
-            path.removeLast()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                self.isTransitioning = false
-            }
-        }
+        guard !path.isEmpty else { return }
+        isTransitioning = true
+        path.removeLast()
+        scheduleTransitionReset()
     }
 
     func reset() {
         path = []
         isTransitioning = false
+        transitionResetTask?.cancel()
+        transitionResetTask = nil
     }
     
     /// Remove routes that reference non-existent notebooks or notes.
@@ -51,6 +48,17 @@ final class AppRouter: ObservableObject {
         }
         if filtered != path {
             path = filtered
+        }
+    }
+
+    private func scheduleTransitionReset() {
+        transitionResetTask?.cancel()
+        transitionResetTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard let self, !Task.isCancelled else { return }
+            await MainActor.run {
+                self.isTransitioning = false
+            }
         }
     }
 }

@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import SwiftData
+import os
 
 enum AppTab: String, CaseIterable {
     case library
@@ -25,16 +26,22 @@ struct RootView: View {
     @EnvironmentObject private var auth: AuthManager
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
+    private let syncLogger = Logger(subsystem: "NoteLab", category: "Sync")
 
     var body: some View {
-        #if os(macOS)
-        macOSLayout
+        platformContent
             .environmentObject(store)
             .environmentObject(aiClient)
             .environmentObject(aiCenter)
             .environmentObject(planStore)
             .environmentObject(router)
             .environmentObject(avatarStore)
+    }
+
+    @ViewBuilder
+    private var platformContent: some View {
+        #if os(macOS)
+        macOSLayout
             .task(id: auth.userId) {
                 syncTask?.cancel()
                 avatarStore.updateUserId(auth.userId)
@@ -66,12 +73,6 @@ struct RootView: View {
             }
         #else
         iOSLayout
-            .environmentObject(store)
-            .environmentObject(aiClient)
-            .environmentObject(aiCenter)
-            .environmentObject(planStore)
-            .environmentObject(router)
-            .environmentObject(avatarStore)
             .onChange(of: selection) { _, newValue in
                 // #region agent log
                 DebugReporter.log(
@@ -219,8 +220,9 @@ struct RootView: View {
     private func startSync() {
         syncTask?.cancel()
         syncTask = Task(priority: .background) {
-            // Debounce to avoid blocking immediate taps
-            try? await Task.sleep(nanoseconds: 300_000_000) // 0.3s
+            let startMark = DispatchTime.now()
+            // Allow first frame render before any network sync work.
+            try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5s
             if Task.isCancelled { return }
 
             // Avoid syncing while user is navigating/reading.
@@ -230,7 +232,9 @@ struct RootView: View {
                 stableNanoseconds: 600_000_000
             ) // 30s max, require 0.6s stable idle
             if !canStart || Task.isCancelled { return }
+            syncLogger.debug("SyncEngine start after \(Double(DispatchTime.now().uptimeNanoseconds - startMark.uptimeNanoseconds) / 1_000_000_000, privacy: .public)s delay")
             await syncEngine.syncNow()
+            syncLogger.debug("SyncEngine finished in \(Double(DispatchTime.now().uptimeNanoseconds - startMark.uptimeNanoseconds) / 1_000_000_000, privacy: .public)s")
             
             // Defer cache refresh until UI is idle, so we don't stutter the current page.
             let canRefresh = await waitForIdleNavigation(
@@ -240,6 +244,7 @@ struct RootView: View {
             if !canRefresh || Task.isCancelled { return }
 
             await refreshStoreFromLocalCache()
+            syncLogger.debug("Local cache refresh done at \(Double(DispatchTime.now().uptimeNanoseconds - startMark.uptimeNanoseconds) / 1_000_000_000, privacy: .public)s")
         }
     }
 

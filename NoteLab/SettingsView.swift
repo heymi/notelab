@@ -171,7 +171,7 @@ struct SettingsView: View {
                             .padding(.vertical, 8)
                             .padding(.horizontal, 16)
                             .background(Theme.groupedBackground)
-                            .cornerRadius(8)
+                    .clipShape(.rect(cornerRadius: 8))
                     }
                     .padding(.top, 10)
                 }

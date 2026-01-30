@@ -3,17 +3,10 @@ import Combine
 import SwiftData
 import PDFKit
 
-#if canImport(UIKit)
-import UIKit
-private typealias PlatformImage = UIImage
-#elseif canImport(AppKit)
-import AppKit
-private typealias PlatformImage = NSImage
-#endif
-
 struct MaterialsLibraryView: View {
     @EnvironmentObject private var router: AppRouter
     @EnvironmentObject private var auth: AuthManager
+    @ObservedObject var model: MaterialsLibraryModel
 
     @Query(
         filter: #Predicate<LocalAttachment> { att in
@@ -31,75 +24,131 @@ struct MaterialsLibraryView: View {
     private var notes: [LocalNote]
 
     var body: some View {
-        if groups.isEmpty {
-            ContentUnavailableView("暂无素材", systemImage: "paperclip")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ScrollView {
-                LazyVGrid(
-                    columns: [
-                        GridItem(.flexible(), spacing: 16),
-                        GridItem(.flexible(), spacing: 16),
-                        GridItem(.flexible(), spacing: 16)
-                    ],
-                    spacing: 28
-                ) {
-                    ForEach(groups) { group in
-                        Button {
-                            Haptics.shared.play(.selection)
-                            router.push(.note(group.noteId))
-                        } label: {
-                            MaterialGroupCard(group: group)
+        Group {
+            if !model.hasLoadedOnce {
+                skeletonGrid
+            } else if model.groups.isEmpty {
+                ContentUnavailableView("暂无素材", systemImage: "paperclip")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(
+                        columns: [
+                            GridItem(.flexible(), spacing: 16),
+                            GridItem(.flexible(), spacing: 16),
+                            GridItem(.flexible(), spacing: 16)
+                        ],
+                        spacing: 28
+                    ) {
+                        ForEach(model.groups) { group in
+                            Button {
+                                Haptics.shared.play(.selection)
+                                router.push(.note(group.noteId))
+                            } label: {
+                                MaterialGroupCard(group: group)
+                            }
+                            .buttonStyle(BouncyCardButtonStyle())
                         }
-                        .buttonStyle(BouncyCardButtonStyle())
                     }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+                    .padding(.bottom, 100)
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 16)
-                .padding(.bottom, 100)
             }
+        }
+        .task(id: refreshKey) {
+            model.refresh(ownerId: auth.userId, attachments: attachments, notes: notes)
         }
     }
 
-    private var groups: [MaterialGroup] {
-        guard let ownerId = auth.userId else { return [] }
-        let noteLookup = notes
-            .filter { $0.ownerId == ownerId }
-            .reduce(into: [UUID: LocalNote]()) { $0[$1.id] = $1 }
+    private var refreshKey: String {
+        let ownerId = auth.userId?.uuidString ?? "none"
+        return "\(ownerId)-\(attachments.count)-\(notes.count)"
+    }
 
-        let validAttachments = attachments
-            .filter { $0.ownerId == ownerId }
-            .filter { noteLookup[$0.noteId] != nil }
-
-        let grouped = Dictionary(grouping: validAttachments, by: \.noteId)
-        var results: [MaterialGroup] = []
-        results.reserveCapacity(grouped.count)
-
-        for (noteId, items) in grouped {
-            guard let note = noteLookup[noteId] else { continue }
-            let sorted = items.sorted { $0.createdAt > $1.createdAt }
-            let newestAt = sorted.first?.createdAt ?? Date.distantPast
-            results.append(
-                MaterialGroup(
-                    id: noteId,
-                    noteId: noteId,
-                    noteTitle: note.title.isEmpty ? "无标题" : note.title,
-                    attachments: sorted,
-                    newestAt: newestAt
-                )
-            )
+    private var skeletonGrid: some View {
+        ScrollView {
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 16),
+                    GridItem(.flexible(), spacing: 16),
+                    GridItem(.flexible(), spacing: 16)
+                ],
+                spacing: 28
+            ) {
+                ForEach(0..<9, id: \.self) { _ in
+                    SkeletonMaterialCard()
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+            .padding(.bottom, 100)
         }
-
-        return results.sorted { $0.newestAt > $1.newestAt }
     }
 }
 
-private struct MaterialGroup: Identifiable {
+struct MaterialGroup: Identifiable {
     let id: UUID
     let noteId: UUID
     let noteTitle: String
     let attachments: [LocalAttachment]
     let newestAt: Date
+}
+
+private struct SkeletonMaterialCard: View {
+    private let previewHeight: CGFloat = 104
+
+    var body: some View {
+        VStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.black.opacity(0.06))
+                .frame(height: previewHeight)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.black.opacity(0.06))
+                .frame(height: 14)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.black.opacity(0.04))
+                .frame(width: 90, height: 10)
+        }
+        .redacted(reason: .placeholder)
+        .shimmer()
+    }
+}
+
+private struct ShimmerModifier: ViewModifier {
+    @State private var phase: CGFloat = -0.6
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(
+                GeometryReader { proxy in
+                    let width = proxy.size.width
+                    LinearGradient(
+                        colors: [
+                            .clear,
+                            Color.white.opacity(0.25),
+                            .clear
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    .frame(width: width * 1.2)
+                    .offset(x: width * phase)
+                }
+                .clipped()
+            )
+            .onAppear {
+                withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) {
+                    phase = 1.0
+                }
+            }
+    }
+}
+
+private extension View {
+    func shimmer() -> some View {
+        modifier(ShimmerModifier())
+    }
 }
 
 private struct MaterialGroupCard: View {
@@ -198,15 +247,32 @@ private struct AttachmentThumbView: View {
         FileType(fileName: attachment.fileName, mimeType: attachment.mimeType)
     }
 
+    init(attachment: LocalAttachment) {
+        self.attachment = attachment
+        _thumbnail = State(initialValue: AttachmentThumbnailMemoryCache.get(
+            attachmentId: attachment.id,
+            fileName: attachment.fileName
+        ))
+    }
+
     var body: some View {
         ZStack {
+            if fileType == .image || fileType == .pdf {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.black.opacity(0.06))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Color.gray.opacity(0.2), lineWidth: 1)
+                    )
+            }
+
             if let thumbnail {
                 platformImage(thumbnail)
                     .resizable()
                     .scaledToFit()
                     .layoutPriority(1)
+                    .transition(.opacity)
                     .overlay(
-                        // Add border for non-image types (e.g. PDF thumbnails)
                         Group {
                             if fileType != .image {
                                 RoundedRectangle(cornerRadius: 0)
@@ -214,17 +280,18 @@ private struct AttachmentThumbView: View {
                             }
                         }
                     )
-            } else if isLoading {
-                ProgressView()
-            } else {
-                // Fallback / File Icon View
+            } else if fileType != .image && fileType != .pdf {
+                // Non-image types: show a stable icon (no flicker)
                 FileIconView(type: fileType, fileName: attachment.fileName)
                     .overlay(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .strokeBorder(Color.gray.opacity(0.2), lineWidth: 1)
                     )
+            } else if isLoading {
+                ProgressView()
             }
         }
+        .animation(.easeOut(duration: 0.2), value: thumbnail != nil)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: attachment.id) {
             await loadThumbnailIfNeeded()
@@ -250,6 +317,7 @@ private struct AttachmentThumbView: View {
             }
             return makeThumbnail(from: data)
         }).value {
+            AttachmentThumbnailMemoryCache.set(cached, attachmentId: attachment.id, fileName: attachment.fileName)
             thumbnail = cached
             return
         }
@@ -262,7 +330,10 @@ private struct AttachmentThumbView: View {
                 storagePath: attachment.storagePath,
                 fileName: attachment.fileName
             )
-            thumbnail = makeThumbnail(from: data)
+            if let thumb = makeThumbnail(from: data) {
+                AttachmentThumbnailMemoryCache.set(thumb, attachmentId: attachment.id, fileName: attachment.fileName)
+                thumbnail = thumb
+            }
         } catch {
             return
         }

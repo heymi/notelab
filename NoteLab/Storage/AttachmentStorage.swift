@@ -77,7 +77,6 @@ enum AttachmentCache {
 // MARK: - Attachment Storage (MainActor for Supabase operations)
 
 /// Service for managing attachment file storage (Supabase Storage operations)
-@MainActor
 final class AttachmentStorage: ObservableObject {
     
     static let shared = AttachmentStorage()
@@ -128,8 +127,8 @@ final class AttachmentStorage: ObservableObject {
         fileName: String,
         mimeType: String
     ) async throws -> String {
-        uploadingIds.insert(attachmentId)
-        defer { uploadingIds.remove(attachmentId) }
+        await MainActor.run { uploadingIds.insert(attachmentId) }
+        defer { Task { @MainActor in self.uploadingIds.remove(attachmentId) } }
         
         let ext = (fileName as NSString).pathExtension
         let storageName = ext.isEmpty ? attachmentId.uuidString : "\(attachmentId.uuidString).\(ext)"
@@ -169,8 +168,8 @@ final class AttachmentStorage: ObservableObject {
     
     /// Download attachment from Supabase Storage
     func download(storagePath: String, attachmentId: UUID, fileName: String) async throws -> Data {
-        downloadingIds.insert(attachmentId)
-        defer { downloadingIds.remove(attachmentId) }
+        await MainActor.run { downloadingIds.insert(attachmentId) }
+        defer { Task { @MainActor in self.downloadingIds.remove(attachmentId) } }
         
         let data = try await supabase.storage
             .from(bucketId)
@@ -204,13 +203,16 @@ final class AttachmentStorage: ObservableObject {
         storagePath: String,
         fileName: String
     ) async throws -> Data {
-        // Try local cache first
-        if let cached = AttachmentCache.load(attachmentId: attachmentId, fileName: fileName) {
-            return cached
-        }
-        
-        // Download from storage
-        return try await download(storagePath: storagePath, attachmentId: attachmentId, fileName: fileName)
+        try await Task.detached(priority: .utility) { [supabase, bucketId] in
+            if let cached = AttachmentCache.load(attachmentId: attachmentId, fileName: fileName) {
+                return cached
+            }
+            let data = try await supabase.storage
+                .from(bucketId)
+                .download(path: storagePath)
+            AttachmentCache.save(data: data, attachmentId: attachmentId, fileName: fileName)
+            return data
+        }.value
     }
     
     /// Save new attachment: saves to cache and creates local record
@@ -247,7 +249,9 @@ final class AttachmentStorage: ObservableObject {
             isDirty: true,
             isUploaded: false
         )
-        context.insert(attachment)
+        await MainActor.run {
+            context.insert(attachment)
+        }
         
         return attachment
     }
@@ -256,16 +260,20 @@ final class AttachmentStorage: ObservableObject {
     
     /// Upload all pending (not yet uploaded) attachments
     func uploadPendingAttachments(context: ModelContext, ownerId: UUID) async throws {
-        let pred = #Predicate<LocalAttachment> { att in
-            att.ownerId == ownerId && att.isUploaded == false && att.deletedAt == nil
+        let pending = try await MainActor.run {
+            let pred = #Predicate<LocalAttachment> { att in
+                att.ownerId == ownerId && att.isUploaded == false && att.deletedAt == nil
+            }
+            let fetch = FetchDescriptor<LocalAttachment>(predicate: pred)
+            return try context.fetch(fetch)
         }
-        let fetch = FetchDescriptor<LocalAttachment>(predicate: pred)
-        let pending = try context.fetch(fetch)
         if Task.isCancelled { return }
         
         for attachment in pending {
             if Task.isCancelled { return }
-            let snapshot = snapshot(from: attachment)
+            let snapshot: AttachmentSnapshot = await MainActor.run {
+                self.snapshot(from: attachment)
+            }
             guard let data = AttachmentCache.load(attachmentId: snapshot.id, fileName: snapshot.fileName) else {
                 continue
             }
@@ -278,26 +286,32 @@ final class AttachmentStorage: ObservableObject {
                     fileName: snapshot.fileName,
                     mimeType: snapshot.mimeType
                 )
-                if let liveAttachment = fetchAttachment(id: snapshot.id, context: context) {
-                    liveAttachment.storagePath = path
-                    liveAttachment.isUploaded = true
-                    liveAttachment.remoteUpdatedAt = Date()
+                await MainActor.run {
+                    if let liveAttachment = fetchAttachment(id: snapshot.id, context: context) {
+                        liveAttachment.storagePath = path
+                        liveAttachment.isUploaded = true
+                        liveAttachment.remoteUpdatedAt = Date()
+                    }
                 }
             } catch {
                 // Continue with next, don't fail entire batch
-                if let liveAttachment = fetchAttachment(id: snapshot.id, context: context) {
-                    liveAttachment.isUploaded = false
-                    liveAttachment.isDirty = true
+                await MainActor.run {
+                    if let liveAttachment = fetchAttachment(id: snapshot.id, context: context) {
+                        liveAttachment.isUploaded = false
+                        liveAttachment.isDirty = true
+                    }
+                    try? context.save()
                 }
                 print("Failed to upload attachment \(snapshot.id): \(error)")
-                try? context.save()
             }
         }
     }
 
     /// Upload a specific attachment immediately and upsert metadata.
     func uploadAndUpsertMetadata(attachment: LocalAttachment, context: ModelContext) async {
-        let snapshot = snapshot(from: attachment)
+        let snapshot: AttachmentSnapshot = await MainActor.run {
+            self.snapshot(from: attachment)
+        }
         guard snapshot.deletedAt == nil else { return }
         guard let data = AttachmentCache.load(attachmentId: snapshot.id, fileName: snapshot.fileName) else {
             return
@@ -330,26 +344,30 @@ final class AttachmentStorage: ObservableObject {
                 .execute()
                 .value
 
-            if let row = returned.first {
-                if let liveAttachment = fetchAttachment(id: snapshot.id, context: context) {
-                    liveAttachment.remoteUpdatedAt = row.updatedAtDate ?? liveAttachment.remoteUpdatedAt
+            await MainActor.run {
+                if let row = returned.first {
+                    if let liveAttachment = fetchAttachment(id: snapshot.id, context: context) {
+                        liveAttachment.remoteUpdatedAt = row.updatedAtDate ?? liveAttachment.remoteUpdatedAt
+                    }
+                } else {
+                    if let liveAttachment = fetchAttachment(id: snapshot.id, context: context) {
+                        liveAttachment.remoteUpdatedAt = Date()
+                    }
                 }
-            } else {
                 if let liveAttachment = fetchAttachment(id: snapshot.id, context: context) {
-                    liveAttachment.remoteUpdatedAt = Date()
+                    liveAttachment.storagePath = path
+                    liveAttachment.isUploaded = true
+                    liveAttachment.isDirty = false
+                    try? context.save()
                 }
-            }
-            if let liveAttachment = fetchAttachment(id: snapshot.id, context: context) {
-                liveAttachment.storagePath = path
-                liveAttachment.isUploaded = true
-                liveAttachment.isDirty = false
-                try? context.save()
             }
         } catch {
-            if let liveAttachment = fetchAttachment(id: snapshot.id, context: context) {
-                liveAttachment.isDirty = true
-                liveAttachment.isUploaded = false
-                try? context.save()
+            await MainActor.run {
+                if let liveAttachment = fetchAttachment(id: snapshot.id, context: context) {
+                    liveAttachment.isDirty = true
+                    liveAttachment.isUploaded = false
+                    try? context.save()
+                }
             }
             print("Failed to upload attachment metadata \(snapshot.id): \(error)")
         }
