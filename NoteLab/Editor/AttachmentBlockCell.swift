@@ -40,6 +40,10 @@ final class AttachmentBlockCell: UITableViewCell {
     private let dragHandleView = UIImageView()
     private var twoFingerPanGesture: UIPanGestureRecognizer!
     
+    private var containerHeightConstraint: NSLayoutConstraint?
+    private var containerMaxHeightConstraint: NSLayoutConstraint?
+    private var imageAspectRatioConstraint: NSLayoutConstraint?
+    
     private var containerBackgroundColor: UIColor {
         UIColor { traitCollection in
             traitCollection.userInterfaceStyle == .dark ?
@@ -113,6 +117,11 @@ final class AttachmentBlockCell: UITableViewCell {
         contentView.addSubview(containerView)
         containerView.translatesAutoresizingMaskIntoConstraints = false
         
+        // Default height constraint (will be modified for images)
+        let heightConstraint = containerView.heightAnchor.constraint(equalToConstant: 200)
+        heightConstraint.priority = .defaultHigh
+        self.containerHeightConstraint = heightConstraint
+        
         thumbnailImageView.contentMode = .scaleAspectFill
         thumbnailImageView.clipsToBounds = true
         thumbnailImageView.backgroundColor = .white
@@ -151,12 +160,16 @@ final class AttachmentBlockCell: UITableViewCell {
             containerView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
             containerView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
             containerView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-            containerView.heightAnchor.constraint(equalToConstant: 200),
+            heightConstraint,
             
             thumbnailImageView.topAnchor.constraint(equalTo: containerView.topAnchor),
             thumbnailImageView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
             thumbnailImageView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
-            thumbnailImageView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+            {
+                let c = thumbnailImageView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor)
+                c.priority = UILayoutPriority(999)
+                return c
+            }(),
             
             infoLabel.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 12),
             infoLabel.bottomAnchor.constraint(equalTo: containerView.bottomAnchor, constant: -12),
@@ -210,8 +223,16 @@ final class AttachmentBlockCell: UITableViewCell {
         self.storagePath = attachment.storagePath
         self.attachmentData = nil  // Will be loaded
         
-        infoLabel.text = attachment.type == .image ? nil : attachment.fileName
+        let isFullBleedAttachment = attachment.type == .image || attachment.type == .pdf
+        infoLabel.text = isFullBleedAttachment ? nil : attachment.fileName
         thumbnailImageView.image = nil
+        
+        // Reset layout to default state first
+        resetLayout()
+        
+        if isFullBleedAttachment {
+            configureImageLayout()
+        }
         
         // Check if we have embedded data (legacy) or need to load from storage
         if let data = attachment.data, !data.isEmpty {
@@ -229,6 +250,38 @@ final class AttachmentBlockCell: UITableViewCell {
         
         // Enable dragging by default
         setDraggingEnabled(true)
+    }
+    
+    private func resetLayout() {
+        containerView.backgroundColor = containerBackgroundColor
+        containerView.layer.borderWidth = 0.5
+        dragHandleView.isHidden = false
+        thumbnailImageView.contentMode = .scaleAspectFill
+        
+        // Reset height constraint to default
+        containerHeightConstraint?.isActive = false
+        containerHeightConstraint = containerView.heightAnchor.constraint(equalToConstant: 200)
+        containerHeightConstraint?.priority = .defaultHigh
+        containerHeightConstraint?.isActive = true
+        
+        // Remove aspect ratio constraint if exists
+        imageAspectRatioConstraint?.isActive = false
+        imageAspectRatioConstraint = nil
+        
+        // Remove max height constraint if exists
+        containerMaxHeightConstraint?.isActive = false
+        containerMaxHeightConstraint = nil
+    }
+    
+    private func configureImageLayout() {
+        containerView.backgroundColor = .clear
+        containerView.layer.borderWidth = 0
+        dragHandleView.isHidden = true
+        thumbnailImageView.contentMode = .scaleAspectFill
+        
+        // Height will be determined by aspect ratio when image loads
+        // Set a temporary height or let intrinsic size handle it if possible,
+        // but for now we wait for image data to set aspect ratio.
     }
     
     private func loadFromStorage(attachmentId: UUID, storagePath: String, fileName: String, type: AttachmentType) {
@@ -271,18 +324,177 @@ final class AttachmentBlockCell: UITableViewCell {
     
     private func displayThumbnail(data: Data, type: AttachmentType) {
         if type == .image {
-            thumbnailImageView.image = UIImage(data: data)
-            thumbnailImageView.contentMode = .scaleAspectFill
+            if let image = UIImage(data: data) {
+                thumbnailImageView.image = image
+                thumbnailImageView.contentMode = .scaleAspectFill
+                
+                // Update layout for image dimensions
+                updateImageLayout(for: image)
+            }
         } else if type == .pdf {
-            // Generate PDF thumbnail
+            // Generate high-resolution PDF thumbnail to avoid blur
             if let pdfDocument = PDFDocument(data: data), let page = pdfDocument.page(at: 0) {
-                let thumbnail = page.thumbnail(of: CGSize(width: 400, height: 400), for: .mediaBox)
-                thumbnailImageView.image = thumbnail
+                layoutIfNeeded()
+                let pageRect = page.bounds(for: .mediaBox)
+                let fallbackWidth = UIScreen.main.bounds.width - 32
+                let targetWidth = max(containerView.bounds.width, fallbackWidth)
+                let aspectRatio = pageRect.width > 0 ? pageRect.width / pageRect.height : 1
+                let targetHeight = min(900, targetWidth / aspectRatio)
+                let targetSize = CGSize(width: targetWidth, height: targetHeight)
+
+                if let thumbnail = renderPDFThumbnail(page: page, targetSize: targetSize) {
+                    thumbnailImageView.image = thumbnail
+                    thumbnailImageView.contentMode = .scaleAspectFill
+                    updateImageLayout(for: thumbnail)
+                } else {
+                    thumbnailImageView.image = UIImage(systemName: "doc.text.fill")
+                    thumbnailImageView.contentMode = .scaleAspectFit
+                }
             } else {
                 thumbnailImageView.image = UIImage(systemName: "doc.text.fill")
+                thumbnailImageView.contentMode = .scaleAspectFit
             }
-            thumbnailImageView.contentMode = .scaleAspectFit
         }
+    }
+
+    private func renderPDFThumbnail(page: PDFPage, targetSize: CGSize) -> UIImage? {
+        guard targetSize.width > 0, targetSize.height > 0 else { return nil }
+        let pageRect = page.bounds(for: .mediaBox)
+        guard pageRect.width > 0, pageRect.height > 0 else { return nil }
+
+        let scale = min(targetSize.width / pageRect.width, targetSize.height / pageRect.height)
+        let renderSize = CGSize(width: pageRect.width * scale, height: pageRect.height * scale)
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = UIScreen.main.scale
+        format.opaque = true
+
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+        return renderer.image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(origin: .zero, size: targetSize))
+
+            let x = (targetSize.width - renderSize.width) * 0.5
+            let y = (targetSize.height - renderSize.height) * 0.5
+            ctx.cgContext.translateBy(x: x, y: y + renderSize.height)
+            ctx.cgContext.scaleBy(x: scale, y: -scale)
+            page.draw(with: .mediaBox, to: ctx.cgContext)
+        }
+    }
+    
+    private func updateImageLayout(for image: UIImage) {
+        guard image.size.width > 0 && image.size.height > 0 else { return }
+        
+        // Remove existing aspect ratio constraint
+        imageAspectRatioConstraint?.isActive = false
+        
+        // Calculate aspect ratio
+        let aspectRatio = image.size.width / image.size.height
+        
+        // Create new aspect ratio constraint
+        let ratioConstraint = thumbnailImageView.widthAnchor.constraint(equalTo: thumbnailImageView.heightAnchor, multiplier: aspectRatio)
+        ratioConstraint.priority = .required
+        imageAspectRatioConstraint = ratioConstraint
+        ratioConstraint.isActive = true
+        
+        // Update container height constraint
+        containerHeightConstraint?.isActive = false
+        
+        // Calculate target height based on container width (which is screen width - margins)
+        // Since we don't know the exact width here easily without layout pass, 
+        // we rely on the aspect ratio constraint and the max height constraint.
+        
+        // However, we need to constrain the height to be <= 900
+        // We can do this by setting a lessThanOrEqualToConstant constraint
+        containerMaxHeightConstraint?.isActive = false
+        let maxHeightConstraint = containerView.heightAnchor.constraint(lessThanOrEqualToConstant: 900)
+        maxHeightConstraint.priority = .required
+        containerMaxHeightConstraint = maxHeightConstraint
+        maxHeightConstraint.isActive = true
+        
+        // And we need the container to fit the image height
+        // The image view is pinned to container edges.
+        // So we just need to let the aspect ratio drive the height, bounded by width and max height.
+        // But we need to ensure the container doesn't collapse.
+        
+        // Actually, for a cell, we usually want to define height. 
+        // If we use aspect ratio on the image view (which is pinned to container), 
+        // and the container width is fixed by the table view, the height should resolve automatically.
+        // But we need to handle the max height case.
+        
+        // If height > 900, we want to limit it to 900.
+        // In that case, aspect fit will handle the width shrinking (centering is handled by image view content mode).
+        // But the container itself needs to be 900 high.
+        
+        // Let's try this:
+        // 1. Aspect ratio constraint on containerView (or image view)
+        // 2. Width is fixed by parent
+        // 3. Height <= 900
+        
+        // We already added aspect ratio to thumbnailImageView.
+        // thumbnailImageView is pinned to containerView.
+        // So containerView will try to respect that aspect ratio.
+        
+        // We need to store the max height constraint to remove it later if needed (e.g. reuse)
+        // For simplicity in this method, let's just set the height constraint to be the aspect ratio one?
+        // No, `containerHeightConstraint` was an explicit height constraint. We disabled it.
+        
+        // We need to ensure the container height is determined by the image.
+        // If we only have aspect ratio and width, height is determined.
+        // If that height > 900, we need to cap it.
+        
+        // So:
+        // containerHeight = min(900, width / aspectRatio)
+        // But width is dynamic.
+        
+        // Solution:
+        // Allow the height to be determined by the aspect ratio, but cap it at 900.
+        // If it hits 900, the aspect ratio constraint on the VIEW might conflict if we require width to match container.
+        // But we want the image to "fit" inside if it's too tall.
+        
+        // Actually, if we set `thumbnailImageView.contentMode = .scaleAspectFit`, the image view itself can be any size.
+        // We want the *container* to hug the image content.
+        
+        // Let's set the container height constraint to be <= 900.
+        // And also equal to (width / aspectRatio) with lower priority?
+        
+        // Better approach for cell:
+        // Calculate the expected height based on current bounds width (if available) or screen width approximation?
+        // No, that's flaky.
+        
+        // Let's use Auto Layout:
+        // 1. Image View Aspect Ratio constraint (Priority 999)
+        // 2. Image View Height <= 900 (Priority 1000)
+        // 3. Image View Width == Container Width (Already set by pinning)
+        // 4. Container Height == Image View Height (Already set by pinning)
+        
+        // If the calculated height from aspect ratio > 900:
+        // Constraint 2 forces Height = 900.
+        // Constraint 3 forces Width = Container Width.
+        // Constraint 1 (Aspect Ratio) will break. 
+        // Since contentMode is .scaleAspectFit, the image will just be centered in the 900pt high view. This is exactly what we want.
+        
+        // So we just need to add the height <= 900 constraint to the container (or image view).
+        // And we already disabled the fixed 200 height.
+        
+        // We need to keep track of this max height constraint to reset it.
+        // Let's reuse `containerHeightConstraint` to store the active height-related constraint.
+        
+        containerHeightConstraint = containerView.heightAnchor.constraint(lessThanOrEqualToConstant: 900)
+        containerHeightConstraint?.isActive = true
+        
+        // We also need to tell the layout system that the height is determined by the aspect ratio.
+        // Since we added `ratioConstraint` to `thumbnailImageView` and it is pinned to `containerView`,
+        // and `containerView` width is fixed by the cell width, the height should be solvable.
+        
+        // We set priority to required so the image view forces its height based on width.
+        // The container's max height constraint (lessThanOrEqualToConstant: 900) will constrain the container.
+        // Since thumbnailImageView.bottomAnchor constraint has priority 999, it will break if the image is taller than 900.
+        // The image view will extend beyond the container bottom, but clipsToBounds will cut it off.
+        // This achieves top alignment.
+        
+        ratioConstraint.priority = .required
+        imageAspectRatioConstraint = ratioConstraint
     }
     
     override func prepareForReuse() {
@@ -294,6 +506,9 @@ final class AttachmentBlockCell: UITableViewCell {
         attachmentData = nil
         attachmentId = nil
         storagePath = nil
+        
+        // Reset layout for reuse
+        resetLayout()
     }
     
     func setMultiSelected(_ selected: Bool) {
@@ -365,7 +580,8 @@ final class AttachmentBlockCell: UITableViewCell {
     
     func setDraggingEnabled(_ enabled: Bool) {
         twoFingerPanGesture.isEnabled = enabled
-        dragHandleView.isHidden = !enabled
+        let isFullBleedAttachment = attachmentType == .image || attachmentType == .pdf
+        dragHandleView.isHidden = isFullBleedAttachment ? true : !enabled
     }
 }
 #endif
