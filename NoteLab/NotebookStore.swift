@@ -628,11 +628,10 @@ final class NotebookStore: ObservableObject {
         }
         
         var images: [Data] = []
-        
-        // 按创建时间倒序遍历笔记
-        let sortedNotes = notebook.notes.sorted { $0.createdAt > $1.createdAt }
-        
-        for note in sortedNotes {
+
+        let orderedNotes = Self.orderedNotesForCoverPreview(notes: notebook.notes)
+
+        for note in orderedNotes {
             // Use in-memory document if available; otherwise parse from stored markdown.
             let document = documents[note.id] ?? NoteDocument.fromMarkdown(note.content)
             for block in document.blocks {
@@ -680,7 +679,7 @@ final class NotebookStore: ObservableObject {
     private static func previewImagesFromNotes(notes: [Note], limit: Int) -> [Data] {
         guard limit > 0 else { return [] }
         var images: [Data] = []
-        let sortedNotes = notes.sorted { $0.createdAt > $1.createdAt }
+        let sortedNotes = orderedNotesForCoverPreview(notes: notes)
 
         for note in sortedNotes {
             let document = NoteDocument.fromMarkdown(note.content)
@@ -716,10 +715,26 @@ final class NotebookStore: ObservableObject {
     }
 
     private static func previewItemsFromNotebook(_ notebook: Notebook) -> [NotebookPreviewItem] {
+        if let pinnedNote = notebook.notes
+            .filter({ $0.isPinned })
+            .max(by: { $0.updatedAt < $1.updatedAt }) {
+            return previewItemsFromNote(pinnedNote)
+        }
+
         guard let note = notebook.notes.max(by: { $0.createdAt < $1.createdAt }) else {
             return []
         }
         return previewItemsFromNote(note)
+    }
+
+    private static func orderedNotesForCoverPreview(notes: [Note]) -> [Note] {
+        let pinnedNotes = notes
+            .filter { $0.isPinned }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        let unpinnedNotes = notes
+            .filter { !$0.isPinned }
+            .sorted { $0.createdAt > $1.createdAt }
+        return pinnedNotes + unpinnedNotes
     }
 
     private static func previewItemsFromNote(_ note: Note, maxItems: Int = 8) -> [NotebookPreviewItem] {
