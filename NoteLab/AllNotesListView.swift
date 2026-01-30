@@ -7,56 +7,57 @@ struct AllNotesListView: View {
     @State private var searchText = ""
 
     var body: some View {
-        Group {
-            if filteredRows.isEmpty {
-                if searchText.isEmpty {
-                    ContentUnavailableView("暂无笔记", systemImage: "doc.text")
-                } else {
-                    ContentUnavailableView.search(text: searchText)
+        VStack(spacing: 0) {
+            header
+
+            List {
+                // 1. Pinned Section
+                if !pinnedRows.isEmpty {
+                    Section {
+                        ForEach(pinnedRows) { row in
+                            noteRow(row)
+                        }
+                    } header: {
+                        Text("置顶")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Theme.secondaryInk)
+                            .textCase(nil)
+                    }
                 }
-            } else {
-                List {
-                    // 1. Pinned Section
-                    if !pinnedRows.isEmpty {
+
+                // 2. Time-based Sections
+                ForEach(timeSections, id: \.title) { section in
+                    if !section.rows.isEmpty {
                         Section {
-                            ForEach(pinnedRows) { row in
+                            ForEach(section.rows) { row in
                                 noteRow(row)
                             }
                         } header: {
-                            Text("置顶")
+                            Text(section.title)
                                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                                 .foregroundStyle(Theme.secondaryInk)
                                 .textCase(nil)
                         }
                     }
-
-                    // 2. Time-based Sections
-                    ForEach(timeSections, id: \.title) { section in
-                        if !section.rows.isEmpty {
-                            Section {
-                                ForEach(section.rows) { row in
-                                    noteRow(row)
-                                }
-                            } header: {
-                                Text(section.title)
-                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(Theme.secondaryInk)
-                                    .textCase(nil)
-                            }
-                        }
+                }
+            }
+            .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
+            .background(Theme.background)
+            .overlay {
+                if filteredRows.isEmpty {
+                    if searchText.isEmpty {
+                        ContentUnavailableView("暂无笔记", systemImage: "doc.text")
+                    } else {
+                        ContentUnavailableView.search(text: searchText)
                     }
                 }
-                .listStyle(.insetGrouped)
-                .scrollContentBackground(.hidden)
-                .background(Theme.background)
+            }
+            .safeAreaInset(edge: .bottom) {
+                Color.clear.frame(height: 90)
             }
         }
-        .navigationTitle("全部备忘录")
-        .navigationBarTitleDisplayMode(.large)
-        .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .automatic), prompt: "搜索")
-        .safeAreaInset(edge: .bottom) {
-            Color.clear.frame(height: 90)
-        }
+        .background(Theme.background)
     }
 
     // MARK: - Data Source
@@ -203,6 +204,41 @@ struct AllNotesListView: View {
             }
             .padding(.vertical, 4)
         }
+    }
+
+    private var header: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("全部备忘录")
+                    .font(.system(size: 22, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Theme.ink)
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 10)
+
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(Theme.secondaryInk)
+                    .font(.system(size: 16, weight: .semibold))
+
+                TextField("搜索", text: $searchText)
+                    .font(.system(size: 16, design: .rounded))
+
+                if !searchText.isEmpty {
+                    Button(action: { searchText = "" }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(Theme.secondaryInk)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(Color.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .padding(.horizontal, 20)
+            .padding(.bottom, 10)
+        }
+        .background(Theme.background)
     }
 
     private func snippetText(for note: Note) -> String {
