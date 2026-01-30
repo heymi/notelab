@@ -78,10 +78,7 @@ final class NotebookStore: ObservableObject {
             }
             let notebooksFetch = FetchDescriptor<LocalNotebook>(
                 predicate: predicate,
-                sortBy: [
-                    SortDescriptor(\.isPinned, order: .reverse),
-                    SortDescriptor(\.createdAt, order: .reverse)
-                ]
+                sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
             )
             let localNotebooks = try modelContext.fetch(notebooksFetch)
             // #region agent log
@@ -113,6 +110,10 @@ final class NotebookStore: ObservableObject {
                     isPinned: local.isPinned,
                     notebookDescription: local.notebookDescription
                 )
+            }
+            .sorted {
+                if $0.isPinned != $1.isPinned { return $0.isPinned && !$1.isPinned }
+                return $0.createdAt > $1.createdAt
             }
             
             // Differential update to preserve identity and avoid full UI rebuild
