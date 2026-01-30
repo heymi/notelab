@@ -1,0 +1,27 @@
+.DS_Store
+
+# Cursor / IDE
+.cursor/
+
+# Xcode
+DerivedData/
+*.xcuserdata/
+xcuserdata/
+*.xcuserstate
+
+*.moved-aside
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xccheckout
+*.xcscmblueprint
+
+# Swift Package Manager
+.build/
+Packages/
+*.xcodeproj/project.xcworkspace/xcshareddata/swiftpm.bak/
+
+# Logs / misc
+*.log
+
