@@ -78,7 +78,10 @@ final class NotebookStore: ObservableObject {
             }
             let notebooksFetch = FetchDescriptor<LocalNotebook>(
                 predicate: predicate,
-                sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+                sortBy: [
+                    SortDescriptor(\.isPinned, order: .reverse),
+                    SortDescriptor(\.createdAt, order: .reverse)
+                ]
             )
             let localNotebooks = try modelContext.fetch(notebooksFetch)
             // #region agent log
