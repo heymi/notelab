@@ -18,6 +18,11 @@ struct NoteLabApp: App {
             ContentView()
                 .preferredColorScheme(colorScheme)
                 .environmentObject(auth)
+                .onAppear {
+                    #if DEBUG
+                    SubscriptionManager.shared.debugSetTier(.pro)
+                    #endif
+                }
         }
         
         #if os(macOS)

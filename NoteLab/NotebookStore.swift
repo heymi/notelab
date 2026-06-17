@@ -268,8 +268,22 @@ final class NotebookStore: ObservableObject {
         return newNote.id
     }
 
+    /// 检查是否可以创建新笔记本（返回 nil 表示已达限制）
+    /// 如果达到限制，会发送通知触发付费墙
     func addNotebook(title: String, color: NotebookColor, iconName: String) -> UUID? {
         guard let ownerId, let modelContext else { return nil }
+        
+        // 检查笔记本数量限制
+        let subscriptionManager = SubscriptionManager.shared
+        if !subscriptionManager.canCreateNotebook(currentCount: notebooks.count) {
+            // 发送通知触发付费墙
+            NotificationCenter.default.post(
+                name: .showPaywall,
+                object: PaywallTrigger.notebookLimit
+            )
+            return nil
+        }
+        
         let id = UUID()
         let now = Date()
 

@@ -5,13 +5,18 @@ import Auth
 struct SettingsView: View {
     @EnvironmentObject var auth: AuthManager
     @EnvironmentObject private var avatarStore: AvatarStore
-    @AppStorage("isPremium") private var isPremium: Bool = false
+    @StateObject private var subscriptionManager = SubscriptionManager.shared
     @AppStorage("appearanceMode") private var appearanceMode: Int = 0 // 0: Auto, 1: Light, 2: Dark
     @AppStorage("launchPage") private var launchPage: String = "library"
     @State private var showClearCacheConfirm = false
     @State private var cacheCleared = false
     @State private var showAISettings = false
+    @State private var showPaywall = false
     @ObservedObject private var aiSettings = AISettings.shared
+    
+    private var isPremium: Bool {
+        subscriptionManager.isPremium
+    }
     
     var body: some View {
         ScrollView {
@@ -20,7 +25,9 @@ struct SettingsView: View {
                 profileHeader
                 
                 // Premium Banner
-                NavigationLink(destination: PremiumIntroView()) {
+                Button {
+                    showPaywall = true
+                } label: {
                     premiumBanner
                 }
                 .buttonStyle(.plain)
@@ -205,6 +212,9 @@ struct SettingsView: View {
         .sheet(isPresented: $showAISettings) {
             AISettingsView()
         }
+        .sheet(isPresented: $showPaywall) {
+            PaywallView(trigger: .settings)
+        }
         .onAppear {
             sanitizeUserDefaults()
         }
@@ -221,9 +231,7 @@ struct SettingsView: View {
         if let value = defaults.object(forKey: "appearanceMode"), !(value is Int) {
             defaults.set(0, forKey: "appearanceMode")
         }
-        if let value = defaults.object(forKey: "isPremium"), !(value is Bool) {
-            defaults.set(false, forKey: "isPremium")
-        }
+        // isPremium 现在由 SubscriptionManager 管理，不再使用 UserDefaults
     }
     
     private func clearLocalCache() {
@@ -256,7 +264,7 @@ struct SettingsView: View {
                     .font(.system(size: 20, weight: .bold, design: .rounded))
                     .foregroundStyle(Theme.ink)
                 
-                Text(isPremium ? "NoteLab Pro 会员" : "免费版用户")
+                Text(subscriptionManager.currentTier.displayName + "用户")
                     .font(.system(size: 14, weight: .medium, design: .rounded))
                     .foregroundStyle(Theme.secondaryInk)
             }
@@ -287,22 +295,62 @@ struct SettingsView: View {
             
             HStack {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(isPremium ? "尊享会员权益" : "升级到 Pro")
-                        .font(.system(size: 18, weight: .bold, design: .rounded))
-                        .foregroundStyle(isPremium ? .white : Theme.ink)
+                    HStack(spacing: 8) {
+                        Text(subscriptionBannerTitle)
+                            .font(.system(size: 18, weight: .bold, design: .rounded))
+                            .foregroundStyle(isPremium ? .white : Theme.ink)
+                        
+                        if isPremium {
+                            Text(subscriptionManager.currentTier.shortName)
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Color.white.opacity(0.25))
+                                .clipShape(Capsule())
+                        }
+                    }
                     
-                    Text(isPremium ? "您已解锁所有高级功能" : "解锁无限笔记本、AI 助手等高级功能")
+                    Text(subscriptionBannerSubtitle)
                         .font(.system(size: 14, weight: .medium, design: .rounded))
                         .foregroundStyle(isPremium ? .white.opacity(0.9) : Theme.secondaryInk)
                 }
                 
                 Spacer()
                 
-                Image(systemName: "chevron.right")
+                Image(systemName: isPremium ? "gearshape.fill" : "chevron.right")
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(isPremium ? .white.opacity(0.8) : Theme.secondaryInk.opacity(0.5))
             }
             .padding(20)
+        }
+    }
+    
+    private var subscriptionBannerTitle: String {
+        switch subscriptionManager.currentTier {
+        case .free:
+            return "升级到 Pro"
+        case .standard:
+            return "标准版会员"
+        case .pro:
+            return "专业版会员"
+        }
+    }
+    
+    private var subscriptionBannerSubtitle: String {
+        if isPremium, let expDate = subscriptionManager.expirationDate {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy年M月d日"
+            return "有效期至 \(formatter.string(from: expDate))"
+        }
+        
+        switch subscriptionManager.currentTier {
+        case .free:
+            return "解锁无限笔记本、AI 助手等高级功能"
+        case .standard:
+            return "云同步已启用，AI 配额 15次/月"
+        case .pro:
+            return "您已解锁所有高级功能"
         }
     }
 }

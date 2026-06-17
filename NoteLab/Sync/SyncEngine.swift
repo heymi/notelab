@@ -33,6 +33,20 @@ final class SyncEngine: ObservableObject {
 
     func syncNow() async {
         guard let ownerId, let modelContext else { return }
+        
+        // 检查云同步权限
+        let canSync = await MainActor.run { SubscriptionManager.shared.canUseSync() }
+        if !canSync {
+            await MainActor.run {
+                self.lastError = "云同步为付费功能，请升级订阅"
+                NotificationCenter.default.post(
+                    name: .showPaywall,
+                    object: PaywallTrigger.syncAttempt
+                )
+            }
+            return
+        }
+        
         if await MainActor.run(resultType: Bool.self, body: { self.isSyncing }) { return }
         if Task.isCancelled { return }
         await MainActor.run(resultType: Void.self, body: { self.isSyncing = true })

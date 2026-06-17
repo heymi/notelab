@@ -23,6 +23,8 @@ struct RootView: View {
     @StateObject private var syncEngine = SyncEngine()
     @StateObject private var avatarStore = AvatarStore()
     @State private var syncTask: Task<Void, Never>?
+    @State private var showPaywall = false
+    @State private var paywallTrigger: PaywallTrigger = .manual
     @EnvironmentObject private var auth: AuthManager
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
@@ -36,6 +38,28 @@ struct RootView: View {
             .environmentObject(planStore)
             .environmentObject(router)
             .environmentObject(avatarStore)
+            .sheet(isPresented: $showPaywall) {
+                PaywallView(trigger: paywallTrigger)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .showPaywall)) { notification in
+                if let trigger = notification.object as? PaywallTrigger {
+                    paywallTrigger = trigger
+                } else {
+                    paywallTrigger = .manual
+                }
+                showPaywall = true
+            }
+            .onChange(of: aiCenter.showPaywall) { _, newValue in
+                if newValue {
+                    if let feature = aiCenter.paywallTriggerFeature {
+                        paywallTrigger = feature.limit(for: SubscriptionManager.shared.currentTier).isAvailable
+                            ? .aiQuotaExceeded
+                            : .aiFeatureDisabled
+                    }
+                    showPaywall = true
+                    aiCenter.showPaywall = false
+                }
+            }
     }
 
     @ViewBuilder

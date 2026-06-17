@@ -20,10 +20,16 @@ final class AIProcessingCenter: ObservableObject {
     @Published var activeNoteId: UUID?
     @Published private(set) var lastTaskCount = 0
     @Published private(set) var lastAppliedNoteId: UUID?
+    
+    /// 配额不足时触发付费墙
+    @Published var showPaywall = false
+    @Published var paywallTriggerFeature: AIFeature?
 
     private var aiTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var dismissTask: Task<Void, Never>?
+    
+    private let subscriptionManager = SubscriptionManager.shared
 
     var statusTitle: String {
         if error != nil { return "AI 出错" }
@@ -56,6 +62,24 @@ final class AIProcessingCenter: ObservableObject {
         let index = min(stageIndex, AIProgressStage.allCases.count - 1)
         return AIProgressStage.allCases[index].title
     }
+    
+    // MARK: - Quota Check
+    
+    /// 检查是否可以使用指定的 AI 功能
+    private func checkQuota(for feature: AIFeature) -> Bool {
+        if subscriptionManager.canUseAIFeature(feature) {
+            return true
+        } else {
+            paywallTriggerFeature = feature
+            showPaywall = true
+            return false
+        }
+    }
+    
+    /// 记录 AI 功能使用
+    private func recordUsage(for feature: AIFeature) {
+        subscriptionManager.recordAIUsage(feature)
+    }
 
     func startAutoOrganize(
         noteId: UUID,
@@ -65,6 +89,9 @@ final class AIProcessingCenter: ObservableObject {
         aiClient: AIClient,
         store: NotebookStore
     ) {
+        // 检查配额
+        guard checkQuota(for: .organize) else { return }
+        
         resetForNewRun(noteId: noteId, mode: .autoOrganize)
         startProgressFlow()
         aiTask?.cancel()
@@ -97,6 +124,8 @@ final class AIProcessingCenter: ObservableObject {
                     markdown: highlighted,
                     store: store
                 )
+                // 记录用量
+                self.recordUsage(for: .organize)
                 completeProgress(success: true)
                 finish(success: true)
             } catch {
@@ -116,6 +145,9 @@ final class AIProcessingCenter: ObservableObject {
         aiClient: AIClient,
         store: NotebookStore
     ) {
+        // 检查配额
+        guard checkQuota(for: .extractTasks) else { return }
+        
         resetForNewRun(noteId: noteId, mode: .extractTodos)
         startProgressFlow()
         aiTask?.cancel()
@@ -126,6 +158,8 @@ final class AIProcessingCenter: ObservableObject {
                 if !tasks.isEmpty {
                     applyExtractedTasks(tasks, noteId: noteId, store: store)
                 }
+                // 记录用量
+                self.recordUsage(for: .extractTasks)
                 completeProgress(success: true)
                 finish(success: true)
             } catch {
@@ -148,6 +182,9 @@ final class AIProcessingCenter: ObservableObject {
         aiClient: AIClient,
         store: NotebookStore
     ) {
+        // 检查配额
+        guard checkQuota(for: .rewrite) else { return }
+        
         let mappedMode: AIMode
         switch mode {
         case .optimize:
@@ -184,6 +221,8 @@ final class AIProcessingCenter: ObservableObject {
                     markdown: highlighted,
                     store: store
                 )
+                // 记录用量
+                self.recordUsage(for: .rewrite)
                 completeProgress(success: true)
                 finish(success: true)
             } catch {
