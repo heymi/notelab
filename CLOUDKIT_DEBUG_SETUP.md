@@ -158,3 +158,44 @@ CloudKit container `iCloud.com.psg.NoteLab` 必须在 Apple Developer 后台：
 | `subsystem:NoteLab category:Persistence` | store 创建、reset、删除 |
 | `subsystem:NoteLab category:Sync` | syncNow push/pull 全流程 |
 | `subsystem:NoteLab category:Subscription` | 权益刷新、购买 |
+
+## 五、二次提交：工作区清理
+
+### 变更清单
+
+| 变更 | 文件 |
+|------|------|
+| 删除 | `SupabaseManager.swift` — 已完全迁移到 CloudKit 手动同步 |
+| 删除 | `supabase/schema.sql` — Supabase schema 已废弃 |
+| 删除 | `Package.resolved` — SwiftPM 由 Xcode 自动管理 |
+| 新增 | `NoteLab-iOS.entitlements` — iOS 专用 CloudKit + Sign in with Apple 配置 |
+| 新增 | `CloudKitSchema.swift` — CKRecord 类型定义、zone 管理、bridge 操作 |
+| 更新 | `project.pbxproj` — 添加新文件引用、移除 Supabase 引用 |
+| 更新 | `SyncEngine.swift` — CloudKit 同步引擎相关改动 |
+| 更新 | `AuthManager.swift` — 认证逻辑调整 |
+| 更新 | `LocalModels.swift` — SwiftData 模型调整 |
+| 更新 | 其余 10+ 个业务文件 — 订阅系统集成相关改动 |
+
+### App 现在有的 CloudKit 相关文件
+
+```
+NoteLab/
+├── NoteLab-iOS.entitlements          # CloudKit + Sign in with Apple (iOS)
+├── NoteLab.entitlements               # CloudKit + Sign in with Apple (macOS)
+├── Sync/
+│   ├── SyncEngine.swift               # 同步编排：push/pull/冲突解决
+│   └── CloudKitSchema.swift           # CKRecord 类型、zone、bridge
+├── Persistence/
+│   ├── PersistenceController.swift     # SwiftData 容器 (cloudKitDatabase: .none)
+│   └── LocalModels.swift              # @Model 实体定义
+└── Subscription/
+    ├── SubscriptionManager.swift       # 订阅管理 (canUseSync gating)
+    └── SubscriptionTypes.swift         # FeatureFlags.canSync
+```
+
+## 六、提交历史
+
+| commit | 内容 |
+|--------|------|
+| `1da4b00` | feat: 订阅系统 + CloudKit 初始化修复 |
+| `3020f37` | chore: 清理工作区 — 删除 Supabase、添加 entitlements/CloudKitSchema、更新 pbxproj |
