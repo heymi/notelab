@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import SwiftData
 #if canImport(UIKit)
 import WebKit
 
@@ -97,6 +98,10 @@ struct TipTapEditorView: UIViewRepresentable {
         
         /// Task for resolving attachment URLs - stored so we can cancel on new requests
         private var attachmentResolutionTask: Task<Void, Never>?
+        private lazy var fallbackModelContext: ModelContext? = {
+            guard let container = try? PersistenceController.makeContainer() else { return nil }
+            return ModelContext(container)
+        }()
 
         init(parent: TipTapEditorView) {
             self.parent = parent
@@ -220,14 +225,16 @@ struct TipTapEditorView: UIViewRepresentable {
                 for path in uniquePaths {
                     // Check for cancellation
                     if Task.isCancelled { return }
-                    
-                    // Try signed URL first
-                    if let url = try? await AttachmentStorage.shared.getSignedURL(storagePath: path) {
+
+                    let mappedPath = self.resolveStoragePath(for: path)
+
+                    // Try a CloudKit-backed local file URL first.
+                    if let url = try? await AttachmentStorage.shared.getSignedURL(storagePath: mappedPath) {
                         resolved[path] = url.absoluteString
                         continue
                     }
                     // Fallback to local cache
-                    if let dataURL = self.dataURLFromCache(storagePath: path) {
+                    if let dataURL = self.dataURLFromCache(storagePath: mappedPath) {
                         resolved[path] = dataURL
                     }
                 }
@@ -249,11 +256,55 @@ struct TipTapEditorView: UIViewRepresentable {
         private func dataURLFromCache(storagePath: String) -> String? {
             let fileName = (storagePath as NSString).lastPathComponent
             let base = (fileName as NSString).deletingPathExtension
-            guard let attachmentId = UUID(uuidString: base) else { return nil }
+            let attachmentId = UUID(uuidString: base) ?? extractUUID(from: storagePath)
+            guard let attachmentId else { return nil }
             guard let data = AttachmentCache.load(attachmentId: attachmentId, fileName: fileName) else { return nil }
             let mimeType = AttachmentStorage.mimeType(for: fileName)
             let base64 = data.base64EncodedString()
             return "data:\(mimeType);base64,\(base64)"
+        }
+
+        private func resolveStoragePath(for rawPath: String) -> String {
+            let path = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty else { return rawPath }
+            if isCanonicalStoragePath(path) {
+                return path
+            }
+            guard let attachmentId = extractUUID(from: path),
+                  let resolvedPath = localAttachmentStoragePath(for: attachmentId),
+                  isCanonicalStoragePath(resolvedPath) else {
+                return rawPath
+            }
+            return resolvedPath
+        }
+
+        private func localAttachmentStoragePath(for attachmentId: UUID) -> String? {
+            guard let context = fallbackModelContext else { return nil }
+            var fetch = FetchDescriptor<LocalAttachment>(
+                predicate: #Predicate<LocalAttachment> { $0.id == attachmentId }
+            )
+            fetch.fetchLimit = 1
+            return (try? context.fetch(fetch).first)?.storagePath
+        }
+
+        private func isCanonicalStoragePath(_ path: String) -> Bool {
+            guard !path.hasPrefix("attachment:") else { return false }
+            guard !path.hasPrefix("/") else { return false }
+            guard !path.contains("://") else { return false }
+            let comps = path.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
+            guard comps.count == 2 else { return false }
+            return UUID(uuidString: String(comps[0])) != nil
+        }
+
+        private func extractUUID(from text: String) -> UUID? {
+            let pattern = #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+            let nsText = text as NSString
+            let range = NSRange(location: 0, length: nsText.length)
+            let matches = regex.matches(in: text, range: range)
+            guard let match = matches.last else { return nil }
+            let raw = nsText.substring(with: match.range)
+            return UUID(uuidString: raw.lowercased())
         }
         
         private func escapeForJS(_ string: String) -> String {
@@ -771,12 +822,12 @@ struct TipTapEditorView: UIViewRepresentable {
                 return children + '\\n';
               case 'img':
                 // CRITICAL: Always prefer data-storage-path over src
-                // src may contain signed URLs or data URLs which should NOT be saved to markdown
+                // src may contain transient file URLs or data URLs which should NOT be saved to markdown
                 var storagePath = node.getAttribute('data-storage-path') || '';
                 var alt = node.getAttribute('alt') || 'Attachment';
                 
                 // Only use storagePath if available; otherwise skip this image
-                // We never want to persist signed URLs or data URLs to markdown
+                // We never want to persist transient file URLs or data URLs to markdown
                 if (storagePath) {
                   return '![' + alt + '](' + storagePath + ')\\n\\n';
                 }

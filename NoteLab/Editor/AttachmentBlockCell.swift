@@ -3,6 +3,7 @@ import Combine
 #if canImport(UIKit)
 import UIKit
 import PDFKit
+import SwiftData
 
 protocol AttachmentBlockCellDelegate: AnyObject {
     func attachmentBlockCellDidRequestDelete(_ cell: AttachmentBlockCell)
@@ -14,6 +15,10 @@ protocol AttachmentBlockCellDelegate: AnyObject {
 
 final class AttachmentBlockCell: UITableViewCell {
     static let reuseIdentifier = "AttachmentBlockCell"
+    private static let fallbackModelContext: ModelContext? = {
+        guard let container = try? PersistenceController.makeContainer() else { return nil }
+        return ModelContext(container)
+    }()
     
     weak var delegate: AttachmentBlockCellDelegate?
     
@@ -285,8 +290,15 @@ final class AttachmentBlockCell: UITableViewCell {
     }
     
     private func loadFromStorage(attachmentId: UUID, storagePath: String, fileName: String, type: AttachmentType) {
+        let resolved = resolveAttachmentReference(
+            attachmentId: attachmentId,
+            storagePath: storagePath,
+            fileName: fileName
+        )
+
         // Try local cache first (synchronous, using AttachmentCache directly)
-        if let cachedData = AttachmentCache.load(attachmentId: attachmentId, fileName: fileName) {
+        if let cachedData = AttachmentCache.load(attachmentId: resolved.attachmentId, fileName: resolved.fileName) {
+            print("[AttachmentBlockCell] source=cache attachmentId=\(resolved.attachmentId.uuidString.lowercased()) fileName=\(resolved.fileName) storagePath=\(resolved.storagePath)")
             self.attachmentData = cachedData
             displayThumbnail(data: cachedData, type: type)
             return
@@ -299,9 +311,9 @@ final class AttachmentBlockCell: UITableViewCell {
         loadTask = Task { [weak self] in
             do {
                 let data = try await AttachmentStorage.shared.loadAttachmentData(
-                    attachmentId: attachmentId,
-                    storagePath: storagePath,
-                    fileName: fileName
+                    attachmentId: resolved.attachmentId,
+                    storagePath: resolved.storagePath,
+                    fileName: resolved.fileName
                 )
                 
                 guard !Task.isCancelled else { return }
@@ -318,8 +330,75 @@ final class AttachmentBlockCell: UITableViewCell {
                     self?.thumbnailImageView.contentMode = .scaleAspectFit
                     self?.thumbnailImageView.tintColor = .systemOrange
                 }
+                print("[AttachmentBlockCell] load failed attachmentId=\(resolved.attachmentId.uuidString.lowercased()) storagePath=\(resolved.storagePath) error=\(error.localizedDescription)")
             }
         }
+    }
+
+    private func resolveAttachmentReference(
+        attachmentId: UUID,
+        storagePath: String,
+        fileName: String
+    ) -> (attachmentId: UUID, storagePath: String, fileName: String) {
+        let trimmedPath = storagePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isCanonicalStoragePath(trimmedPath) else {
+            return (attachmentId, trimmedPath, fileName)
+        }
+
+        guard let candidateId = attachmentTokenUUID(from: trimmedPath)
+            ?? extractUUID(from: trimmedPath)
+            ?? extractUUID(from: fileName) else {
+            print("[AttachmentBlockCell] legacy target unmapped attachmentId=\(attachmentId.uuidString.lowercased()) storagePath=\(trimmedPath)")
+            return (attachmentId, trimmedPath, fileName)
+        }
+
+        guard let local = localAttachment(for: candidateId),
+              isCanonicalStoragePath(local.storagePath) else {
+            print("[AttachmentBlockCell] missing local mapping attachmentId=\(candidateId.uuidString.lowercased()) storagePath=\(trimmedPath)")
+            return (candidateId, trimmedPath, fileName)
+        }
+
+        let resolvedFileName = local.fileName.isEmpty ? ((local.storagePath as NSString).lastPathComponent) : local.fileName
+        print("[AttachmentBlockCell] resolved legacy target attachmentId=\(candidateId.uuidString.lowercased()) from=\(trimmedPath) to=\(local.storagePath)")
+        return (candidateId, local.storagePath, resolvedFileName)
+    }
+
+    private func localAttachment(for attachmentId: UUID) -> LocalAttachment? {
+        guard let context = Self.fallbackModelContext else { return nil }
+        var fetch = FetchDescriptor<LocalAttachment>(
+            predicate: #Predicate<LocalAttachment> { $0.id == attachmentId }
+        )
+        fetch.fetchLimit = 1
+        return (try? context.fetch(fetch))?.first
+    }
+
+    private func isCanonicalStoragePath(_ path: String) -> Bool {
+        guard !path.hasPrefix("attachment:") else { return false }
+        guard !path.hasPrefix("/") else { return false }
+        guard !path.contains("://") else { return false }
+        let comps = path.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
+        guard comps.count == 2 else { return false }
+        guard UUID(uuidString: String(comps[0])) != nil else { return false }
+        let fileName = String(comps[1])
+        let base = (fileName as NSString).deletingPathExtension
+        return UUID(uuidString: base) != nil
+    }
+
+    private func attachmentTokenUUID(from path: String) -> UUID? {
+        guard path.lowercased().hasPrefix("attachment:") else { return nil }
+        let raw = String(path.dropFirst("attachment:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return UUID(uuidString: raw)
+    }
+
+    private func extractUUID(from text: String) -> UUID? {
+        let pattern = #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        let matches = regex.matches(in: text, range: range)
+        guard let match = matches.last else { return nil }
+        let raw = nsText.substring(with: match.range)
+        return UUID(uuidString: raw.lowercased())
     }
     
     private func displayThumbnail(data: Data, type: AttachmentType) {

@@ -118,7 +118,7 @@ final class SyncMetadata {
     @Attribute(.unique) var key: String
     var ownerId: UUID
     /// e.g. "notebooks" or "notes"
-    @Attribute(originalName: "entity") var entityName: String
+    var entityName: String
     /// last successfully pulled `updated_at` watermark (server time)
     var lastPulledAt: Date?
 
@@ -138,7 +138,7 @@ final class LocalAttachment {
     var ownerId: UUID
     var noteId: UUID
     
-    /// Storage path in Supabase Storage, e.g. "{user_id}/{attachment_id}.jpg"
+    /// Stable iCloud attachment path, e.g. "icloud/{user_id}/{attachment_id}.jpg"
     var storagePath: String
     var fileName: String
     var mimeType: String
@@ -185,4 +185,3 @@ final class LocalAttachment {
         self.isUploaded = isUploaded
     }
 }
-

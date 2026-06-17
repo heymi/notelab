@@ -46,6 +46,7 @@ struct PaywallView: View {
                 .padding(.vertical, 16)
             }
             .background(Theme.background)
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -55,6 +56,16 @@ struct PaywallView: View {
                     .foregroundStyle(Theme.secondaryInk)
                 }
             }
+            #else
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") {
+                        dismiss()
+                    }
+                    .foregroundStyle(Theme.secondaryInk)
+                }
+            }
+            #endif
         }
         .alert("购买失败", isPresented: $showError) {
             Button("确定", role: .cancel) {}

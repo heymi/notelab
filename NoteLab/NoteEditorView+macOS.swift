@@ -487,14 +487,6 @@ private enum AIMode {
     case tasks
 }
 
-// MARK: - Undo Snapshot
-
-private struct NoteUndoSnapshot {
-    let title: String?
-    let content: String
-    let createdAt: Date
-}
-
 // MARK: - Send Selection Sheet
 
 private struct SendSelectionSheetMac: View {

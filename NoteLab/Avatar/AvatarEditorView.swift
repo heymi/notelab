@@ -1,6 +1,5 @@
 import SwiftUI
 import Combine
-import Auth
 
 struct AvatarEditorView: View {
     @EnvironmentObject private var avatarStore: AvatarStore
@@ -55,7 +54,7 @@ struct AvatarEditorView: View {
     }
 
     private var previewCard: some View {
-        let emailFirst = auth.session?.user.email?.first
+        let emailFirst = auth.displayEmail?.first
         let initial = String((emailFirst ?? "U").uppercased())
         return VStack(spacing: 12) {
             AvatarImageView(options: AvatarOptions(avatarId: selectedAvatarId), initial: initial, size: 96)

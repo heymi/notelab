@@ -1,22 +1,26 @@
-import Foundation
+@preconcurrency import CloudKit
 import Combine
-import SwiftData
-import Supabase
+import Foundation
 import os
+import SwiftData
 
-final class SyncEngine: ObservableObject {
+protocol CloudSyncing: ObservableObject {
+    var isSyncing: Bool { get }
+    var lastSyncAt: Date? { get }
+    var lastError: String? { get }
+    func configure(ownerId: UUID, context: ModelContext)
+    func resetForSignOut()
+    func syncNow() async
+}
+
+final class SyncEngine: ObservableObject, CloudSyncing {
     @Published private(set) var isSyncing: Bool = false
     @Published private(set) var lastSyncAt: Date?
     @Published private(set) var lastError: String?
 
     private var ownerId: UUID?
     private var modelContext: ModelContext?
-    private let supabase: SupabaseClient
-    private let logger = Logger(subsystem: "NoteLab", category: "Sync")
-
-    init(supabase: SupabaseClient = SupabaseManager.shared) {
-        self.supabase = supabase
-    }
+    private let logger = Logger(subsystem: "NoteLab", category: "CloudKitSync")
 
     func configure(ownerId: UUID, context: ModelContext) {
         self.ownerId = ownerId
@@ -33,327 +37,426 @@ final class SyncEngine: ObservableObject {
 
     func syncNow() async {
         guard let ownerId, let modelContext else { return }
-        
-        // 检查云同步权限
+
         let canSync = await MainActor.run { SubscriptionManager.shared.canUseSync() }
         if !canSync {
             await MainActor.run {
                 self.lastError = "云同步为付费功能，请升级订阅"
-                NotificationCenter.default.post(
-                    name: .showPaywall,
-                    object: PaywallTrigger.syncAttempt
-                )
+                NotificationCenter.default.post(name: .showPaywall, object: PaywallTrigger.syncAttempt)
             }
             return
         }
-        
+
         if await MainActor.run(resultType: Bool.self, body: { self.isSyncing }) { return }
         if Task.isCancelled { return }
-        await MainActor.run(resultType: Void.self, body: { self.isSyncing = true })
+        await MainActor.run { self.isSyncing = true }
         defer { Task { @MainActor in self.isSyncing = false } }
 
         do {
-            let syncStart = DispatchTime.now()
-            let mark = { (label: StaticString, started: DispatchTime) in
-                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000_000
-                self.logger.debug("\(label, privacy: .public) in \(elapsed, privacy: .public)s")
+            let status = try await CloudKitSchema.container.accountStatus()
+            guard status == .available else {
+                await MainActor.run {
+                    self.lastError = "当前设备未开启 iCloud，同步已暂停"
+                }
+                return
             }
 
-            let pushStart = DispatchTime.now()
-            try await pushDirty()
-            mark("pushDirty", pushStart)
-            if Task.isCancelled { return }
-            await Task.yield()
-            let pushAttStart = DispatchTime.now()
-            try await pushDirtyAttachments()
-            mark("pushDirtyAttachments", pushAttStart)
-            if Task.isCancelled { return }
-            await Task.yield()
-            let pullStart = DispatchTime.now()
-            try await pullIncremental()
-            mark("pullIncremental", pullStart)
-            if Task.isCancelled { return }
-            await Task.yield()
-            let pullAttStart = DispatchTime.now()
-            try await pullAttachments()
-            mark("pullAttachments", pullAttStart)
-            if Task.isCancelled { return }
-            await Task.yield()
-            let saveStart = DispatchTime.now()
-            let didSave = try await MainActor.run(resultType: Bool.self, body: { () throws -> Bool in
+            let syncStart = DispatchTime.now()
+            try await CloudKitBridge.ensurePrivateZone()
+            try await pushDirtyNotebooks(ownerId: ownerId, context: modelContext)
+            try await pushDirtyNotes(ownerId: ownerId, context: modelContext)
+            try await pushDirtyAttachments(ownerId: ownerId, context: modelContext)
+            let nextChangeToken = try await pullRemoteChanges(ownerId: ownerId, context: modelContext)
+
+            let didSave = try await MainActor.run(resultType: Bool.self) {
                 if modelContext.hasChanges {
                     try modelContext.save()
                     return true
                 }
                 return false
-            })
-            mark("modelContext.save", saveStart)
+            }
+            if let nextChangeToken {
+                Self.storeChangeToken(nextChangeToken, ownerId: ownerId)
+            }
             print(didSave ? "SyncEngine: modelContext saved" : "SyncEngine: modelContext has no changes")
-            await Task.yield()
-            await MainActor.run(resultType: Void.self, body: {
+            await MainActor.run {
                 self.lastSyncAt = Date()
                 self.lastError = nil
-            })
-            mark("syncTotal", syncStart)
+            }
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - syncStart.uptimeNanoseconds) / 1_000_000_000
+            logger.debug("CloudKit sync finished in \(elapsed, privacy: .public)s")
         } catch {
-            await MainActor.run(resultType: Void.self, body: {
+            await MainActor.run {
                 self.lastError = error.localizedDescription
-            })
+            }
         }
     }
+}
 
-    // MARK: - Pull
+// MARK: - Push
 
-    private func pullIncremental() async throws {
-        try await pullNotebooks()
-        try await pullNotes()
-    }
-
-    private func pullNotebooks() async throws {
-        guard let ownerId, let modelContext else { return }
-        let watermark = try await MainActor.run(resultType: Date?.self, body: {
-            try getWatermark(entity: "notebooks", ownerId: ownerId, context: modelContext)
-        })
-
-        let rows: [RemoteNotebookRow]
-        if let watermark {
-            rows = try await supabase
-                .from("notebooks")
-                .select()
-                .gt("updated_at", value: iso(watermark))
-                .order("updated_at", ascending: true)
-                .execute()
-                .value
-        } else {
-            rows = try await supabase
-                .from("notebooks")
-                .select()
-                .order("updated_at", ascending: true)
-                .execute()
-                .value
-        }
-        guard !rows.isEmpty else { return }
-        print("SyncEngine: pullNotebooks count=\(rows.count) lastId=\(rows.last?.id.uuidString ?? "nil")")
-
-        try await MainActor.run(resultType: Void.self, body: {
-            for (index, row) in rows.enumerated() {
-                upsertLocalNotebook(from: row, ownerId: ownerId, context: modelContext)
-                if index % 10 == 0 {
-                    Task { await Task.yield() }
-                }
-            }
-
-            if let maxUpdatedAt = rows.compactMap({ $0.updatedAtDate }).max() {
-                try setWatermark(entity: "notebooks", ownerId: ownerId, context: modelContext, date: maxUpdatedAt)
-            }
-        })
-    }
-
-    private func pullNotes() async throws {
-        guard let ownerId, let modelContext else { return }
-        let watermark = try await MainActor.run(resultType: Date?.self, body: {
-            try getWatermark(entity: "notes", ownerId: ownerId, context: modelContext)
-        })
-
-        let rows: [RemoteNoteRow]
-        if let watermark {
-            rows = try await supabase
-                .from("notes")
-                .select()
-                .gt("updated_at", value: iso(watermark))
-                .order("updated_at", ascending: true)
-                .execute()
-                .value
-        } else {
-            rows = try await supabase
-                .from("notes")
-                .select()
-                .order("updated_at", ascending: true)
-                .execute()
-                .value
-        }
-        guard !rows.isEmpty else { return }
-        print("SyncEngine: pullNotes count=\(rows.count) lastId=\(rows.last?.id.uuidString ?? "nil")")
-
-        try await MainActor.run(resultType: Void.self, body: {
-            for (index, row) in rows.enumerated() {
-                upsertLocalNote(from: row, ownerId: ownerId, context: modelContext)
-                if index % 10 == 0 {
-                    Task { await Task.yield() }
-                }
-            }
-
-            if let maxUpdatedAt = rows.compactMap({ $0.updatedAtDate }).max() {
-                try setWatermark(entity: "notes", ownerId: ownerId, context: modelContext, date: maxUpdatedAt)
-            }
-        })
-    }
-
-    // MARK: - Push
-
-    private func pushDirty() async throws {
-        try await pushDirtyNotebooks()
-        try await pushDirtyNotes()
-    }
-
-    private func pushDirtyNotebooks() async throws {
-        guard let ownerId, let modelContext else { return }
-
-        let dirty = try await MainActor.run(resultType: [LocalNotebook].self, body: {
+private extension SyncEngine {
+    func pushDirtyNotebooks(ownerId: UUID, context: ModelContext) async throws {
+        let dirty = try await MainActor.run(resultType: [LocalNotebook].self) {
             let pred = #Predicate<LocalNotebook> { nb in
                 nb.ownerId == ownerId && nb.isDirty == true
             }
-            let fetch = FetchDescriptor<LocalNotebook>(predicate: pred)
-            return try modelContext.fetch(fetch)
-        })
+            return try context.fetch(FetchDescriptor<LocalNotebook>(predicate: pred))
+        }
 
         for local in dirty {
-            let payload = NotebookUpsert(
-                id: local.id,
-                userId: ownerId,
-                title: local.title,
-                color: local.colorRaw,
-                iconName: local.iconName,
-                deletedAt: local.deletedAt
-            )
-            let returned: [RemoteNotebookRow] = try await supabase
-                .from("notebooks")
-                .upsert(payload)
-                .select()
-                .execute()
-                .value
+            let snapshot = await MainActor.run { NotebookSnapshot(local) }
+            let recordID = CloudKitSchema.recordID(type: CloudKitSchema.RecordType.notebook, id: snapshot.id)
+            let record = try await CloudKitBridge.fetchRecord(recordID) ?? CKRecord(recordType: CloudKitSchema.RecordType.notebook, recordID: recordID)
+            snapshot.apply(to: record, ownerId: ownerId)
+            let saved = try await CloudKitBridge.save(record: record)
 
-            await MainActor.run(resultType: Void.self, body: {
-                if let row = returned.first {
-                    local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
-                } else {
-                    local.remoteUpdatedAt = Date()
-                }
+            await MainActor.run {
+                local.remoteUpdatedAt = saved[date: CloudKitSchema.Field.updatedAt] ?? Date()
                 local.isDirty = false
-            })
+            }
         }
     }
 
-    private func pushDirtyNotes() async throws {
-        guard let ownerId, let modelContext else { return }
-
-        let dirty = try await MainActor.run(resultType: [LocalNote].self, body: {
-            let pred = #Predicate<LocalNote> { n in
-                n.ownerId == ownerId && n.isDirty == true
+    func pushDirtyNotes(ownerId: UUID, context: ModelContext) async throws {
+        let dirty = try await MainActor.run(resultType: [LocalNote].self) {
+            let pred = #Predicate<LocalNote> { note in
+                note.ownerId == ownerId && note.isDirty == true
             }
-            let fetch = FetchDescriptor<LocalNote>(predicate: pred)
-            return try modelContext.fetch(fetch)
-        })
+            return try context.fetch(FetchDescriptor<LocalNote>(predicate: pred))
+        }
 
         for local in dirty {
-            guard let notebookId = local.notebook?.id else { continue }
+            guard let notebookId = await MainActor.run(resultType: UUID?.self, body: { local.notebook?.id }) else {
+                continue
+            }
+            let snapshot = await MainActor.run { NoteSnapshot(local: local, notebookId: notebookId) }
+            let recordID = CloudKitSchema.recordID(type: CloudKitSchema.RecordType.note, id: snapshot.id)
+            let existing = try await CloudKitBridge.fetchRecord(recordID)
 
-            // 1) Try optimistic-lock update: id + expected version.
-            let updatePayload = NoteUpdatePayload(
-                notebookId: notebookId,
-                title: local.title,
-                summary: local.summary,
-                content: local.content,
-                paragraphCount: local.paragraphCount,
-                bulletCount: local.bulletCount,
-                hasAdditionalContext: local.hasAdditionalContext,
-                deletedAt: local.deletedAt
-            )
-
-            let updated: [RemoteNoteRow] = try await supabase
-                .from("notes")
-                .update(updatePayload)
-                .eq("id", value: local.id.uuidString)
-                .eq("version", value: local.version)
-                .select()
-                .execute()
-                .value
-
-            if let row = updated.first {
-                await MainActor.run(resultType: Void.self, body: {
-                    local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
-                    local.version = row.version ?? local.version
-                    local.isDirty = false
-                })
+            if let existing, existing[int: CloudKitSchema.Field.version] > snapshot.version {
+                try await resolveConflict(local: local, serverRecord: existing, snapshot: snapshot, context: context)
                 continue
             }
 
-            // 2) If nothing updated, distinguish between (a) not exists (create) vs (b) conflict (duplicate).
-            let remoteRows: [RemoteNoteRow] = try await supabase
-                .from("notes")
-                .select()
-                .eq("id", value: local.id.uuidString)
-                .limit(1)
-                .execute()
-                .value
+            let record = existing ?? CKRecord(recordType: CloudKitSchema.RecordType.note, recordID: recordID)
+            snapshot.apply(to: record, ownerId: ownerId, nextVersion: existing == nil ? snapshot.version : snapshot.version + 1)
+            let saved = try await CloudKitBridge.save(record: record)
 
-            if remoteRows.isEmpty {
-                // Not on server yet → create via upsert.
-                let payload = NoteUpsert(
-                    id: local.id,
-                    userId: ownerId,
-                    notebookId: notebookId,
-                    title: local.title,
-                    summary: local.summary,
-                    content: local.content,
-                    paragraphCount: local.paragraphCount,
-                    bulletCount: local.bulletCount,
-                    hasAdditionalContext: local.hasAdditionalContext,
-                    deletedAt: local.deletedAt
-                )
-
-                let inserted: [RemoteNoteRow] = try await supabase
-                    .from("notes")
-                    .upsert(payload)
-                    .select()
-                    .execute()
-                    .value
-
-                await MainActor.run(resultType: Void.self, body: {
-                    if let row = inserted.first {
-                        local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
-                        local.version = row.version ?? local.version
-                    } else {
-                        local.remoteUpdatedAt = Date()
-                    }
-                    local.isDirty = false
-                })
-                continue
-            }
-
-            // Conflict: server has a different version.
-            guard let remote = remoteRows.first else { continue }
-
-            // Snapshot local unsynced changes for conflict copy.
-            let snapshot = NoteSnapshot(
-                title: local.title,
-                summary: local.summary,
-                content: local.content,
-                paragraphCount: local.paragraphCount,
-                bulletCount: local.bulletCount,
-                hasAdditionalContext: local.hasAdditionalContext,
-                deletedAt: local.deletedAt
-            )
-
-            // Apply server version to original note (accept remote).
-            await MainActor.run(resultType: Void.self, body: {
-                local.title = remote.title
-                local.summary = remote.summary
-                local.content = remote.content
-                local.paragraphCount = remote.paragraphCount
-                local.bulletCount = remote.bulletCount
-                local.hasAdditionalContext = remote.hasAdditionalContext
-                local.deletedAt = remote.deletedAtDate
-                local.remoteUpdatedAt = remote.updatedAtDate ?? local.remoteUpdatedAt
-                local.version = remote.version ?? local.version
+            await MainActor.run {
+                local.remoteUpdatedAt = saved[date: CloudKitSchema.Field.updatedAt] ?? Date()
+                local.version = saved[int: CloudKitSchema.Field.version]
                 local.isDirty = false
-            })
+            }
+        }
+    }
 
-            // Create a "conflict copy" note with the local snapshot.
+    func pushDirtyAttachments(ownerId: UUID, context: ModelContext) async throws {
+        try await AttachmentStorage.shared.uploadPendingAttachments(context: context, ownerId: ownerId)
+
+        let dirtyUploaded = try await MainActor.run(resultType: [LocalAttachment].self) {
+            let pred = #Predicate<LocalAttachment> { att in
+                att.ownerId == ownerId && att.isDirty == true && att.isUploaded == true
+            }
+            return try context.fetch(FetchDescriptor<LocalAttachment>(predicate: pred))
+        }
+
+        for local in dirtyUploaded {
+            let snapshot = await MainActor.run { AttachmentSnapshot(local) }
+            let recordID = CloudKitSchema.recordID(type: CloudKitSchema.RecordType.attachment, id: snapshot.id)
+            let record = try await CloudKitBridge.fetchRecord(recordID) ?? CKRecord(recordType: CloudKitSchema.RecordType.attachment, recordID: recordID)
+            snapshot.apply(to: record, ownerId: ownerId)
+            let saved = try await CloudKitBridge.save(record: record)
+
+            await MainActor.run {
+                local.remoteUpdatedAt = saved[date: CloudKitSchema.Field.updatedAt] ?? Date()
+                local.isDirty = false
+            }
+        }
+    }
+}
+
+// MARK: - Pull
+
+private extension SyncEngine {
+    func pullRemoteChanges(ownerId: UUID, context: ModelContext) async throws -> CKServerChangeToken? {
+        let previousToken = Self.loadChangeToken(ownerId: ownerId)
+        let changes = try await CloudKitBridge.zoneChanges(since: previousToken)
+        guard changes.changedRecords.isEmpty == false || changes.deletedRecordIDs.isEmpty == false else {
+            return changes.serverChangeToken
+        }
+
+        let notebooks = changes.changedRecords.filter { $0.recordType == CloudKitSchema.RecordType.notebook }
+        let notes = changes.changedRecords.filter { $0.recordType == CloudKitSchema.RecordType.note }
+        let attachments = changes.changedRecords.filter { $0.recordType == CloudKitSchema.RecordType.attachment }
+
+        let skippedAttachments = try await MainActor.run(resultType: Bool.self) {
+            for record in notebooks {
+                upsertLocalNotebook(from: record, ownerId: ownerId, context: context)
+            }
+            for record in notes {
+                upsertLocalNote(from: record, ownerId: ownerId, context: context)
+            }
+
+            var skipped = false
+            for record in attachments {
+                if !upsertLocalAttachment(from: record, ownerId: ownerId, context: context) {
+                    skipped = true
+                }
+            }
+
+            applyHardDeletedRecords(changes.deletedRecordIDs, ownerId: ownerId, context: context)
+            return skipped
+        }
+
+        if skippedAttachments {
+            logger.debug("pullRemoteChanges skipped attachment rows due to missing parent note; change token not advanced")
+            return nil
+        }
+
+        return changes.serverChangeToken
+    }
+
+    func pullNotebooks(ownerId: UUID, context: ModelContext) async throws {
+        let watermark = try await MainActor.run { try getWatermark(entity: "notebooks", ownerId: ownerId, context: context) }
+        let records = try await CloudKitBridge.records(type: CloudKitSchema.RecordType.notebook, updatedAfter: watermark)
+        guard !records.isEmpty else { return }
+
+        try await MainActor.run {
+            for record in records {
+                upsertLocalNotebook(from: record, ownerId: ownerId, context: context)
+            }
+            if let maxUpdatedAt = records.compactMap({ $0[date: CloudKitSchema.Field.updatedAt] }).max() {
+                try setWatermark(entity: "notebooks", ownerId: ownerId, context: context, date: maxUpdatedAt)
+            }
+        }
+    }
+
+    func pullNotes(ownerId: UUID, context: ModelContext) async throws {
+        let watermark = try await MainActor.run { try getWatermark(entity: "notes", ownerId: ownerId, context: context) }
+        let records = try await CloudKitBridge.records(type: CloudKitSchema.RecordType.note, updatedAfter: watermark)
+        guard !records.isEmpty else { return }
+
+        try await MainActor.run {
+            for record in records {
+                upsertLocalNote(from: record, ownerId: ownerId, context: context)
+            }
+            if let maxUpdatedAt = records.compactMap({ $0[date: CloudKitSchema.Field.updatedAt] }).max() {
+                try setWatermark(entity: "notes", ownerId: ownerId, context: context, date: maxUpdatedAt)
+            }
+        }
+    }
+
+    func pullAttachments(ownerId: UUID, context: ModelContext) async throws {
+        let watermark = try await MainActor.run { try getWatermark(entity: "attachments", ownerId: ownerId, context: context) }
+        let records = try await CloudKitBridge.records(type: CloudKitSchema.RecordType.attachment, updatedAfter: watermark)
+        guard !records.isEmpty else { return }
+
+        let skipped = try await MainActor.run(resultType: Bool.self) {
+            var skipped = false
+            for record in records {
+                if !upsertLocalAttachment(from: record, ownerId: ownerId, context: context) {
+                    skipped = true
+                }
+            }
+            if !skipped, let maxUpdatedAt = records.compactMap({ $0[date: CloudKitSchema.Field.updatedAt] }).max() {
+                try setWatermark(entity: "attachments", ownerId: ownerId, context: context, date: maxUpdatedAt)
+            }
+            return skipped
+        }
+
+        if skipped {
+            logger.debug("pullAttachments skipped rows due to missing parent note; watermark not advanced")
+        }
+    }
+}
+
+// MARK: - Local upserts
+
+private extension SyncEngine {
+    func applyHardDeletedRecords(_ recordIDs: [CKRecord.ID], ownerId: UUID, context: ModelContext) {
+        let now = Date()
+        for recordID in recordIDs {
+            if let id = Self.localId(from: recordID.recordName, type: CloudKitSchema.RecordType.notebook) {
+                let pred = #Predicate<LocalNotebook> { nb in
+                    nb.ownerId == ownerId && nb.id == id
+                }
+                if let notebook = try? context.fetch(FetchDescriptor<LocalNotebook>(predicate: pred)).first, notebook.isDirty == false {
+                    notebook.deletedAt = notebook.deletedAt ?? now
+                }
+            } else if let id = Self.localId(from: recordID.recordName, type: CloudKitSchema.RecordType.note) {
+                let pred = #Predicate<LocalNote> { note in
+                    note.ownerId == ownerId && note.id == id
+                }
+                if let note = try? context.fetch(FetchDescriptor<LocalNote>(predicate: pred)).first, note.isDirty == false {
+                    note.deletedAt = note.deletedAt ?? now
+                }
+            } else if let id = Self.localId(from: recordID.recordName, type: CloudKitSchema.RecordType.attachment) {
+                let pred = #Predicate<LocalAttachment> { att in
+                    att.ownerId == ownerId && att.id == id
+                }
+                if let attachment = try? context.fetch(FetchDescriptor<LocalAttachment>(predicate: pred)).first, attachment.isDirty == false {
+                    attachment.deletedAt = attachment.deletedAt ?? now
+                }
+            }
+        }
+    }
+
+    func upsertLocalNotebook(from record: CKRecord, ownerId: UUID, context: ModelContext) {
+        guard let id = UUID(uuidString: record[string: CloudKitSchema.Field.id] ?? "") else { return }
+        let pred = #Predicate<LocalNotebook> { nb in
+            nb.ownerId == ownerId && nb.id == id
+        }
+
+        do {
+            let fetch = FetchDescriptor<LocalNotebook>(predicate: pred)
+            if let existing = try context.fetch(fetch).first {
+                if existing.isDirty { return }
+                existing.title = record[string: CloudKitSchema.Field.title] ?? "未命名笔记本"
+                existing.colorRaw = record[string: CloudKitSchema.Field.color] ?? NotebookColor.lime.rawValue
+                existing.iconName = record[string: CloudKitSchema.Field.iconName] ?? "book"
+                existing.isPinned = record[bool: CloudKitSchema.Field.isPinned]
+                existing.notebookDescription = record[string: CloudKitSchema.Field.notebookDescription] ?? ""
+                existing.deletedAt = record[date: CloudKitSchema.Field.deletedAt]
+                existing.remoteUpdatedAt = record[date: CloudKitSchema.Field.updatedAt] ?? existing.remoteUpdatedAt
+                return
+            }
+
+            let createdAt = record[date: CloudKitSchema.Field.createdAt] ?? Date()
+            let updatedAt = record[date: CloudKitSchema.Field.updatedAt] ?? createdAt
+            context.insert(LocalNotebook(
+                id: id,
+                ownerId: ownerId,
+                title: record[string: CloudKitSchema.Field.title] ?? "未命名笔记本",
+                colorRaw: record[string: CloudKitSchema.Field.color] ?? NotebookColor.lime.rawValue,
+                iconName: record[string: CloudKitSchema.Field.iconName] ?? "book",
+                createdAt: createdAt,
+                remoteUpdatedAt: updatedAt,
+                deletedAt: record[date: CloudKitSchema.Field.deletedAt],
+                isDirty: false,
+                isPinned: record[bool: CloudKitSchema.Field.isPinned],
+                notebookDescription: record[string: CloudKitSchema.Field.notebookDescription] ?? "",
+                notes: []
+            ))
+        } catch {
+            print("SyncEngine: failed to upsert notebook \(id): \(error)")
+        }
+    }
+
+    func upsertLocalNote(from record: CKRecord, ownerId: UUID, context: ModelContext) {
+        guard let id = UUID(uuidString: record[string: CloudKitSchema.Field.id] ?? ""),
+              let notebookId = UUID(uuidString: record[string: CloudKitSchema.Field.notebookId] ?? "") else {
+            return
+        }
+
+        do {
+            let nbPred = #Predicate<LocalNotebook> { nb in
+                nb.ownerId == ownerId && nb.id == notebookId
+            }
+            let notebook = try context.fetch(FetchDescriptor<LocalNotebook>(predicate: nbPred)).first
+
+            let notePred = #Predicate<LocalNote> { note in
+                note.ownerId == ownerId && note.id == id
+            }
+            if let existing = try context.fetch(FetchDescriptor<LocalNote>(predicate: notePred)).first {
+                if existing.isDirty { return }
+                apply(record: record, to: existing, notebook: notebook)
+                return
+            }
+
+            let createdAt = record[date: CloudKitSchema.Field.createdAt] ?? Date()
+            let updatedAt = record[date: CloudKitSchema.Field.updatedAt] ?? createdAt
+            context.insert(LocalNote(
+                id: id,
+                ownerId: ownerId,
+                title: record[string: CloudKitSchema.Field.title] ?? "未命名笔记",
+                summary: record[string: CloudKitSchema.Field.summary] ?? "",
+                paragraphCount: record[int: CloudKitSchema.Field.paragraphCount],
+                bulletCount: record[int: CloudKitSchema.Field.bulletCount],
+                hasAdditionalContext: record[bool: CloudKitSchema.Field.hasAdditionalContext],
+                createdAt: createdAt,
+                remoteUpdatedAt: updatedAt,
+                version: max(record[int: CloudKitSchema.Field.version], 1),
+                deletedAt: record[date: CloudKitSchema.Field.deletedAt],
+                contentRTF: record[data: CloudKitSchema.Field.contentRTF],
+                content: record[string: CloudKitSchema.Field.content] ?? "",
+                isPinned: record[bool: CloudKitSchema.Field.isPinned],
+                isDirty: false,
+                conflictParentId: nil,
+                notebook: notebook
+            ))
+        } catch {
+            print("SyncEngine: failed to upsert note \(id): \(error)")
+        }
+    }
+
+    func upsertLocalAttachment(from record: CKRecord, ownerId: UUID, context: ModelContext) -> Bool {
+        guard let id = UUID(uuidString: record[string: CloudKitSchema.Field.id] ?? ""),
+              let noteId = UUID(uuidString: record[string: CloudKitSchema.Field.noteId] ?? "") else {
+            return false
+        }
+
+        let notePred = #Predicate<LocalNote> { note in
+            note.ownerId == ownerId && note.id == noteId
+        }
+        guard (try? context.fetch(FetchDescriptor<LocalNote>(predicate: notePred)).first) != nil else {
+            return false
+        }
+
+        let pred = #Predicate<LocalAttachment> { att in
+            att.ownerId == ownerId && att.id == id
+        }
+        do {
+            if let existing = try context.fetch(FetchDescriptor<LocalAttachment>(predicate: pred)).first {
+                if existing.isDirty { return false }
+                existing.noteId = noteId
+                existing.storagePath = record[string: CloudKitSchema.Field.storagePath] ?? existing.storagePath
+                existing.fileName = record[string: CloudKitSchema.Field.fileName] ?? existing.fileName
+                existing.mimeType = record[string: CloudKitSchema.Field.mimeType] ?? existing.mimeType
+                existing.fileSize = record[int64: CloudKitSchema.Field.fileSize]
+                existing.deletedAt = record[date: CloudKitSchema.Field.deletedAt]
+                existing.remoteUpdatedAt = record[date: CloudKitSchema.Field.updatedAt] ?? existing.remoteUpdatedAt
+                existing.isUploaded = true
+                return true
+            }
+
+            let fileName = record[string: CloudKitSchema.Field.fileName] ?? "attachment"
+            let createdAt = record[date: CloudKitSchema.Field.createdAt] ?? Date()
+            let updatedAt = record[date: CloudKitSchema.Field.updatedAt] ?? createdAt
+            context.insert(LocalAttachment(
+                id: id,
+                ownerId: ownerId,
+                noteId: noteId,
+                storagePath: record[string: CloudKitSchema.Field.storagePath] ?? CloudKitSchema.storagePath(ownerId: ownerId, attachmentId: id, fileName: fileName),
+                fileName: fileName,
+                mimeType: record[string: CloudKitSchema.Field.mimeType] ?? "application/octet-stream",
+                fileSize: record[int64: CloudKitSchema.Field.fileSize],
+                createdAt: createdAt,
+                remoteUpdatedAt: updatedAt,
+                deletedAt: record[date: CloudKitSchema.Field.deletedAt],
+                localCachePath: nil,
+                isDirty: false,
+                isUploaded: true
+            ))
+            return true
+        } catch {
+            return false
+        }
+    }
+}
+
+// MARK: - Conflict handling
+
+private extension SyncEngine {
+    func resolveConflict(local: LocalNote, serverRecord: CKRecord, snapshot: NoteSnapshot, context: ModelContext) async throws {
+        try await MainActor.run {
+            apply(record: serverRecord, to: local, notebook: local.notebook)
+            local.isDirty = false
+
             let conflictNote = LocalNote(
                 id: UUID(),
-                ownerId: ownerId,
-                title: snapshot.title + " (冲突副本)",
+                ownerId: snapshot.ownerId,
+                title: snapshot.title + " (冲突副本 \(Date().formatted(date: .abbreviated, time: .shortened)))",
                 summary: snapshot.summary,
                 paragraphCount: snapshot.paragraphCount,
                 bulletCount: snapshot.bulletCount,
@@ -362,566 +465,204 @@ final class SyncEngine: ObservableObject {
                 remoteUpdatedAt: Date(),
                 version: 1,
                 deletedAt: snapshot.deletedAt,
-                contentRTF: nil,
+                contentRTF: snapshot.contentRTF,
                 content: snapshot.content,
+                isPinned: snapshot.isPinned,
                 isDirty: true,
-                conflictParentId: local.id,
+                conflictParentId: snapshot.id,
                 notebook: local.notebook
             )
-            await MainActor.run(resultType: Void.self, body: {
-                modelContext.insert(conflictNote)
-            })
-            // Note: SwiftData automatically manages inverse relationships,
-            // no need to manually append to notebook.notes
+            context.insert(conflictNote)
         }
     }
 
-    // MARK: - Attachment Sync
-    
-    private func pushDirtyAttachments() async throws {
-        guard let ownerId, let modelContext else { return }
-        
-        // Upload pending attachments to Supabase Storage
-        try await AttachmentStorage.shared.uploadPendingAttachments(context: modelContext, ownerId: ownerId)
-        
-        // Now push metadata to attachments table
-        let dirty = try await MainActor.run(resultType: [LocalAttachment].self, body: {
-            let pred = #Predicate<LocalAttachment> { att in
-                att.ownerId == ownerId && att.isDirty == true && att.isUploaded == true
-            }
-            let fetch = FetchDescriptor<LocalAttachment>(predicate: pred)
-            return try modelContext.fetch(fetch)
-        })
-        
-        for local in dirty {
-            let payload = AttachmentUpsert(
-                id: local.id,
-                userId: ownerId,
-                noteId: local.noteId,
-                storagePath: local.storagePath,
-                fileName: local.fileName,
-                mimeType: local.mimeType,
-                fileSize: local.fileSize,
-                deletedAt: local.deletedAt
-            )
-            
-            let returned: [RemoteAttachmentRow] = try await supabase
-                .from("attachments")
-                .upsert(payload)
-                .select()
-                .execute()
-                .value
-            
-            await MainActor.run(resultType: Void.self, body: {
-                if let row = returned.first {
-                    local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
-                } else {
-                    local.remoteUpdatedAt = Date()
-                }
-                local.isDirty = false
-            })
-        }
+    func apply(record: CKRecord, to note: LocalNote, notebook: LocalNotebook?) {
+        note.title = record[string: CloudKitSchema.Field.title] ?? "未命名笔记"
+        note.summary = record[string: CloudKitSchema.Field.summary] ?? ""
+        note.content = record[string: CloudKitSchema.Field.content] ?? ""
+        note.contentRTF = record[data: CloudKitSchema.Field.contentRTF]
+        note.paragraphCount = record[int: CloudKitSchema.Field.paragraphCount]
+        note.bulletCount = record[int: CloudKitSchema.Field.bulletCount]
+        note.hasAdditionalContext = record[bool: CloudKitSchema.Field.hasAdditionalContext]
+        note.isPinned = record[bool: CloudKitSchema.Field.isPinned]
+        note.deletedAt = record[date: CloudKitSchema.Field.deletedAt]
+        note.remoteUpdatedAt = record[date: CloudKitSchema.Field.updatedAt] ?? note.remoteUpdatedAt
+        note.version = max(record[int: CloudKitSchema.Field.version], 1)
+        note.notebook = notebook
     }
-    
-    private func pullAttachments() async throws {
-        guard let ownerId, let modelContext else { return }
-        let watermark = try await MainActor.run(resultType: Date?.self, body: {
-            try getWatermark(entity: "attachments", ownerId: ownerId, context: modelContext)
-        })
-        
-        let rows: [RemoteAttachmentRow]
-        if let watermark {
-            rows = try await supabase
-                .from("attachments")
-                .select()
-                .gt("updated_at", value: iso(watermark))
-                .order("updated_at", ascending: true)
-                .execute()
-                .value
-        } else {
-            rows = try await supabase
-                .from("attachments")
-                .select()
-                .order("updated_at", ascending: true)
-                .execute()
-                .value
-        }
-        guard !rows.isEmpty else { return }
-        print("SyncEngine: pullAttachments count=\(rows.count) lastId=\(rows.last?.id.uuidString ?? "nil")")
-        
-        try await MainActor.run(resultType: Void.self, body: {
-            for row in rows {
-                upsertLocalAttachment(from: row, ownerId: ownerId, context: modelContext)
-            }
+}
 
-            if let maxUpdatedAt = rows.compactMap({ $0.updatedAtDate }).max() {
-                try setWatermark(entity: "attachments", ownerId: ownerId, context: modelContext, date: maxUpdatedAt)
-            }
-        })
+// MARK: - Watermarks
+
+private extension SyncEngine {
+    static func changeTokenKey(ownerId: UUID) -> String {
+        "NoteLab.CloudKit.\(CloudKitSchema.zoneName).changeToken.\(ownerId.uuidString)"
     }
-    
-    private func upsertLocalAttachment(from row: RemoteAttachmentRow, ownerId: UUID, context: ModelContext) {
-        guard row.isValid else {
-            print("SyncEngine: skipping attachment with invalid id")
+
+    static func loadChangeToken(ownerId: UUID) -> CKServerChangeToken? {
+        guard let data = UserDefaults.standard.data(forKey: changeTokenKey(ownerId: ownerId)) else {
+            return nil
+        }
+        return try? NSKeyedUnarchiver.unarchivedObject(ofClass: CKServerChangeToken.self, from: data)
+    }
+
+    static func storeChangeToken(_ token: CKServerChangeToken, ownerId: UUID) {
+        guard let data = try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true) else {
             return
         }
-        let id = row.id
-        let pred = #Predicate<LocalAttachment> { att in
-            att.ownerId == ownerId && att.id == id
-        }
-        
-        do {
-            let fetch = FetchDescriptor<LocalAttachment>(predicate: pred)
-            if let existing = try context.fetch(fetch).first {
-                if existing.isDirty { return } // avoid overwriting local unsynced edits
-                existing.storagePath = row.storagePath
-                existing.fileName = row.fileName
-                existing.mimeType = row.mimeType
-                existing.fileSize = row.fileSize
-                existing.deletedAt = row.deletedAtDate
-                if let updatedAt = row.updatedAtDate { existing.remoteUpdatedAt = updatedAt }
-                return
-            }
-            
-            let createdAt = row.createdAtDate ?? Date()
-            let updatedAt = row.updatedAtDate ?? createdAt
-            let local = LocalAttachment(
-                id: id,
-                ownerId: ownerId,
-                noteId: row.noteId,
-                storagePath: row.storagePath,
-                fileName: row.fileName,
-                mimeType: row.mimeType,
-                fileSize: row.fileSize,
-                createdAt: createdAt,
-                remoteUpdatedAt: updatedAt,
-                deletedAt: row.deletedAtDate,
-                localCachePath: nil,
-                isDirty: false,
-                isUploaded: true
-            )
-            context.insert(local)
-        } catch {
-            // ignore
-        }
+        UserDefaults.standard.set(data, forKey: changeTokenKey(ownerId: ownerId))
     }
 
-    // MARK: - Local upsert helpers
-
-    private func upsertLocalNotebook(from row: RemoteNotebookRow, ownerId: UUID, context: ModelContext) {
-        guard row.isValid else {
-            print("SyncEngine: skipping notebook with invalid id")
-            return
-        }
-        let id = row.id
-        let pred = #Predicate<LocalNotebook> { nb in
-            nb.ownerId == ownerId && nb.id == id
-        }
-
-        do {
-            let fetch = FetchDescriptor<LocalNotebook>(predicate: pred)
-            if let existing = try context.fetch(fetch).first {
-                if existing.isDirty { return } // avoid overwriting local unsynced edits
-                
-                // Prevent "resurrection" of locally deleted items:
-                // If local is deleted but remote is not, preserve local deletion ONLY if local is dirty.
-                if existing.deletedAt != nil && row.deletedAtDate == nil {
-                    if existing.isDirty {
-                        return
-                    }
-                    existing.deletedAt = nil
-                }
-                
-                existing.title = row.title
-                existing.colorRaw = row.color
-                existing.iconName = row.iconName
-                existing.deletedAt = row.deletedAtDate
-                if let updatedAt = row.updatedAtDate { existing.remoteUpdatedAt = updatedAt }
-                return
-            }
-
-            let createdAt = row.createdAtDate ?? Date()
-            let updatedAt = row.updatedAtDate ?? createdAt
-            let local = LocalNotebook(
-                id: id,
-                ownerId: ownerId,
-                title: row.title,
-                colorRaw: row.color,
-                iconName: row.iconName,
-                createdAt: createdAt,
-                remoteUpdatedAt: updatedAt,
-                deletedAt: row.deletedAtDate,
-                isDirty: false,
-                notes: []
-            )
-            context.insert(local)
-        } catch {
-            // ignore
-        }
+    static func localId(from recordName: String, type: String) -> UUID? {
+        let prefix = "\(type)-"
+        guard recordName.hasPrefix(prefix) else { return nil }
+        return UUID(uuidString: String(recordName.dropFirst(prefix.count)))
     }
 
-    private func upsertLocalNote(from row: RemoteNoteRow, ownerId: UUID, context: ModelContext) {
-        guard row.isValid else {
-            print("SyncEngine: skipping note with invalid id or notebookId")
-            return
-        }
-        let id = row.id
-        let notebookId = row.notebookId
-
-        do {
-            // Ensure notebook exists (notes may arrive before notebooks on fresh sync).
-            let nbPred = #Predicate<LocalNotebook> { nb in
-                nb.ownerId == ownerId && nb.id == notebookId
-            }
-            let nbFetch = FetchDescriptor<LocalNotebook>(predicate: nbPred)
-            let notebook = try context.fetch(nbFetch).first
-
-            let pred = #Predicate<LocalNote> { n in
-                n.ownerId == ownerId && n.id == id
-            }
-            let fetch = FetchDescriptor<LocalNote>(predicate: pred)
-
-            if let existing = try context.fetch(fetch).first {
-                if existing.isDirty { return } // avoid overwriting local unsynced edits
-                
-                // Prevent "resurrection" of locally deleted items:
-                // If local is deleted but remote is not, preserve local deletion ONLY if local is dirty.
-                if existing.deletedAt != nil && row.deletedAtDate == nil {
-                    if existing.isDirty {
-                        return
-                    }
-                    existing.deletedAt = nil
-                }
-                
-                existing.title = row.title
-                existing.summary = row.summary
-                existing.content = row.content
-                existing.paragraphCount = row.paragraphCount
-                existing.bulletCount = row.bulletCount
-                existing.hasAdditionalContext = row.hasAdditionalContext
-                existing.deletedAt = row.deletedAtDate
-                if let updatedAt = row.updatedAtDate { existing.remoteUpdatedAt = updatedAt }
-                if let version = row.version { existing.version = version }
-                existing.notebook = notebook
-                return
-            }
-
-            let createdAt = row.createdAtDate ?? Date()
-            let updatedAt = row.updatedAtDate ?? createdAt
-            let local = LocalNote(
-                id: id,
-                ownerId: ownerId,
-                title: row.title,
-                summary: row.summary,
-                paragraphCount: row.paragraphCount,
-                bulletCount: row.bulletCount,
-                hasAdditionalContext: row.hasAdditionalContext,
-                createdAt: createdAt,
-                remoteUpdatedAt: updatedAt,
-                version: row.version ?? 1,
-                deletedAt: row.deletedAtDate,
-                contentRTF: nil,
-                content: row.content,
-                isDirty: false,
-                conflictParentId: nil,
-                notebook: notebook
-            )
-            context.insert(local)
-            // Note: SwiftData automatically manages inverse relationships,
-            // no need to manually append to notebook.notes
-        } catch {
-            // ignore
-        }
-    }
-
-    // MARK: - Watermark
-
-    private func getWatermark(entity: String, ownerId: UUID, context: ModelContext) throws -> Date? {
+    func getWatermark(entity: String, ownerId: UUID, context: ModelContext) throws -> Date? {
         let key = "\(ownerId.uuidString):\(entity)"
         let pred = #Predicate<SyncMetadata> { meta in
             meta.key == key
         }
-        let fetch = FetchDescriptor<SyncMetadata>(predicate: pred)
-        return try context.fetch(fetch).first?.lastPulledAt
+        return try context.fetch(FetchDescriptor<SyncMetadata>(predicate: pred)).first?.lastPulledAt
     }
 
-    private func setWatermark(entity: String, ownerId: UUID, context: ModelContext, date: Date) throws {
+    func setWatermark(entity: String, ownerId: UUID, context: ModelContext, date: Date) throws {
         let key = "\(ownerId.uuidString):\(entity)"
         let pred = #Predicate<SyncMetadata> { meta in
             meta.key == key
         }
-        let fetch = FetchDescriptor<SyncMetadata>(predicate: pred)
-        if let existing = try context.fetch(fetch).first {
+        if let existing = try context.fetch(FetchDescriptor<SyncMetadata>(predicate: pred)).first {
             existing.lastPulledAt = date
         } else {
             context.insert(SyncMetadata(ownerId: ownerId, entity: entity, lastPulledAt: date))
         }
     }
-
-    // MARK: - ISO8601
-
-    private func iso(_ date: Date) -> String {
-        // Use a stable format for PostgREST filters.
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f.string(from: date)
-    }
 }
 
-// MARK: - Remote types
+// MARK: - Snapshots
 
-private struct RemoteNotebookRow: Decodable {
+private struct NotebookSnapshot {
     let id: UUID
     let title: String
-    let color: String
+    let colorRaw: String
     let iconName: String
-    let createdAt: String?
-    let updatedAt: String?
-    let deletedAt: String?
-    let isValid: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case title
-        case color
-        case iconName = "icon_name"
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-        case deletedAt = "deleted_at"
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let decodedId = try container.decodeIfPresent(UUID.self, forKey: .id)
-        let title = (try container.decodeIfPresent(String.self, forKey: .title))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let color = (try container.decodeIfPresent(String.self, forKey: .color))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let iconName = (try container.decodeIfPresent(String.self, forKey: .iconName))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
-        self.updatedAt = try container.decodeIfPresent(String.self, forKey: .updatedAt)
-        self.deletedAt = try container.decodeIfPresent(String.self, forKey: .deletedAt)
-        self.id = decodedId ?? UUID()
-        self.title = title?.isEmpty == false ? title! : "未命名笔记本"
-        self.color = color?.isEmpty == false ? color! : NotebookColor.lime.rawValue
-        self.iconName = iconName?.isEmpty == false ? iconName! : "book"
-        self.isValid = decodedId != nil
-    }
-
-    var createdAtDate: Date? { parseISO(createdAt) }
-    var updatedAtDate: Date? { parseISO(updatedAt) }
-    var deletedAtDate: Date? { parseISO(deletedAt) }
-}
-
-private struct RemoteNoteRow: Decodable {
-    let id: UUID
-    let notebookId: UUID
-    let title: String
-    let summary: String
-    let content: String
-    let paragraphCount: Int
-    let bulletCount: Int
-    let hasAdditionalContext: Bool
-    let version: Int?
-    let createdAt: String?
-    let updatedAt: String?
-    let deletedAt: String?
-    let isValid: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case notebookId = "notebook_id"
-        case title
-        case summary
-        case content
-        case paragraphCount = "paragraph_count"
-        case bulletCount = "bullet_count"
-        case hasAdditionalContext = "has_additional_context"
-        case version
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-        case deletedAt = "deleted_at"
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let decodedId = try container.decodeIfPresent(UUID.self, forKey: .id)
-        let decodedNotebookId = try container.decodeIfPresent(UUID.self, forKey: .notebookId)
-        let title = (try container.decodeIfPresent(String.self, forKey: .title))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let summary = (try container.decodeIfPresent(String.self, forKey: .summary))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let content = (try container.decodeIfPresent(String.self, forKey: .content))
-        self.paragraphCount = try container.decodeIfPresent(Int.self, forKey: .paragraphCount) ?? 0
-        self.bulletCount = try container.decodeIfPresent(Int.self, forKey: .bulletCount) ?? 0
-        self.hasAdditionalContext = try container.decodeIfPresent(Bool.self, forKey: .hasAdditionalContext) ?? false
-        self.version = try container.decodeIfPresent(Int.self, forKey: .version)
-        self.createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
-        self.updatedAt = try container.decodeIfPresent(String.self, forKey: .updatedAt)
-        self.deletedAt = try container.decodeIfPresent(String.self, forKey: .deletedAt)
-        self.id = decodedId ?? UUID()
-        self.notebookId = decodedNotebookId ?? UUID()
-        self.title = title?.isEmpty == false ? title! : "未命名笔记"
-        self.summary = summary ?? ""
-        self.content = content ?? ""
-        self.isValid = decodedId != nil && decodedNotebookId != nil
-    }
-
-    var createdAtDate: Date? { parseISO(createdAt) }
-    var updatedAtDate: Date? { parseISO(updatedAt) }
-    var deletedAtDate: Date? { parseISO(deletedAt) }
-}
-
-private struct NotebookUpsert: Encodable {
-    let id: UUID
-    let userId: UUID
-    let title: String
-    let color: String
-    let iconName: String
+    let createdAt: Date
     let deletedAt: Date?
+    let isPinned: Bool
+    let notebookDescription: String
 
-    enum CodingKeys: String, CodingKey {
-        case id
-        case userId = "user_id"
-        case title
-        case color
-        case iconName = "icon_name"
-        case deletedAt = "deleted_at"
+    init(_ local: LocalNotebook) {
+        id = local.id
+        title = local.title
+        colorRaw = local.colorRaw
+        iconName = local.iconName
+        createdAt = local.createdAt
+        deletedAt = local.deletedAt
+        isPinned = local.isPinned
+        notebookDescription = local.notebookDescription
     }
-}
 
-private struct NoteUpsert: Encodable {
-    let id: UUID
-    let userId: UUID
-    let notebookId: UUID
-    let title: String
-    let summary: String
-    let content: String
-    let paragraphCount: Int
-    let bulletCount: Int
-    let hasAdditionalContext: Bool
-    let deletedAt: Date?
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case userId = "user_id"
-        case notebookId = "notebook_id"
-        case title
-        case summary
-        case content
-        case paragraphCount = "paragraph_count"
-        case bulletCount = "bullet_count"
-        case hasAdditionalContext = "has_additional_context"
-        case deletedAt = "deleted_at"
-    }
-}
-
-private struct NoteUpdatePayload: Encodable {
-    let notebookId: UUID
-    let title: String
-    let summary: String
-    let content: String
-    let paragraphCount: Int
-    let bulletCount: Int
-    let hasAdditionalContext: Bool
-    let deletedAt: Date?
-
-    enum CodingKeys: String, CodingKey {
-        case notebookId = "notebook_id"
-        case title
-        case summary
-        case content
-        case paragraphCount = "paragraph_count"
-        case bulletCount = "bullet_count"
-        case hasAdditionalContext = "has_additional_context"
-        case deletedAt = "deleted_at"
+    func apply(to record: CKRecord, ownerId: UUID) {
+        let now = Date()
+        record[string: CloudKitSchema.Field.id] = id.uuidString
+        record[string: CloudKitSchema.Field.ownerId] = ownerId.uuidString
+        record[string: CloudKitSchema.Field.title] = title
+        record[string: CloudKitSchema.Field.color] = colorRaw
+        record[string: CloudKitSchema.Field.iconName] = iconName
+        record[string: CloudKitSchema.Field.notebookDescription] = notebookDescription
+        record[bool: CloudKitSchema.Field.isPinned] = isPinned
+        record[date: CloudKitSchema.Field.createdAt] = record[date: CloudKitSchema.Field.createdAt] ?? createdAt
+        record[date: CloudKitSchema.Field.updatedAt] = now
+        record[date: CloudKitSchema.Field.deletedAt] = deletedAt
     }
 }
 
 private struct NoteSnapshot {
+    let id: UUID
+    let ownerId: UUID
+    let notebookId: UUID
     let title: String
     let summary: String
-    let content: String
     let paragraphCount: Int
     let bulletCount: Int
     let hasAdditionalContext: Bool
+    let createdAt: Date
+    let version: Int
     let deletedAt: Date?
+    let contentRTF: Data?
+    let content: String
+    let isPinned: Bool
+
+    init(local: LocalNote, notebookId: UUID) {
+        id = local.id
+        ownerId = local.ownerId
+        self.notebookId = notebookId
+        title = local.title
+        summary = local.summary
+        paragraphCount = local.paragraphCount
+        bulletCount = local.bulletCount
+        hasAdditionalContext = local.hasAdditionalContext
+        createdAt = local.createdAt
+        version = local.version
+        deletedAt = local.deletedAt
+        contentRTF = local.contentRTF
+        content = local.content
+        isPinned = local.isPinned
+    }
+
+    func apply(to record: CKRecord, ownerId: UUID, nextVersion: Int) {
+        let now = Date()
+        record[string: CloudKitSchema.Field.id] = id.uuidString
+        record[string: CloudKitSchema.Field.ownerId] = ownerId.uuidString
+        record[string: CloudKitSchema.Field.notebookId] = notebookId.uuidString
+        record[string: CloudKitSchema.Field.title] = title
+        record[string: CloudKitSchema.Field.summary] = summary
+        record[string: CloudKitSchema.Field.content] = content
+        record[data: CloudKitSchema.Field.contentRTF] = contentRTF
+        record[int: CloudKitSchema.Field.paragraphCount] = paragraphCount
+        record[int: CloudKitSchema.Field.bulletCount] = bulletCount
+        record[bool: CloudKitSchema.Field.hasAdditionalContext] = hasAdditionalContext
+        record[bool: CloudKitSchema.Field.isPinned] = isPinned
+        record[int: CloudKitSchema.Field.version] = max(nextVersion, 1)
+        record[date: CloudKitSchema.Field.createdAt] = record[date: CloudKitSchema.Field.createdAt] ?? createdAt
+        record[date: CloudKitSchema.Field.updatedAt] = now
+        record[date: CloudKitSchema.Field.deletedAt] = deletedAt
+    }
 }
 
-// MARK: - Attachment Remote Types
-
-private struct RemoteAttachmentRow: Decodable {
+private struct AttachmentSnapshot {
     let id: UUID
     let noteId: UUID
     let storagePath: String
     let fileName: String
     let mimeType: String
     let fileSize: Int64
-    let createdAt: String?
-    let updatedAt: String?
-    let deletedAt: String?
-    let isValid: Bool
-    
-    enum CodingKeys: String, CodingKey {
-        case id
-        case noteId = "note_id"
-        case storagePath = "storage_path"
-        case fileName = "file_name"
-        case mimeType = "mime_type"
-        case fileSize = "file_size"
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-        case deletedAt = "deleted_at"
-    }
-    
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let decodedId = try container.decodeIfPresent(UUID.self, forKey: .id)
-        let decodedNoteId = try container.decodeIfPresent(UUID.self, forKey: .noteId)
-        let storagePath = (try container.decodeIfPresent(String.self, forKey: .storagePath))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fileName = (try container.decodeIfPresent(String.self, forKey: .fileName))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let mimeType = (try container.decodeIfPresent(String.self, forKey: .mimeType))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.fileSize = try container.decodeIfPresent(Int64.self, forKey: .fileSize) ?? 0
-        self.createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
-        self.updatedAt = try container.decodeIfPresent(String.self, forKey: .updatedAt)
-        self.deletedAt = try container.decodeIfPresent(String.self, forKey: .deletedAt)
-        self.id = decodedId ?? UUID()
-        self.noteId = decodedNoteId ?? UUID()
-        self.storagePath = storagePath ?? ""
-        self.fileName = fileName ?? ""
-        self.mimeType = mimeType ?? "application/octet-stream"
-        self.isValid = decodedId != nil && decodedNoteId != nil
-    }
-    
-    var createdAtDate: Date? { parseISO(createdAt) }
-    var updatedAtDate: Date? { parseISO(updatedAt) }
-    var deletedAtDate: Date? { parseISO(deletedAt) }
-}
-
-private struct AttachmentUpsert: Encodable {
-    let id: UUID
-    let userId: UUID
-    let noteId: UUID
-    let storagePath: String
-    let fileName: String
-    let mimeType: String
-    let fileSize: Int64
+    let createdAt: Date
     let deletedAt: Date?
-    
-    enum CodingKeys: String, CodingKey {
-        case id
-        case userId = "user_id"
-        case noteId = "note_id"
-        case storagePath = "storage_path"
-        case fileName = "file_name"
-        case mimeType = "mime_type"
-        case fileSize = "file_size"
-        case deletedAt = "deleted_at"
+
+    init(_ local: LocalAttachment) {
+        id = local.id
+        noteId = local.noteId
+        storagePath = local.storagePath
+        fileName = local.fileName
+        mimeType = local.mimeType
+        fileSize = local.fileSize
+        createdAt = local.createdAt
+        deletedAt = local.deletedAt
+    }
+
+    func apply(to record: CKRecord, ownerId: UUID) {
+        let now = Date()
+        record[string: CloudKitSchema.Field.id] = id.uuidString
+        record[string: CloudKitSchema.Field.ownerId] = ownerId.uuidString
+        record[string: CloudKitSchema.Field.noteId] = noteId.uuidString
+        record[string: CloudKitSchema.Field.storagePath] = storagePath
+        record[string: CloudKitSchema.Field.fileName] = fileName
+        record[string: CloudKitSchema.Field.mimeType] = mimeType
+        record[int64: CloudKitSchema.Field.fileSize] = fileSize
+        record[date: CloudKitSchema.Field.createdAt] = record[date: CloudKitSchema.Field.createdAt] ?? createdAt
+        record[date: CloudKitSchema.Field.updatedAt] = now
+        record[date: CloudKitSchema.Field.deletedAt] = deletedAt
     }
 }
-
-private func parseISO(_ value: String?) -> Date? {
-    guard let value, !value.isEmpty else { return nil }
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let d = f.date(from: value) { return d }
-    f.formatOptions = [.withInternetDateTime]
-    return f.date(from: value)
-}
-

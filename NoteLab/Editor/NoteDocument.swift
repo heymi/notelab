@@ -168,7 +168,7 @@ struct AttachmentModel: Codable, Equatable {
     let type: AttachmentType
     let fileName: String
     
-    /// Storage path in Supabase Storage (new way)
+    /// Stable remote attachment path (CloudKit-backed)
     let storagePath: String?
     
     /// Legacy: embedded data (for backward compatibility, will be migrated)
@@ -349,18 +349,96 @@ private func parseQuote(_ line: String) -> String? {
 }
 
 private func parseAttachment(_ line: String) -> (fileName: String, storagePath: String, attachmentId: UUID)? {
-    guard line.hasPrefix("![Attachment]("), line.hasSuffix(")") else { return nil }
-    let start = line.index(line.startIndex, offsetBy: "![Attachment](".count)
-    let end = line.index(before: line.endIndex)
-    let target = String(line[start..<end]).trimmingCharacters(in: .whitespaces)
-    guard !target.isEmpty else { return nil }
+    let pattern = #"!\[[^\]]*\]\(([^)]+)\)"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+    let ns = line as NSString
+    let fullRange = NSRange(location: 0, length: ns.length)
+    guard let match = regex.firstMatch(in: line, range: fullRange),
+          match.range.location != NSNotFound,
+          match.range.length == fullRange.length else {
+        return nil
+    }
 
-    // If target looks like a storage path (e.g. "{userId}/{uuid}.jpg"), extract fileName and UUID.
-    let fileName = (target as NSString).lastPathComponent
-    let base = (fileName as NSString).deletingPathExtension
-    let attachmentId = UUID(uuidString: base) ?? UUID()
+    let rawTarget = ns.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+    let target = unwrapMarkdownTarget(rawTarget)
+    guard !target.isEmpty else { return nil }
+    guard isAttachmentTarget(target) else { return nil }
+
+    let cleanTarget = target.split(separator: "?").first.map(String.init) ?? target
+    let fileName = attachmentFileName(from: cleanTarget)
+    let attachmentId = UUID(uuidString: (fileName as NSString).deletingPathExtension)
+        ?? attachmentTokenUUID(from: cleanTarget)
+        ?? extractUUID(from: cleanTarget)
+        ?? UUID()
 
     return (fileName: fileName.isEmpty ? "attachment" : fileName, storagePath: target, attachmentId: attachmentId)
+}
+
+private func unwrapMarkdownTarget(_ rawTarget: String) -> String {
+    guard rawTarget.hasPrefix("<"), rawTarget.hasSuffix(">"), rawTarget.count >= 2 else {
+        return rawTarget
+    }
+    return String(rawTarget.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func isAttachmentTarget(_ target: String) -> Bool {
+    if attachmentTokenUUID(from: target) != nil {
+        return true
+    }
+    if canonicalAttachmentPathParts(from: target) != nil {
+        return true
+    }
+    if target.contains("://") || target == "#" {
+        return false
+    }
+    return extractUUID(from: target) != nil
+}
+
+private func canonicalAttachmentPathParts(from target: String) -> (ownerId: UUID, attachmentId: UUID)? {
+    guard !target.hasPrefix("/"), !target.hasPrefix("attachment:"), !target.contains("://") else {
+        return nil
+    }
+    let pathWithoutQuery = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? target
+    let components = pathWithoutQuery.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
+    guard components.count == 2,
+          let ownerId = UUID(uuidString: String(components[0])) else {
+        return nil
+    }
+    let fileName = String(components[1])
+    let base = (fileName as NSString).deletingPathExtension
+    guard let attachmentId = UUID(uuidString: base) else { return nil }
+    return (ownerId, attachmentId)
+}
+
+private func attachmentTokenUUID(from target: String) -> UUID? {
+    guard target.lowercased().hasPrefix("attachment:") else { return nil }
+    let rawId = String(target.dropFirst("attachment:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+    return UUID(uuidString: rawId)
+}
+
+private func attachmentFileName(from target: String) -> String {
+    if let tokenId = attachmentTokenUUID(from: target) {
+        return tokenId.uuidString.lowercased()
+    }
+    let fileName = (target as NSString).lastPathComponent
+    if !fileName.isEmpty {
+        return fileName
+    }
+    if let extractedId = extractUUID(from: target) {
+        return extractedId.uuidString.lowercased()
+    }
+    return "attachment"
+}
+
+private func extractUUID(from text: String) -> UUID? {
+    let pattern = #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+    let nsText = text as NSString
+    let range = NSRange(location: 0, length: nsText.length)
+    let matches = regex.matches(in: text, range: range)
+    guard let match = matches.last else { return nil }
+    let raw = nsText.substring(with: match.range)
+    return UUID(uuidString: raw.lowercased())
 }
 
 private func isTableHeader(line: String, nextLine: String) -> Bool {

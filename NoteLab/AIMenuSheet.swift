@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 struct AIMenuSheet: View {
     @Binding var isPresented: Bool
@@ -78,7 +81,7 @@ struct AIMenuSheet: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(16)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground))
+                    .background(AIMenuColors.secondaryGroupedBackground)
                     .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .shadow(color: .black.opacity(0.05), radius: 10, x: 0, y: 4)
                 }
@@ -108,7 +111,7 @@ struct AIMenuSheet: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(16)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground))
+                    .background(AIMenuColors.secondaryGroupedBackground)
                     .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .shadow(color: .black.opacity(0.05), radius: 10, x: 0, y: 4)
                 }
@@ -117,8 +120,8 @@ struct AIMenuSheet: View {
             
             Spacer()
         }
-        .background(Color(uiColor: .systemGroupedBackground))
-        .navigationBarHidden(true)
+        .background(AIMenuColors.groupedBackground)
+        .aiMenuNavigationBarHidden()
     }
     
     private var commandSelectionMenu: some View {
@@ -130,7 +133,7 @@ struct AIMenuSheet: View {
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(.primary)
                         .frame(width: 44, height: 44)
-                        .background(Color(uiColor: .secondarySystemGroupedBackground), in: Circle())
+                        .background(AIMenuColors.secondaryGroupedBackground, in: Circle())
                 }
                 
                 Spacer()
@@ -171,8 +174,8 @@ struct AIMenuSheet: View {
                 .padding(.bottom, 20)
             }
         }
-        .background(Color(uiColor: .systemGroupedBackground))
-        .navigationBarHidden(true)
+        .background(AIMenuColors.groupedBackground)
+        .aiMenuNavigationBarHidden()
     }
     
     private func commandRow(title: String, icon: String, color: Color, action: @escaping () -> Void) -> some View {
@@ -195,8 +198,37 @@ struct AIMenuSheet: View {
                     .foregroundStyle(.tertiary)
             }
             .padding(16)
-            .background(Color(uiColor: .secondarySystemGroupedBackground))
+            .background(AIMenuColors.secondaryGroupedBackground)
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
+    }
+}
+
+private enum AIMenuColors {
+    static var groupedBackground: Color {
+        #if os(iOS)
+        Color(uiColor: .systemGroupedBackground)
+        #else
+        Color(nsColor: .windowBackgroundColor)
+        #endif
+    }
+
+    static var secondaryGroupedBackground: Color {
+        #if os(iOS)
+        Color(uiColor: .secondarySystemGroupedBackground)
+        #else
+        Color(nsColor: .controlBackgroundColor)
+        #endif
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func aiMenuNavigationBarHidden() -> some View {
+        #if os(iOS)
+        self.navigationBarHidden(true)
+        #else
+        self
+        #endif
     }
 }

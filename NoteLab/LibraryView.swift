@@ -1,6 +1,5 @@
 import SwiftUI
 import Combine
-import Auth
 
 enum LibraryMode: String, CaseIterable {
     case notes
@@ -106,7 +105,7 @@ struct LibraryView: View {
     }
     
     private var userAvatar: some View {
-        let emailFirst = auth.session?.user.email?.first
+        let emailFirst = auth.displayEmail?.first
         let initial = String((emailFirst ?? "U").uppercased())
         return AvatarImageView(
             options: avatarStore.options,

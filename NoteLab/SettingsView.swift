@@ -1,6 +1,5 @@
 import SwiftUI
 import Combine
-import Auth
 
 struct SettingsView: View {
     @EnvironmentObject var auth: AuthManager
@@ -118,7 +117,16 @@ struct SettingsView: View {
                             icon: "person.fill",
                             iconColor: .blue,
                             title: "当前账号",
-                            detail: auth.session?.user.email ?? "未登录"
+                            detail: auth.displayEmail ?? "未登录"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: auth.iCloudState.canSync ? "icloud.fill" : "icloud.slash.fill",
+                            iconColor: auth.iCloudState.canSync ? .blue : .orange,
+                            title: "iCloud 同步",
+                            detail: auth.iCloudStatusMessage ?? "正在检查"
                         )
                     }
                     
@@ -249,7 +257,7 @@ struct SettingsView: View {
     private var profileHeader: some View {
         HStack(spacing: 16) {
             ZStack {
-                let emailFirst = auth.session?.user.email?.first
+                let emailFirst = auth.displayEmail?.first
                 let initial = String((emailFirst ?? "U").uppercased())
                 AvatarImageView(
                     options: avatarStore.options,
@@ -259,7 +267,7 @@ struct SettingsView: View {
             }
             
             VStack(alignment: .leading, spacing: 4) {
-            let emailPrefix = auth.session?.user.email?.components(separatedBy: "@").first ?? "用户"
+            let emailPrefix = auth.displayEmail?.components(separatedBy: "@").first ?? "用户"
                 Text(emailPrefix)
                     .font(.system(size: 20, weight: .bold, design: .rounded))
                     .foregroundStyle(Theme.ink)
@@ -697,13 +705,11 @@ struct AISettingsView: View {
                 if showKey.wrappedValue {
                     TextField(placeholder, text: key)
                         .font(.system(size: 14, weight: .regular, design: .monospaced))
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                        .apiKeyTextInputBehavior()
                 } else {
                     SecureField(placeholder, text: key)
                         .font(.system(size: 14, weight: .regular, design: .monospaced))
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                        .apiKeyTextInputBehavior()
                 }
                 
                 if !key.wrappedValue.isEmpty {
@@ -737,6 +743,19 @@ struct AISettingsView: View {
         aiSettings.geminiAPIKey = geminiKey
         aiSettings.deepseekAPIKey = deepseekKey
         dismiss()
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func apiKeyTextInputBehavior() -> some View {
+        #if os(iOS)
+        self
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+        #else
+        self.autocorrectionDisabled()
+        #endif
     }
 }
 
