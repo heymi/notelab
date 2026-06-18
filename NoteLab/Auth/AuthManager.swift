@@ -155,7 +155,7 @@ final class AuthManager: ObservableObject {
 
     private static func currentICloudAccountState() async -> ICloudAccountState {
         await withCheckedContinuation { continuation in
-            CKContainer.default().accountStatus { status, _ in
+            CloudKitSchema.container.accountStatus { status, _ in
                 switch status {
                 case .available:
                     continuation.resume(returning: .available)

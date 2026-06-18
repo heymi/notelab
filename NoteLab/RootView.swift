@@ -19,13 +19,13 @@ struct RootView: View {
     @StateObject private var aiCenter = AIProcessingCenter()
     @StateObject private var planStore = PlanStore()
     @StateObject private var router = AppRouter()
-    @StateObject private var syncEngine = SyncEngine()
     @StateObject private var avatarStore = AvatarStore()
     @State private var syncTask: Task<Void, Never>?
     @State private var migrationTask: Task<Void, Never>?
     @State private var showPaywall = false
     @State private var paywallTrigger: PaywallTrigger = .manual
     @EnvironmentObject private var auth: AuthManager
+    @EnvironmentObject private var syncEngine: SyncEngine
     @Environment(\.scenePhase) private var scenePhase
     private let profileRepository = ProfileRepository()
     private let syncLogger = Logger(subsystem: "NoteLab", category: "Sync")
@@ -60,6 +60,9 @@ struct RootView: View {
                     aiCenter.showPaywall = false
                 }
             }
+            .onReceive(NotificationCenter.default.publisher(for: .cloudKitRemoteNotification)) { _ in
+                startSync(reason: .remoteNotification)
+            }
     }
 
     @ViewBuilder
@@ -71,7 +74,7 @@ struct RootView: View {
             }
             .onChange(of: scenePhase) { _, newValue in
                 guard newValue == .active else { return }
-                startSync()
+                startSync(reason: .sceneActive)
             }
             .onChange(of: auth.userId) { _, newValue in
                 if newValue == nil {
@@ -104,7 +107,7 @@ struct RootView: View {
             }
             .onChange(of: scenePhase) { _, newValue in
                 guard newValue == .active else { return }
-                startSync()
+                startSync(reason: .sceneActive)
             }
             .onChange(of: auth.userId) { _, newValue in
                 if newValue == nil {
@@ -225,7 +228,7 @@ struct RootView: View {
     }
 
     // Note binding now comes from `NotebookStore.noteBinding(noteId:)`.
-    private func startSync() {
+    private func startSync(reason: SyncReason) {
         syncTask?.cancel()
         syncTask = Task(priority: .background) {
             let startMark = DispatchTime.now()
@@ -233,17 +236,11 @@ struct RootView: View {
             try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5s
             if Task.isCancelled { return }
 
-            // Avoid syncing while user is navigating/reading.
-            // After a rebuild, the first few navigations are sensitive to MainActor work.
-            let canStart = await waitForIdleNavigation(
-                maxWaitNanoseconds: 30_000_000_000,
-                stableNanoseconds: 600_000_000
-            ) // 30s max, require 0.6s stable idle
-            if !canStart || Task.isCancelled { return }
             syncLogger.debug("SyncEngine start after \(Double(DispatchTime.now().uptimeNanoseconds - startMark.uptimeNanoseconds) / 1_000_000_000, privacy: .public)s delay")
-            await syncEngine.syncNow()
+            let summary = await syncEngine.syncNow(reason: reason)
             syncLogger.debug("SyncEngine finished in \(Double(DispatchTime.now().uptimeNanoseconds - startMark.uptimeNanoseconds) / 1_000_000_000, privacy: .public)s")
-            
+            if summary.pulled == 0 && summary.deleted == 0 { return }
+
             // Defer cache refresh until UI is idle, so we don't stutter the current page.
             let canRefresh = await waitForIdleNavigation(
                 maxWaitNanoseconds: 30_000_000_000,
@@ -324,7 +321,7 @@ struct RootView: View {
             store.configure(profileId: profile.profileId)
             syncEngine.configure(profileId: profile.profileId)
             startLegacyMigrationIfNeeded(profileId: profile.profileId)
-            startSync()
+            startSync(reason: .launch)
         } catch {
             syncLogger.error("profile setup failed: \(error.localizedDescription, privacy: .public)")
         }

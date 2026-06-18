@@ -283,9 +283,8 @@ final class NotebookRepository {
 
     func applyRemoteNote(profileId: UUID, record: NoteRemoteRecord) throws {
         if let existing = try fetchNote(profileId: profileId, id: record.id),
-           let localHash = existing.lastSyncedHash,
-           localHash == record.lastSyncedHash,
-           existing.updatedAt > record.updatedAt {
+           existing.deviceId != record.deviceId,
+           try hasPendingOutbox(profileId: profileId, type: .note, id: record.id) {
             let conflict = existing.domainNote.conflictCopy()
             _ = try createNote(profileId: profileId, notebookId: UUID(uuidString: existing.notebookId) ?? record.notebookId, note: conflict)
         }
@@ -310,6 +309,26 @@ final class NotebookRepository {
         entity.localRevision = max(entity.localRevision, record.localRevision)
         entity.lastSyncedHash = record.lastSyncedHash
         entity.deviceId = record.deviceId
+    }
+
+    func applyRemoteHardDelete(profileId: UUID, entityType: SyncEntityType, id: UUID) throws {
+        let now = Date()
+        switch entityType {
+        case .notebook:
+            if let entity = try fetchNotebook(profileId: profileId, id: id) {
+                entity.deletedAt = entity.deletedAt ?? now
+                markChanged(entity, now: entity.deletedAt ?? now)
+            }
+            try upsertTombstone(profileId: profileId, entityType: .notebook, entityId: id.uuidString.lowercased(), deletedAt: now)
+        case .note:
+            if let entity = try fetchNote(profileId: profileId, id: id) {
+                entity.deletedAt = entity.deletedAt ?? now
+                markChanged(entity, now: entity.deletedAt ?? now)
+            }
+            try upsertTombstone(profileId: profileId, entityType: .note, entityId: id.uuidString.lowercased(), deletedAt: now)
+        case .attachment:
+            return
+        }
     }
 
     func markOutboxDone(_ item: OutboxItem) throws {
@@ -352,6 +371,19 @@ final class NotebookRepository {
                   let operation = SyncOperation(rawValue: entity.operation) else { return nil }
             return OutboxItem(id: id, profileId: profile, entityType: entityType, entityId: entityId, operation: operation, retryCount: Int(entity.retryCount))
         }
+    }
+
+    private func hasPendingOutbox(profileId: UUID, type: SyncEntityType, id: UUID) throws -> Bool {
+        let request = SyncOutboxEntity.fetchRequest()
+        request.predicate = NSPredicate(
+            format: "profileId == %@ AND entityType == %@ AND entityId == %@ AND status IN %@",
+            profileId.uuidString.lowercased(),
+            type.rawValue,
+            id.uuidString.lowercased(),
+            [OutboxStatus.pending.rawValue, OutboxStatus.failed.rawValue]
+        )
+        request.fetchLimit = 1
+        return try storage.mainContext.count(for: request) > 0
     }
 
     func notebookEntity(profileId: UUID, id: UUID) throws -> NotebookEntity? {
@@ -533,6 +565,13 @@ final class AttachmentRepository {
         entity.localRevision = max(entity.localRevision, record.localRevision)
         entity.lastSyncedHash = record.lastSyncedHash
         entity.deviceId = record.deviceId
+    }
+
+    func applyRemoteHardDelete(profileId: UUID, id: UUID) throws {
+        guard let entity = try fetchAttachment(profileId: profileId, id: id) else { return }
+        entity.deletedAt = entity.deletedAt ?? Date()
+        entity.updatedAt = entity.deletedAt ?? Date()
+        entity.isUploaded = true
     }
 
     private func fetchAttachment(profileId: UUID, id: UUID) throws -> AttachmentEntity? {

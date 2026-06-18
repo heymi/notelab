@@ -282,4 +282,6 @@ extension Notification.Name {
     static let showPaywall = Notification.Name("showPaywall")
     /// 订阅状态变更通知
     static let subscriptionStatusChanged = Notification.Name("subscriptionStatusChanged")
+    /// CloudKit 静默推送触发同步
+    static let cloudKitRemoteNotification = Notification.Name("cloudKitRemoteNotification")
 }

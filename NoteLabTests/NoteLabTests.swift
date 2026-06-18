@@ -8,6 +8,7 @@
 import Testing
 import SwiftUI
 import SwiftData
+import CloudKit
 @testable import NoteLab
 
 struct NoteLabTests {
@@ -34,6 +35,126 @@ struct NoteLabTests {
 
         let pending = try repository.pendingOutbox(profileId: profileId)
         #expect(pending.contains(where: { $0.entityType == .notebook && $0.entityId == notebook.id }))
+    }
+
+    @MainActor @Test func syncSummaryMergePreservesFailureMessage() async throws {
+        var summary = SyncSummary(reason: .manual, pushed: 1)
+        summary.merge(SyncSummary(reason: .manual, failed: 1, message: "部分内容同步失败，稍后会自动重试"))
+        #expect(summary.pushed == 1)
+        #expect(summary.failed == 1)
+        #expect(summary.hasFailures)
+        #expect(summary.message == "部分内容同步失败，稍后会自动重试")
+        #expect(SyncReason.remoteNotification.shouldShowPaywall == false)
+    }
+
+    @MainActor @Test func cloudKitDeletedRecordParsesStorageV3RecordName() async throws {
+        let profileId = UUID()
+        let noteId = UUID()
+        let recordID = CKRecord.ID(
+            recordName: "\(profileId.uuidString.lowercased()):\(SyncEntityType.note.rawValue):\(noteId.uuidString.lowercased())",
+            zoneID: CloudKitSchema.zoneID
+        )
+        let deleted = CloudKitTransport.deletedRecord(from: recordID)
+        #expect(deleted?.profileId == profileId)
+        #expect(deleted?.entityType == .note)
+        #expect(deleted?.id == noteId)
+    }
+
+    @MainActor @Test func remoteHardDeleteSoftDeletesLocalNote() async throws {
+        let profileId = UUID()
+        let repository = NotebookRepository()
+        let notebook = try repository.createNotebook(
+            profileId: profileId,
+            title: "Hard delete notebook",
+            color: .lime,
+            iconName: "book"
+        )
+        let note = Note(
+            id: UUID(),
+            title: "Remote hard delete",
+            summary: "Before delete",
+            paragraphCount: 0,
+            bulletCount: 0,
+            hasAdditionalContext: false,
+            createdAt: Date(),
+            contentRTF: nil,
+            content: ""
+        )
+        _ = try repository.createNote(profileId: profileId, notebookId: notebook.id, note: note)
+
+        try repository.applyRemoteHardDelete(profileId: profileId, entityType: .note, id: note.id)
+        try StorageController.shared.saveMainContext()
+
+        let loaded = try repository.loadNotebooks(profileId: profileId)
+        let loadedNotebook = try #require(loaded.first(where: { $0.id == notebook.id }))
+        #expect(loadedNotebook.notes.contains(where: { $0.id == note.id }) == false)
+    }
+
+    @MainActor @Test func remoteNoteWithPendingLocalEditCreatesConflictCopy() async throws {
+        let profileId = UUID()
+        let repository = NotebookRepository()
+        let notebook = try repository.createNotebook(
+            profileId: profileId,
+            title: "Conflict notebook",
+            color: .lime,
+            iconName: "book"
+        )
+        let original = Note(
+            id: UUID(),
+            title: "Local draft",
+            summary: "Local",
+            paragraphCount: 0,
+            bulletCount: 0,
+            hasAdditionalContext: false,
+            createdAt: Date(),
+            contentRTF: nil,
+            content: ""
+        )
+        _ = try repository.createNote(profileId: profileId, notebookId: notebook.id, note: original)
+
+        let edited = Note(
+            id: original.id,
+            title: "Local edited",
+            summary: "Unsynced local",
+            paragraphCount: original.paragraphCount,
+            bulletCount: original.bulletCount,
+            hasAdditionalContext: original.hasAdditionalContext,
+            createdAt: original.createdAt,
+            updatedAt: Date(),
+            contentRTF: original.contentRTF,
+            content: original.content,
+            isPinned: original.isPinned
+        )
+        try repository.updateNote(profileId: profileId, notebookId: notebook.id, note: edited)
+
+        let remote = NoteRemoteRecord(
+            id: original.id,
+            profileIdHash: CloudKitTransport.hash(profileId.uuidString.lowercased()),
+            notebookId: notebook.id,
+            title: "Remote canonical",
+            summary: "Remote",
+            paragraphCount: 0,
+            bulletCount: 0,
+            hasAdditionalContext: false,
+            createdAt: original.createdAt,
+            updatedAt: Date(),
+            deletedAt: nil,
+            version: 1,
+            contentRTF: nil,
+            content: "",
+            isPinned: false,
+            conflictParentId: nil,
+            localRevision: 2,
+            lastSyncedHash: "remote-hash",
+            deviceId: "other-device"
+        )
+
+        try repository.applyRemoteNote(profileId: profileId, record: remote)
+        try StorageController.shared.saveMainContext()
+
+        let loadedNotes = try repository.loadNotebooks(profileId: profileId).flatMap(\.notes)
+        #expect(loadedNotes.contains(where: { $0.id == original.id && $0.title == "Remote canonical" }))
+        #expect(loadedNotes.contains(where: { $0.title == "Local edited（冲突副本）" }))
     }
 
     @MainActor @Test func richTextRoundTripPreservesPlainText() async throws {

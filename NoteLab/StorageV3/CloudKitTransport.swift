@@ -56,15 +56,32 @@ struct AttachmentRemoteRecord {
     let deviceId: String
 }
 
+struct CloudKitDeletedRecord {
+    let entityType: SyncEntityType
+    let profileId: UUID
+    let id: UUID
+}
+
 struct CloudKitChangeBatch {
     let notebooks: [NotebookRemoteRecord]
     let notes: [NoteRemoteRecord]
     let attachments: [AttachmentRemoteRecord]
     let deletedRecordIDs: [CKRecord.ID]
+    let deletedRecords: [CloudKitDeletedRecord]
     let serverChangeToken: CKServerChangeToken?
 }
 
-final class CloudKitTransport {
+@MainActor
+protocol CloudKitTransporting: AnyObject {
+    func iCloudAccountHash() async throws -> String
+    func ensureInfrastructure() async throws
+    func pushNotebook(_ entity: NotebookEntity, profileId: UUID) async throws -> String
+    func pushNote(_ entity: NoteEntity, profileId: UUID) async throws -> String
+    func pushAttachment(_ entity: AttachmentEntity, profileId: UUID) async throws -> String
+    func fetchChanges(since token: CKServerChangeToken?) async throws -> CloudKitChangeBatch
+}
+
+final class CloudKitTransport: CloudKitTransporting {
     private let database: CKDatabase
 
     init(container: CKContainer = CloudKitSchema.container) {
@@ -98,6 +115,7 @@ final class CloudKitTransport {
         record[date: CloudKitSchema.Field.createdAt] = entity.createdAt
         record[date: CloudKitSchema.Field.updatedAt] = entity.updatedAt
         record[date: CloudKitSchema.Field.deletedAt] = entity.deletedAt
+        record[string: CloudKitSchema.Field.lastSyncedHash] = Self.recordHash(record)
         let saved = try await save(record: record)
         return Self.recordHash(saved)
     }
@@ -128,6 +146,7 @@ final class CloudKitTransport {
         } else {
             record[CloudKitSchema.Field.conflictParentId] = nil
         }
+        record[string: CloudKitSchema.Field.lastSyncedHash] = Self.recordHash(record)
         let saved = try await save(record: record)
         return Self.recordHash(saved)
     }
@@ -159,6 +178,7 @@ final class CloudKitTransport {
             let assetURL = try AttachmentFileStore.saveOriginal(data: data, attachmentId: UUID(uuidString: entity.id) ?? UUID(), fileName: entity.fileName)
             record[asset: CloudKitSchema.Field.asset] = CKAsset(fileURL: assetURL)
         }
+        record[string: CloudKitSchema.Field.lastSyncedHash] = Self.recordHash(record)
         let saved = try await save(record: record)
         return Self.recordHash(saved)
     }
@@ -181,6 +201,7 @@ final class CloudKitTransport {
             notes: changedRecords.compactMap(Self.noteRecord(from:)),
             attachments: changedRecords.compactMap(Self.attachmentRecord(from:)),
             deletedRecordIDs: deleted,
+            deletedRecords: deleted.compactMap(Self.deletedRecord(from:)),
             serverChangeToken: latest
         )
     }
@@ -325,6 +346,17 @@ final class CloudKitTransport {
         CKRecord.ID(recordName: "\(profileId.uuidString.lowercased()):\(type):\(id.lowercased())", zoneID: CloudKitSchema.zoneID)
     }
 
+    static func deletedRecord(from recordID: CKRecord.ID) -> CloudKitDeletedRecord? {
+        let parts = recordID.recordName.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 3,
+              let profileId = UUID(uuidString: parts[0]),
+              let entityType = SyncEntityType(rawValue: parts[1]),
+              let id = UUID(uuidString: parts[2]) else {
+            return nil
+        }
+        return CloudKitDeletedRecord(entityType: entityType, profileId: profileId, id: id)
+    }
+
     private static func notebookRecord(from record: CKRecord) -> NotebookRemoteRecord? {
         guard record.recordType == CloudKitSchema.RecordType.notebook,
               let id = UUID(uuidString: record[string: CloudKitSchema.Field.id] ?? "") else { return nil }
@@ -411,6 +443,7 @@ final class CloudKitTransport {
         var values: [String] = [record.recordType, record.recordID.recordName]
         for key in record.allKeys().sorted() {
             if key == CloudKitSchema.Field.asset { continue }
+            if key == CloudKitSchema.Field.lastSyncedHash { continue }
             values.append("\(key)=\(String(describing: record[key]))")
         }
         return hash(values.joined(separator: "|"))

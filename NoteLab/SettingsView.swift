@@ -4,6 +4,7 @@ import Combine
 struct SettingsView: View {
     @EnvironmentObject var auth: AuthManager
     @EnvironmentObject private var avatarStore: AvatarStore
+    @EnvironmentObject private var syncEngine: SyncEngine
     @StateObject private var subscriptionManager = SubscriptionManager.shared
     @AppStorage("appearanceMode") private var appearanceMode: Int = 0 // 0: Auto, 1: Light, 2: Dark
     @AppStorage("launchPage") private var launchPage: String = "library"
@@ -128,6 +129,56 @@ struct SettingsView: View {
                             title: "iCloud 同步",
                             detail: auth.iCloudStatusMessage ?? "正在检查"
                         )
+
+                        Divider().padding(.leading, 52)
+
+                        Button {
+                            Task {
+                                await syncEngine.syncNow(reason: .manual)
+                                syncEngine.refreshPendingCount()
+                            }
+                        } label: {
+                            HStack(spacing: 16) {
+                                SettingsIcon(icon: syncEngine.isSyncing ? "arrow.triangle.2.circlepath" : "arrow.clockwise.icloud.fill", color: .blue)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(syncEngine.isSyncing ? "正在同步" : "立即同步")
+                                        .font(.system(size: 16, weight: .medium, design: .rounded))
+                                        .foregroundStyle(Theme.ink)
+                                    Text(syncStatusDetail)
+                                        .font(.system(size: 13, weight: .regular, design: .rounded))
+                                        .foregroundStyle(Theme.secondaryInk)
+                                }
+                                Spacer()
+                                if syncEngine.isSyncing {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+                            }
+                            .padding(.vertical, 12)
+                            .padding(.horizontal, 16)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(syncEngine.isSyncing)
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: syncEngine.pendingItemCount == 0 ? "checkmark.icloud.fill" : "tray.and.arrow.up.fill",
+                            iconColor: syncEngine.pendingItemCount == 0 ? .green : .orange,
+                            title: "待同步",
+                            detail: "\(syncEngine.pendingItemCount) 项"
+                        )
+
+                        if let error = syncEngine.lastError {
+                            Divider().padding(.leading, 52)
+                            SettingsRow(
+                                icon: "exclamationmark.triangle.fill",
+                                iconColor: .orange,
+                                title: "最近错误",
+                                detail: error
+                            )
+                        }
                     }
                     
                     // About & Legal
@@ -225,7 +276,20 @@ struct SettingsView: View {
         }
         .onAppear {
             sanitizeUserDefaults()
+            syncEngine.refreshPendingCount()
         }
+    }
+
+    private var syncStatusDetail: String {
+        if let error = syncEngine.lastError {
+            return error
+        }
+        guard let date = syncEngine.lastSyncAt else {
+            return "尚未完成同步"
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "M月d日 HH:mm"
+        return "上次成功 \(formatter.string(from: date))"
     }
     
     private func sanitizeUserDefaults() {
@@ -764,5 +828,6 @@ private extension View {
         SettingsView()
             .environmentObject(AuthManager())
             .environmentObject(AvatarStore())
+            .environmentObject(SyncEngine())
     }
 }
