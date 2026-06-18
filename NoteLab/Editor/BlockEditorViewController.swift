@@ -2,7 +2,6 @@ import Foundation
 #if canImport(UIKit)
 import UIKit
 import SwiftUI
-import SwiftData
 import UniformTypeIdentifiers
 
 final class BlockEditorViewController: UIViewController, UIGestureRecognizerDelegate {
@@ -11,8 +10,7 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     var onSelectionChange: ((String, NSRange) -> Void)?
     var onSelectedBlockIdsChange: (([UUID]) -> Void)?
     
-    /// Context and IDs needed for attachment storage
-    var modelContext: ModelContext?
+    /// IDs needed for attachment storage
     var ownerId: UUID?
     var noteId: UUID?
 
@@ -298,30 +296,22 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
         let attachmentBlock: Block
         let attachmentId = UUID()
         
-        // If we have context, use the new storage system
-        if let context = modelContext, let ownerId = ownerId, let noteId = noteId {
+        if let ownerId = ownerId, let noteId = noteId {
             // Save to local cache immediately for display (using AttachmentCache directly)
             AttachmentCache.save(data: data, attachmentId: attachmentId, fileName: fileName)
             
-            // Create LocalAttachment record async
             let mimeType = AttachmentStorage.mimeType(for: fileName)
             Task { @MainActor in
                 do {
-                    let localAttachment = try await AttachmentStorage.shared.saveNewAttachment(
+                    let localAttachment = try AttachmentStorage.shared.saveNewAttachmentV3(
                         data: data,
                         attachmentId: attachmentId,
                         ownerId: ownerId,
                         noteId: noteId,
                         fileName: fileName,
-                        mimeType: mimeType,
-                        context: context
+                        mimeType: mimeType
                     )
-                    try? context.save()
-                    // Upload immediately so other devices can fetch it without waiting for sync.
-                    await AttachmentStorage.shared.uploadAndUpsertMetadata(
-                        attachment: localAttachment,
-                        context: context
-                    )
+                    await AttachmentStorage.shared.uploadAndUpsertMetadataV3(attachment: localAttachment)
                 } catch {
                     print("Failed to save attachment record: \(error)")
                 }
@@ -330,7 +320,7 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
             // Create block with storage path reference
             let ext = (fileName as NSString).pathExtension
             let storageName = ext.isEmpty ? attachmentId.uuidString : "\(attachmentId.uuidString).\(ext)"
-            let storagePath = "\(ownerId.uuidString)/\(storageName)"
+            let storagePath = "icloud/\(ownerId.uuidString)/\(storageName)"
             attachmentBlock = Block.attachment(type: type, fileName: fileName, storagePath: storagePath, attachmentId: attachmentId)
         } else {
             // Fallback: use legacy embedded data (for when context is not available)

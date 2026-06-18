@@ -1,7 +1,6 @@
 import Foundation
 #if canImport(UIKit)
 import SwiftUI
-import SwiftData
 
 struct BlockEditorRepresentable: UIViewControllerRepresentable {
     @Binding var document: NoteDocument
@@ -20,8 +19,6 @@ struct BlockEditorRepresentable: UIViewControllerRepresentable {
     var onOpenNote: (UUID) -> Void
     var onDocumentChange: (NoteDocument) -> Void
     
-    // Attachment storage context
-    var modelContext: ModelContext?
     var ownerId: UUID?
     var noteId: UUID?
 
@@ -37,7 +34,6 @@ struct BlockEditorRepresentable: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> BlockEditorViewController {
         let controller = BlockEditorViewController(document: document)
-        controller.modelContext = modelContext
         controller.ownerId = ownerId
         controller.noteId = noteId
         controller.onDocumentChange = { doc in
@@ -57,8 +53,6 @@ struct BlockEditorRepresentable: UIViewControllerRepresentable {
         if uiViewController.document != document {
             uiViewController.updateDocument(document)
         }
-        // Update attachment storage context
-        uiViewController.modelContext = modelContext
         uiViewController.ownerId = ownerId
         uiViewController.noteId = noteId
         uiViewController.updateContentInsets(top: topInset, bottom: bottomInset)

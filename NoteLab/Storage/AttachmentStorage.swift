@@ -68,6 +68,53 @@ final class AttachmentStorage: ObservableObject {
 
     private init() {}
 
+    @MainActor
+    func saveNewAttachmentV3(
+        data: Data,
+        attachmentId: UUID,
+        ownerId: UUID,
+        noteId: UUID,
+        fileName: String,
+        mimeType: String
+    ) throws -> AttachmentRecord {
+        try AttachmentRepository().saveAttachment(
+            data: data,
+            attachmentId: attachmentId,
+            profileId: ownerId,
+            noteId: noteId,
+            fileName: fileName,
+            mimeType: mimeType
+        )
+    }
+
+    @MainActor
+    func uploadAndUpsertMetadataV3(attachment: AttachmentRecord) async {
+        guard attachment.deletedAt == nil,
+              let data = AttachmentFileStore.loadOriginal(
+                attachmentId: attachment.id,
+                fileName: attachment.fileName,
+                originalPath: attachment.originalPath
+              ) else { return }
+        do {
+            try await uploadToCloudKit(
+                snapshot: AttachmentSnapshot(
+                    id: attachment.id,
+                    ownerId: attachment.profileId,
+                    noteId: attachment.noteId,
+                    storagePath: attachment.storagePath,
+                    fileName: attachment.fileName,
+                    mimeType: attachment.mimeType,
+                    fileSize: attachment.fileSize,
+                    deletedAt: attachment.deletedAt
+                ),
+                data: data
+            )
+            try AttachmentRepository().markUploaded(profileId: attachment.profileId, id: attachment.id, syncedHash: nil)
+        } catch {
+            print("Failed to upload iCloud attachment \(attachment.id): \(error)")
+        }
+    }
+
     nonisolated func localCacheURL(for attachmentId: UUID, fileName: String) -> URL {
         AttachmentCache.localCacheURL(for: attachmentId, fileName: fileName)
     }
@@ -154,6 +201,19 @@ final class AttachmentStorage: ObservableObject {
         storagePath: String,
         fileName: String
     ) async throws -> Data {
+        if let ownerId = CloudKitSchema.ownerId(from: storagePath),
+           let attachment = try? await MainActor.run(body: {
+               try AttachmentRepository().find(profileId: ownerId, id: attachmentId)
+           }),
+           let original = AttachmentFileStore.loadOriginal(
+               attachmentId: attachmentId,
+               fileName: fileName,
+               originalPath: attachment.originalPath
+           ) {
+            print("[AttachmentStorage] source=original attachmentId=\(attachmentId.uuidString.lowercased()) fileName=\(fileName)")
+            return original
+        }
+
         if let cached = AttachmentCache.load(attachmentId: attachmentId, fileName: fileName) {
             print("[AttachmentStorage] source=cache attachmentId=\(attachmentId.uuidString.lowercased()) fileName=\(fileName)")
             return cached

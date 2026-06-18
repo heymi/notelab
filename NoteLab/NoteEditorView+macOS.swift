@@ -1,6 +1,5 @@
 import SwiftUI
 import Combine
-import SwiftData
 import Foundation
 import os
 import UniformTypeIdentifiers
@@ -10,7 +9,6 @@ import AppKit
 
 struct NoteEditorView: View {
     @Binding var note: Note
-    @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var aiClient: AIClient
     @EnvironmentObject private var store: NotebookStore
     @EnvironmentObject private var router: AppRouter
@@ -125,7 +123,6 @@ struct NoteEditorView: View {
                 note.updateMetrics()
                 store.updateDocument(noteId: note.id, document: newDoc)
             },
-            modelContext: modelContext,
             ownerId: auth.userId,
             noteId: note.id
         )

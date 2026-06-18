@@ -47,6 +47,13 @@ final class SubscriptionManager: ObservableObject {
     // MARK: - Private State
     
     private var updateListenerTask: Task<Void, Never>?
+
+    #if DEBUG
+    /// Temporary full-access switch for local device evaluation.
+    /// Keep this DEBUG-only so Release/TestFlight still relies on StoreKit.
+    private static let debugUnlockAllFeatures = true
+    private var debugTierOverride: SubscriptionTier?
+    #endif
     
     // MARK: - Computed Properties
     
@@ -71,6 +78,12 @@ final class SubscriptionManager: ObservableObject {
         // 从缓存恢复状态
         self.currentTier = entitlementCache.cachedTier
         self.expirationDate = entitlementCache.cachedExpiration
+
+        #if DEBUG
+        if Self.debugUnlockAllFeatures {
+            applyDebugTierOverride(.pro)
+        }
+        #endif
         
         // 启动交易监听
         updateListenerTask = listenForTransactionUpdates()
@@ -151,6 +164,14 @@ final class SubscriptionManager: ObservableObject {
     
     /// 刷新权益状态
     func refreshEntitlementState() async {
+        #if DEBUG
+        if Self.debugUnlockAllFeatures {
+            applyDebugTierOverride(.pro)
+            logger.info("Entitlement refresh skipped — debug full-access mode active")
+            return
+        }
+        #endif
+
         var highestTier: SubscriptionTier = .free
         var latestExpiration: Date?
         var activeProductId: String?
@@ -283,21 +304,33 @@ final class SubscriptionManager: ObservableObject {
     
     /// 检查是否可以使用 AI 功能
     func canUseAIFeature(_ feature: AIFeature) -> Bool {
+        #if DEBUG
+        if Self.debugUnlockAllFeatures { return true }
+        #endif
         return usageTracker.canUse(feature, tier: currentTier)
     }
     
     /// 记录 AI 功能使用
     func recordAIUsage(_ feature: AIFeature) {
+        #if DEBUG
+        if Self.debugUnlockAllFeatures { return }
+        #endif
         usageTracker.recordUsage(feature)
     }
     
     /// 检查是否可以创建笔记本
     func canCreateNotebook(currentCount: Int) -> Bool {
+        #if DEBUG
+        if Self.debugUnlockAllFeatures { return true }
+        #endif
         return currentCount < featureFlags.maxNotebooks
     }
     
     /// 检查是否可以使用云同步
     func canUseSync() -> Bool {
+        #if DEBUG
+        if Self.debugUnlockAllFeatures { return true }
+        #endif
         return featureFlags.canSync
     }
     
@@ -346,13 +379,18 @@ final class SubscriptionManager: ObservableObject {
     // MARK: - Debug
 
     #if DEBUG
-    private var debugTierOverride: SubscriptionTier?
-
     /// 设置订阅等级（仅用于测试）
     func debugSetTier(_ tier: SubscriptionTier) {
+        applyDebugTierOverride(tier)
+    }
+
+    private func applyDebugTierOverride(_ tier: SubscriptionTier) {
         debugTierOverride = tier
         self.currentTier = tier
-        entitlementCache.cacheTier(tier, expiration: Date().addingTimeInterval(86400 * 30))
+        let expiration = Date().addingTimeInterval(86400 * 30)
+        self.expirationDate = expiration
+        self.currentProductId = tier == .pro ? SubscriptionProductID.proYearly : nil
+        entitlementCache.cacheTier(tier, expiration: expiration)
     }
     #endif
 }

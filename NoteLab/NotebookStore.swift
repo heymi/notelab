@@ -1,7 +1,7 @@
 import Combine
 
 import SwiftUI
-import SwiftData
+import os
 
 final class NotebookStore: ObservableObject {
     @Published var notebooks: [Notebook]
@@ -11,10 +11,10 @@ final class NotebookStore: ObservableObject {
 
     private var linkBlocks: [UUID: [LinkedNoteBlock]] = [:]
     private var documents: [UUID: NoteDocument] = [:]
-    private var modelContext: ModelContext?
-    private var ownerId: UUID?
-    private var pendingSaveTask: Task<Void, Never>?
+    private var profileId: UUID?
     private var previewImageLoading: Set<UUID> = []
+    private let repository = NotebookRepository()
+    private let logger = Logger(subsystem: "NoteLab", category: "NotebookStore")
 
     private let whiteboardId = UUID(uuidString: "E5E00B5A-0A95-4F8E-8F6A-0E1C1D7F3B55")!
     private let whiteboardContentKey = "whiteboard.content"
@@ -44,77 +44,40 @@ final class NotebookStore: ObservableObject {
         loadLinkBlocks()
     }
 
-    func configure(ownerId: UUID, context: ModelContext) {
-        self.ownerId = ownerId
-        self.modelContext = context
+    func configure(profileId: UUID) {
+        self.profileId = profileId
         loadFromLocalCache()
     }
 
     func resetForSignOut() {
-        pendingSaveTask?.cancel()
-        pendingSaveTask = nil
         notebooks = []
         documents.removeAll()
         linkBlocks.removeAll()
         previewItemCache.removeAll()
-        ownerId = nil
-        modelContext = nil
+        profileId = nil
     }
 
     func loadFromLocalCache() {
-        guard let ownerId, let modelContext else { return }
+        guard let profileId else { return }
         // #region agent log
         DebugReporter.log(
             hypothesisId: "H3",
             location: "NotebookStore.swift:loadFromLocalCache",
             message: "loadFromLocalCache enter",
-            data: ["ownerIdSuffix": String(ownerId.uuidString.suffix(6))]
+            data: ["profileIdSuffix": String(profileId.uuidString.suffix(6))]
         )
         // #endregion
 
         do {
-            let predicate = #Predicate<LocalNotebook> { nb in
-                nb.ownerId == ownerId && nb.deletedAt == nil
-            }
-            let notebooksFetch = FetchDescriptor<LocalNotebook>(
-                predicate: predicate,
-                sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
-            )
-            let localNotebooks = try modelContext.fetch(notebooksFetch)
+            let newNotebooks = try repository.loadNotebooks(profileId: profileId)
             // #region agent log
             DebugReporter.log(
                 hypothesisId: "H3",
                 location: "NotebookStore.swift:loadFromLocalCache",
                 message: "loadFromLocalCache fetched",
-                data: ["count": localNotebooks.count]
+                data: ["count": newNotebooks.count]
             )
             // #endregion
-
-            let newNotebooks = localNotebooks.map { local in
-                let color = NotebookColor(rawValue: local.colorRaw) ?? .lime
-                let notes = (local.notes)
-                    .filter { $0.deletedAt == nil }
-                    .sorted {
-                        if $0.isPinned != $1.isPinned { return $0.isPinned && !$1.isPinned }
-                        return $0.createdAt > $1.createdAt
-                    }
-                    .map { $0.asNote() }
-
-                return Notebook(
-                    id: local.id,
-                    title: local.title,
-                    color: color,
-                    iconName: local.iconName,
-                    createdAt: local.createdAt,
-                    notes: notes,
-                    isPinned: local.isPinned,
-                    notebookDescription: local.notebookDescription
-                )
-            }
-            .sorted {
-                if $0.isPinned != $1.isPinned { return $0.isPinned && !$1.isPinned }
-                return $0.createdAt > $1.createdAt
-            }
             
             // Differential update to preserve identity and avoid full UI rebuild
             for (index, newNotebook) in newNotebooks.enumerated() {
@@ -148,7 +111,7 @@ final class NotebookStore: ObservableObject {
             refreshPreviewCaches(for: newNotebooks)
 
         } catch {
-            print("NotebookStore: loadFromLocalCache failed: \(error.localizedDescription)")
+            logger.error("loadFromLocalCache failed: \(error.localizedDescription, privacy: .public)")
             // #region agent log
             DebugReporter.log(
                 hypothesisId: "H4",
@@ -229,9 +192,7 @@ final class NotebookStore: ObservableObject {
         notebooks[index].notes.insert(newNote, at: 0)
         sortNotes(in: index)
 
-        if let ownerId, let modelContext {
-            upsertLocalNote(ownerId: ownerId, notebookId: notebookId, note: newNote, context: modelContext)
-        }
+        persistNote(newNote, notebookId: notebookId)
 
         schedulePreviewItemsUpdate(notebook: notebooks[index])
 
@@ -259,9 +220,7 @@ final class NotebookStore: ObservableObject {
         notebooks[index].notes.insert(newNote, at: 0)
         sortNotes(in: index)
 
-        if let ownerId, let modelContext {
-            upsertLocalNote(ownerId: ownerId, notebookId: notebookId, note: newNote, context: modelContext)
-        }
+        persistNote(newNote, notebookId: notebookId)
 
         schedulePreviewItemsUpdate(notebook: notebooks[index])
 
@@ -271,7 +230,7 @@ final class NotebookStore: ObservableObject {
     /// 检查是否可以创建新笔记本（返回 nil 表示已达限制）
     /// 如果达到限制，会发送通知触发付费墙
     func addNotebook(title: String, color: NotebookColor, iconName: String) -> UUID? {
-        guard let ownerId, let modelContext else { return nil }
+        guard let profileId else { return nil }
         
         // 检查笔记本数量限制
         let subscriptionManager = SubscriptionManager.shared
@@ -284,31 +243,14 @@ final class NotebookStore: ObservableObject {
             return nil
         }
         
-        let id = UUID()
-        let now = Date()
-
-        let local = LocalNotebook(
-            id: id,
-            ownerId: ownerId,
-            title: title,
-            colorRaw: color.rawValue,
-            iconName: iconName,
-            createdAt: now,
-            remoteUpdatedAt: now,
-            deletedAt: nil,
-            isDirty: true,
-            isPinned: false,
-            notebookDescription: "",
-            notes: []
-        )
-        modelContext.insert(local)
-        scheduleSave()
-
-        notebooks.insert(
-            Notebook(id: id, title: title, color: color, iconName: iconName, createdAt: now, notes: []),
-            at: 0
-        )
-        return id
+        do {
+            let notebook = try repository.createNotebook(profileId: profileId, title: title, color: color, iconName: iconName)
+            notebooks.insert(notebook, at: 0)
+            return notebook.id
+        } catch {
+            logger.error("create notebook failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     func updateNotebook(id: UUID, title: String? = nil, color: NotebookColor? = nil, description: String? = nil) {
@@ -326,27 +268,11 @@ final class NotebookStore: ObservableObject {
         }
         
         // 更新本地存储
-        guard let ownerId, let modelContext else { return }
+        guard let profileId else { return }
         do {
-            let predicate = #Predicate<LocalNotebook> { nb in
-                nb.ownerId == ownerId && nb.id == id
-            }
-            let fetch = FetchDescriptor<LocalNotebook>(predicate: predicate)
-            if let local = try modelContext.fetch(fetch).first {
-                if let title = title {
-                    local.title = title
-                }
-                if let color = color {
-                    local.colorRaw = color.rawValue
-                }
-                if let description = description {
-                    local.notebookDescription = description
-                }
-                local.isDirty = true
-                scheduleSave()
-            }
+            try repository.updateNotebook(profileId: profileId, id: id, title: title, color: color, description: description)
         } catch {
-            // ignore
+            logger.error("update notebook failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -354,25 +280,11 @@ final class NotebookStore: ObservableObject {
         guard let index = notebooks.firstIndex(where: { $0.id == id }) else { return }
         notebooks.remove(at: index)
         
-        guard let ownerId, let modelContext else { return }
+        guard let profileId else { return }
         do {
-            let predicate = #Predicate<LocalNotebook> { nb in
-                nb.ownerId == ownerId && nb.id == id
-            }
-            let fetch = FetchDescriptor<LocalNotebook>(predicate: predicate)
-            if let local = try modelContext.fetch(fetch).first {
-                let now = Date()
-                local.deletedAt = now
-                local.isDirty = true
-                // Soft-delete all notes as well (so sync can apply it).
-                for note in local.notes {
-                    note.deletedAt = now
-                    note.isDirty = true
-                }
-                scheduleSave()
-            }
+            try repository.deleteNotebook(profileId: profileId, id: id)
         } catch {
-            // ignore
+            logger.error("delete notebook failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -404,26 +316,11 @@ final class NotebookStore: ObservableObject {
         schedulePreviewItemsUpdate(notebook: notebooks[sourceIndex])
         schedulePreviewItemsUpdate(notebook: notebooks[targetIndex])
 
-        guard let ownerId, let modelContext else { return }
-        let id = noteId
+        guard let profileId else { return }
         do {
-            let notePredicate = #Predicate<LocalNote> { n in
-                n.ownerId == ownerId && n.id == id
-            }
-            let noteFetch = FetchDescriptor<LocalNote>(predicate: notePredicate)
-            guard let localNote = try modelContext.fetch(noteFetch).first else { return }
-
-            let notebookPredicate = #Predicate<LocalNotebook> { nb in
-                nb.ownerId == ownerId && nb.id == targetNotebookId
-            }
-            let notebookFetch = FetchDescriptor<LocalNotebook>(predicate: notebookPredicate)
-            if let localNotebook = try modelContext.fetch(notebookFetch).first {
-                localNote.notebook = localNotebook
-                localNote.isDirty = true
-                scheduleSave()
-            }
+            try repository.moveNote(profileId: profileId, noteId: noteId, targetNotebookId: targetNotebookId)
         } catch {
-            // ignore
+            logger.error("move note failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -437,20 +334,11 @@ final class NotebookStore: ObservableObject {
         linkBlocks.removeValue(forKey: noteId)
         schedulePreviewItemsUpdate(notebook: notebooks[notebookIndex])
 
-        guard let ownerId, let modelContext else { return }
-        let id = noteId
+        guard let profileId else { return }
         do {
-            let predicate = #Predicate<LocalNote> { n in
-                n.ownerId == ownerId && n.id == id
-            }
-            let fetch = FetchDescriptor<LocalNote>(predicate: predicate)
-            if let local = try modelContext.fetch(fetch).first {
-                local.deletedAt = Date()
-                local.isDirty = true
-                scheduleSave()
-            }
+            try repository.deleteNote(profileId: profileId, noteId: noteId)
         } catch {
-            // ignore
+            logger.error("delete note failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -462,19 +350,11 @@ final class NotebookStore: ObservableObject {
         notebooks[notebookIndex].notes[noteIndex].isPinned.toggle()
         sortNotes(in: notebookIndex)
 
-        guard let ownerId, let modelContext else { return }
-        let id = noteId
+        guard let profileId else { return }
         do {
-            let predicate = #Predicate<LocalNote> { n in
-                n.ownerId == ownerId && n.id == id
-            }
-            let fetch = FetchDescriptor<LocalNote>(predicate: predicate)
-            if let local = try modelContext.fetch(fetch).first {
-                local.isPinned.toggle()
-                scheduleSave()
-            }
+            try repository.setNotePinned(profileId: profileId, noteId: noteId, isPinned: notebooks[notebookIndex].notes[noteIndex].isPinned)
         } catch {
-            // ignore
+            logger.error("pin note failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -496,19 +376,11 @@ final class NotebookStore: ObservableObject {
         notebooks[index].isPinned.toggle()
         sortNotebooks()
 
-        guard let ownerId, let modelContext else { return }
-        let id = notebookId
+        guard let profileId else { return }
         do {
-            let predicate = #Predicate<LocalNotebook> { nb in
-                nb.ownerId == ownerId && nb.id == id
-            }
-            let fetch = FetchDescriptor<LocalNotebook>(predicate: predicate)
-            if let local = try modelContext.fetch(fetch).first {
-                local.isPinned.toggle()
-                scheduleSave()
-            }
+            try repository.setNotebookPinned(profileId: profileId, id: notebookId, isPinned: notebooks[index].isPinned)
         } catch {
-            // ignore
+            logger.error("pin notebook failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -1156,93 +1028,22 @@ final class NotebookStore: ObservableObject {
             }
         }
 
-        guard let ownerId, let modelContext else { return }
-        let noteId = updatedNote.id
+        guard let profileId,
+              let notebookId = notebookId(for: updatedNote.id) else { return }
 
-        // Write-through to SwiftData (debounced save).
         do {
-            let predicate = #Predicate<LocalNote> { n in
-                n.ownerId == ownerId && n.id == noteId
-            }
-            let fetch = FetchDescriptor<LocalNote>(predicate: predicate)
-            if let local = try modelContext.fetch(fetch).first {
-                local.title = updatedNote.title
-                local.summary = updatedNote.summary
-                local.paragraphCount = updatedNote.paragraphCount
-                local.bulletCount = updatedNote.bulletCount
-                local.hasAdditionalContext = updatedNote.hasAdditionalContext
-                local.content = updatedNote.content
-                local.contentRTF = updatedNote.contentRTF
-                local.isPinned = updatedNote.isPinned
-                local.isDirty = true
-                local.remoteUpdatedAt = updatedNote.updatedAt
-                scheduleSave()
-            }
+            try repository.updateNote(profileId: profileId, notebookId: notebookId, note: updatedNote)
         } catch {
-            // ignore
+            logger.error("update note failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
-    private func upsertLocalNote(ownerId: UUID, notebookId: UUID, note: Note, context: ModelContext) {
+    private func persistNote(_ note: Note, notebookId: UUID) {
+        guard let profileId else { return }
         do {
-            let noteId = note.id
-            let nbPred = #Predicate<LocalNotebook> { nb in
-                nb.ownerId == ownerId && nb.id == notebookId
-            }
-            let nbFetch = FetchDescriptor<LocalNotebook>(predicate: nbPred)
-            guard let localNotebook = try context.fetch(nbFetch).first else { return }
-
-            let notePred = #Predicate<LocalNote> { n in
-                n.ownerId == ownerId && n.id == noteId
-            }
-            let noteFetch = FetchDescriptor<LocalNote>(predicate: notePred)
-            if let existing = try context.fetch(noteFetch).first {
-                existing.title = note.title
-                existing.content = note.content
-                existing.contentRTF = note.contentRTF
-                existing.summary = note.summary
-                existing.paragraphCount = note.paragraphCount
-                existing.bulletCount = note.bulletCount
-                existing.hasAdditionalContext = note.hasAdditionalContext
-                existing.isPinned = note.isPinned
-                existing.isDirty = true
-                existing.notebook = localNotebook
-                existing.remoteUpdatedAt = Date()
-            } else {
-                let local = LocalNote(
-                    id: note.id,
-                    ownerId: ownerId,
-                    title: note.title,
-                    summary: note.summary,
-                    paragraphCount: note.paragraphCount,
-                    bulletCount: note.bulletCount,
-                    hasAdditionalContext: note.hasAdditionalContext,
-                    createdAt: note.createdAt,
-                    remoteUpdatedAt: Date(),
-                    version: 1,
-                    deletedAt: nil,
-                    contentRTF: note.contentRTF,
-                    content: note.content,
-                    isPinned: note.isPinned,
-                    isDirty: true,
-                    conflictParentId: nil,
-                    notebook: localNotebook
-                )
-                context.insert(local)
-                // Note: SwiftData automatically manages inverse relationships
-            }
-            scheduleSave()
+            try repository.createNote(profileId: profileId, notebookId: notebookId, note: note)
         } catch {
-            // ignore
-        }
-    }
-
-    private func scheduleSave() {
-        pendingSaveTask?.cancel()
-        guard let modelContext else { return }
-        pendingSaveTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            try? modelContext.save()
+            logger.error("persist note failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 }
@@ -1250,24 +1051,6 @@ final class NotebookStore: ObservableObject {
 private struct LinkBlocksPayload: Codable {
     let noteId: String
     let blocks: [LinkedNoteBlock]
-}
-
-private extension LocalNote {
-    func asNote() -> Note {
-        Note(
-            id: id,
-            title: title,
-            summary: summary,
-            paragraphCount: paragraphCount,
-            bulletCount: bulletCount,
-            hasAdditionalContext: hasAdditionalContext,
-            createdAt: createdAt,
-            updatedAt: remoteUpdatedAt,
-            contentRTF: contentRTF,
-            content: content,
-            isPinned: isPinned
-        )
-    }
 }
 
 struct NotebookPreviewItem: Identifiable {

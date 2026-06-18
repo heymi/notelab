@@ -1,6 +1,5 @@
 import SwiftUI
 import Combine
-import SwiftData
 import os
 
 enum AppTab: String, CaseIterable {
@@ -23,11 +22,12 @@ struct RootView: View {
     @StateObject private var syncEngine = SyncEngine()
     @StateObject private var avatarStore = AvatarStore()
     @State private var syncTask: Task<Void, Never>?
+    @State private var migrationTask: Task<Void, Never>?
     @State private var showPaywall = false
     @State private var paywallTrigger: PaywallTrigger = .manual
     @EnvironmentObject private var auth: AuthManager
-    @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
+    private let profileRepository = ProfileRepository()
     private let syncLogger = Logger(subsystem: "NoteLab", category: "Sync")
 
     var body: some View {
@@ -67,15 +67,7 @@ struct RootView: View {
         #if os(macOS)
         macOSLayout
             .task(id: auth.userId) {
-                syncTask?.cancel()
-                avatarStore.updateUserId(auth.userId)
-                guard let userId = auth.userId else { return }
-                // Small delay to ensure modelContext is fully ready
-                try? await Task.sleep(nanoseconds: 50_000_000) // 0.05s
-                guard !Task.isCancelled else { return }
-                store.configure(ownerId: userId, context: modelContext)
-                syncEngine.configure(ownerId: userId, context: modelContext)
-                startSync()
+                await configureForCurrentAccount()
             }
             .onChange(of: scenePhase) { _, newValue in
                 guard newValue == .active else { return }
@@ -108,15 +100,7 @@ struct RootView: View {
                 // #endregion
             }
             .task(id: auth.userId) {
-                syncTask?.cancel()
-                avatarStore.updateUserId(auth.userId)
-                guard let userId = auth.userId else { return }
-                // Small delay to ensure modelContext is fully ready
-                try? await Task.sleep(nanoseconds: 50_000_000) // 0.05s
-                guard !Task.isCancelled else { return }
-                store.configure(ownerId: userId, context: modelContext)
-                syncEngine.configure(ownerId: userId, context: modelContext)
-                startSync()
+                await configureForCurrentAccount()
             }
             .onChange(of: scenePhase) { _, newValue in
                 guard newValue == .active else { return }
@@ -319,6 +303,8 @@ struct RootView: View {
     private func handleSignOutCleanup() {
         syncTask?.cancel()
         syncTask = nil
+        migrationTask?.cancel()
+        migrationTask = nil
         syncEngine.resetForSignOut()
         store.resetForSignOut()
         planStore.resetForSignOut()
@@ -326,5 +312,34 @@ struct RootView: View {
         selection = .library
         avatarStore.updateUserId(nil)
         AttachmentStorage.shared.clearCache()
+    }
+
+    private func configureForCurrentAccount() async {
+        syncTask?.cancel()
+        migrationTask?.cancel()
+        avatarStore.updateUserId(auth.userId)
+        guard let account = auth.account else { return }
+        do {
+            let profile = try profileRepository.ensureProfile(account: account)
+            store.configure(profileId: profile.profileId)
+            syncEngine.configure(profileId: profile.profileId)
+            startLegacyMigrationIfNeeded(profileId: profile.profileId)
+            startSync()
+        } catch {
+            syncLogger.error("profile setup failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func startLegacyMigrationIfNeeded(profileId: UUID) {
+        migrationTask = Task(priority: .utility) {
+            await SwiftDataV3MigrationService.migrateIfNeeded(profileId: profileId)
+            #if DEBUG
+            await DebugSampleDataSeeder.seedIfNeeded(profileId: profileId)
+            #endif
+            if Task.isCancelled { return }
+            await MainActor.run {
+                store.loadFromLocalCache()
+            }
+        }
     }
 }

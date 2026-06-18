@@ -2,7 +2,6 @@ import Foundation
 #if os(macOS)
 import AppKit
 import SwiftUI
-import SwiftData
 import UniformTypeIdentifiers
 
 // MARK: - Block Editor View Controller for macOS
@@ -13,8 +12,7 @@ final class BlockEditorViewControllerMac: NSViewController {
     var onSelectionChange: ((String, NSRange) -> Void)?
     var onSelectedBlockIdsChange: (([UUID]) -> Void)?
     
-    // Context for attachment storage
-    var modelContext: ModelContext?
+    // IDs for attachment storage
     var ownerId: UUID?
     var noteId: UUID?
     
@@ -295,28 +293,22 @@ final class BlockEditorViewControllerMac: NSViewController {
         let attachmentId = UUID()
         let attachmentBlock: Block
         
-        if let context = modelContext, let ownerId = ownerId, let noteId = noteId {
+        if let ownerId = ownerId, let noteId = noteId {
             // Save to local cache
             AttachmentCache.save(data: data, attachmentId: attachmentId, fileName: fileName)
             
-            // Create LocalAttachment record
             let mimeType = AttachmentStorage.mimeType(for: fileName)
             Task { @MainActor in
                 do {
-                    let localAttachment = try await AttachmentStorage.shared.saveNewAttachment(
+                    let localAttachment = try AttachmentStorage.shared.saveNewAttachmentV3(
                         data: data,
                         attachmentId: attachmentId,
                         ownerId: ownerId,
                         noteId: noteId,
                         fileName: fileName,
-                        mimeType: mimeType,
-                        context: context
+                        mimeType: mimeType
                     )
-                    try? context.save()
-                    await AttachmentStorage.shared.uploadAndUpsertMetadata(
-                        attachment: localAttachment,
-                        context: context
-                    )
+                    await AttachmentStorage.shared.uploadAndUpsertMetadataV3(attachment: localAttachment)
                 } catch {
                     print("Failed to save attachment: \(error)")
                 }
@@ -324,7 +316,7 @@ final class BlockEditorViewControllerMac: NSViewController {
             
             let ext = (fileName as NSString).pathExtension
             let storageName = ext.isEmpty ? attachmentId.uuidString : "\(attachmentId.uuidString).\(ext)"
-            let storagePath = "\(ownerId.uuidString)/\(storageName)"
+            let storagePath = "icloud/\(ownerId.uuidString)/\(storageName)"
             attachmentBlock = Block.attachment(type: type, fileName: fileName, storagePath: storagePath, attachmentId: attachmentId)
         } else {
             attachmentBlock = Block.attachment(type: type, fileName: fileName, data: data)

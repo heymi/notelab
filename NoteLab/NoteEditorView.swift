@@ -1,7 +1,6 @@
 #if os(iOS)
 import SwiftUI
 import Combine
-import SwiftData
 import Foundation
 import os
 #if canImport(UIKit)
@@ -13,7 +12,6 @@ import CoreText
 struct NoteEditorView: View {
     @Binding var note: Note
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var aiClient: AIClient
     @EnvironmentObject private var aiCenter: AIProcessingCenter
     @EnvironmentObject private var store: NotebookStore
@@ -242,7 +240,6 @@ struct NoteEditorView: View {
                             document = doc
                             syncNoteFromDocument(doc)
                         },
-                        modelContext: modelContext,
                         ownerId: auth.userId,
                         noteId: note.id
                     )
@@ -836,9 +833,7 @@ struct NoteEditorView: View {
 
         AttachmentCache.save(data: data, attachmentId: attachmentId, fileName: fileName)
 
-        let ext = (fileName as NSString).pathExtension
-        let storageName = ext.isEmpty ? attachmentId.uuidString : "\(attachmentId.uuidString).\(ext)"
-        let storagePath = "\(ownerId.uuidString)/\(storageName)"
+        let storagePath = CloudKitSchema.storagePath(ownerId: ownerId, attachmentId: attachmentId, fileName: fileName)
 
         let markdown = "\n![Attachment](\(storagePath))\n"
         appendPlainText(markdown)
@@ -847,21 +842,16 @@ struct NoteEditorView: View {
         Task { @MainActor in
             do {
                 let mimeType = AttachmentStorage.mimeType(for: fileName)
-                let localAttachment = try await AttachmentStorage.shared.saveNewAttachment(
+                let localAttachment = try AttachmentStorage.shared.saveNewAttachmentV3(
                     data: data,
                     attachmentId: attachmentId,
                     ownerId: ownerId,
                     noteId: note.id,
                     fileName: fileName,
-                    mimeType: mimeType,
-                    context: modelContext
+                    mimeType: mimeType
                 )
-                try? modelContext.save()
 
-                await AttachmentStorage.shared.uploadAndUpsertMetadata(
-                    attachment: localAttachment,
-                    context: modelContext
-                )
+                await AttachmentStorage.shared.uploadAndUpsertMetadataV3(attachment: localAttachment)
                 logger.info("Attachment uploaded successfully: \(attachmentId)")
             } catch {
                 logger.error("Failed to upload attachment: \(error.localizedDescription)")

@@ -19,6 +19,23 @@ struct NoteLabTests {
         _ = try context.fetch(fetch)
     }
 
+    @MainActor @Test func storageV3CreatesNotebookAndOutboxItem() async throws {
+        let profileId = UUID()
+        let repository = NotebookRepository()
+        let notebook = try repository.createNotebook(
+            profileId: profileId,
+            title: "Storage v3 smoke",
+            color: .lime,
+            iconName: "book"
+        )
+
+        let loaded = try repository.loadNotebooks(profileId: profileId)
+        #expect(loaded.contains(where: { $0.id == notebook.id && $0.title == "Storage v3 smoke" }))
+
+        let pending = try repository.pendingOutbox(profileId: profileId)
+        #expect(pending.contains(where: { $0.entityType == .notebook && $0.entityId == notebook.id }))
+    }
+
     @MainActor @Test func richTextRoundTripPreservesPlainText() async throws {
         let original = AttributedString("Hello 世界\n- [ ] Task")
         let data = RichTextCodec.encodeRTF(from: original)
