@@ -145,7 +145,7 @@ final class AttachmentStorage: ObservableObject {
         fileName: String,
         mimeType: String
     ) async throws -> String {
-        let storagePath = CloudKitSchema.storagePath(ownerId: ownerId, attachmentId: attachmentId, fileName: fileName)
+        let storagePath = AttachmentPathFactory.storagePath(ownerId: ownerId, attachmentId: attachmentId, fileName: fileName)
         try await uploadToCloudKit(
             snapshot: AttachmentSnapshot(
                 id: attachmentId,
@@ -248,7 +248,7 @@ final class AttachmentStorage: ObservableObject {
             throw NSError(domain: "AttachmentStorage", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to save to cache"])
         }
 
-        let storagePath = CloudKitSchema.storagePath(ownerId: ownerId, attachmentId: attachmentId, fileName: fileName)
+        let storagePath = AttachmentPathFactory.storagePath(ownerId: ownerId, attachmentId: attachmentId, fileName: fileName)
         let attachment = LocalAttachment(
             id: attachmentId,
             ownerId: ownerId,

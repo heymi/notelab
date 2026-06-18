@@ -46,6 +46,7 @@ struct NoteEditorView: View {
     @State private var showMoreMenu = false
     @State private var showMoveSheet = false
     @State private var showFormatMenu = false
+    @State private var flushNextDocumentChange = false
     
     // Undo
     @State private var undoSnapshot: NoteUndoSnapshot?
@@ -59,7 +60,11 @@ struct NoteEditorView: View {
             .background(Theme.background)
             .toolbar { toolbarContent }
             .onAppear { loadDocumentIfNeeded() }
-            .onChange(of: note.id) { _, _ in loadDocumentIfNeeded() }
+            .onDisappear { store.flushPendingNotePersistence(noteId: note.id) }
+            .onChange(of: note.id) { oldValue, _ in
+                store.flushPendingNotePersistence(noteId: oldValue)
+                loadDocumentIfNeeded()
+            }
             .confirmationDialog("询问 AI", isPresented: $showAIAction) {
                 Button("整理笔记") { runFormat() }
                 Button("提取待办") { runExtractTasks() }
@@ -91,7 +96,10 @@ struct NoteEditorView: View {
                         .keyboardShortcut("/", modifiers: .command)
                     Button("") { showAIAction = true }
                         .keyboardShortcut("j", modifiers: .command)
-                    Button("") { pendingCommand = EditorCommandRequest(command: .requestAttachment) }
+                    Button("") {
+                        flushNextDocumentChange = true
+                        pendingCommand = EditorCommandRequest(command: .requestAttachment)
+                    }
                         .keyboardShortcut("p", modifiers: [.command, .shift])
                 }
                 .opacity(0)
@@ -122,6 +130,10 @@ struct NoteEditorView: View {
                 note.content = newDoc.flattenMarkdown()
                 note.updateMetrics()
                 store.updateDocument(noteId: note.id, document: newDoc)
+                if flushNextDocumentChange {
+                    flushNextDocumentChange = false
+                    store.flushPendingNotePersistence(noteId: note.id)
+                }
             },
             ownerId: auth.userId,
             noteId: note.id
@@ -143,6 +155,7 @@ struct NoteEditorView: View {
             
             // Attachment
             Button {
+                flushNextDocumentChange = true
                 pendingCommand = EditorCommandRequest(command: .requestAttachment)
             } label: {
                 Image(systemName: "paperclip")
@@ -208,6 +221,7 @@ struct NoteEditorView: View {
                     note.content = restored
                         note.updateMetrics()
                         store.updateDocument(noteId: note.id, document: document)
+                        store.flushPendingNotePersistence(noteId: note.id)
                         showAISheet = false
                     }
                     .buttonStyle(.borderedProminent)
@@ -363,6 +377,7 @@ struct NoteEditorView: View {
         note.content = snapshot.content
         document = NoteDocument.fromMarkdown(snapshot.content)
         store.updateDocument(noteId: note.id, document: document)
+        store.flushPendingNotePersistence(noteId: note.id)
         undoSnapshot = nil
     }
     

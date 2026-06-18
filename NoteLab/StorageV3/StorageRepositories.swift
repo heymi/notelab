@@ -504,7 +504,7 @@ final class AttachmentRepository {
         mimeType: String
     ) throws -> AttachmentRecord {
         let originalURL = try AttachmentFileStore.saveOriginal(data: data, attachmentId: attachmentId, fileName: fileName)
-        let storagePath = CloudKitSchema.storagePath(ownerId: profileId, attachmentId: attachmentId, fileName: fileName)
+        let storagePath = AttachmentPathFactory.storagePath(ownerId: profileId, attachmentId: attachmentId, fileName: fileName)
         let now = Date()
         let entity = try fetchAttachment(profileId: profileId, id: attachmentId) ?? AttachmentEntity(context: storage.mainContext)
         entity.id = attachmentId.uuidString.lowercased()

@@ -314,6 +314,7 @@ final class AIProcessingCenter: ObservableObject {
         updated.updateMetrics()
         binding.wrappedValue = updated
         store.updateDocument(noteId: updated.id, document: NoteDocument.fromMarkdown(markdown))
+        store.flushPendingNotePersistence(noteId: updated.id)
         lastAppliedNoteId = updated.id
     }
 
@@ -333,6 +334,7 @@ final class AIProcessingCenter: ObservableObject {
         updated.updateMetrics()
         binding.wrappedValue = updated
         store.updateDocument(noteId: updated.id, document: merged)
+        store.flushPendingNotePersistence(noteId: updated.id)
         lastAppliedNoteId = updated.id
     }
 }

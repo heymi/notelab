@@ -13,8 +13,14 @@ final class NotebookStore: ObservableObject {
     private var documents: [UUID: NoteDocument] = [:]
     private var profileId: UUID?
     private var previewImageLoading: Set<UUID> = []
+    private var pendingNotePersists: [UUID: PendingNotePersistence] = [:]
+    private var pendingNotePersistWorkItems: [UUID: DispatchWorkItem] = [:]
+    private var pendingPreviewWorkItems: [UUID: DispatchWorkItem] = [:]
+    private var previewItemTasks: [UUID: Task<Void, Never>] = [:]
     private let repository = NotebookRepository()
     private let logger = Logger(subsystem: "NoteLab", category: "NotebookStore")
+    private let notePersistenceDebounce: TimeInterval = 0.5
+    private let previewDebounce: TimeInterval = 0.35
 
     private let whiteboardId = UUID(uuidString: "E5E00B5A-0A95-4F8E-8F6A-0E1C1D7F3B55")!
     private let whiteboardContentKey = "whiteboard.content"
@@ -50,6 +56,8 @@ final class NotebookStore: ObservableObject {
     }
 
     func resetForSignOut() {
+        flushAllPendingNotePersistence()
+        cancelPreviewWork()
         notebooks = []
         documents.removeAll()
         linkBlocks.removeAll()
@@ -158,7 +166,7 @@ final class NotebookStore: ObservableObject {
                 )
             },
             set: { newValue in
-                self.applyLocalUpdate(note: newValue)
+                self.applyLocalUpdate(note: newValue, debouncePersistence: true)
             }
         )
     }
@@ -300,6 +308,7 @@ final class NotebookStore: ObservableObject {
     }
 
     func moveNote(noteId: UUID, to targetNotebookId: UUID) {
+        flushPendingNotePersistence(noteId: noteId)
         guard let sourceIndex = notebooks.firstIndex(where: { $0.notes.contains(where: { $0.id == noteId }) }),
               let noteIndex = notebooks[sourceIndex].notes.firstIndex(where: { $0.id == noteId }),
               let targetIndex = notebooks.firstIndex(where: { $0.id == targetNotebookId }) else {
@@ -325,6 +334,7 @@ final class NotebookStore: ObservableObject {
     }
 
     func deleteNote(noteId: UUID, from notebookId: UUID) {
+        flushPendingNotePersistence(noteId: noteId)
         guard let notebookIndex = notebooks.firstIndex(where: { $0.id == notebookId }),
               let noteIndex = notebooks[notebookIndex].notes.firstIndex(where: { $0.id == noteId }) else {
             return
@@ -596,10 +606,46 @@ final class NotebookStore: ObservableObject {
     }
 
     private func schedulePreviewItemsUpdate(notebook: Notebook) {
-        Task.detached(priority: .utility) { [weak self] in
+        pendingPreviewWorkItems[notebook.id]?.cancel()
+        previewItemTasks[notebook.id]?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let task = Task.detached(priority: .utility) { [weak self] in
+                let items = Self.previewItemsFromNotebook(notebook)
+                if Task.isCancelled { return }
+                await MainActor.run {
+                    guard Task.isCancelled == false else { return }
+                    self?.previewItemCache[notebook.id] = items
+                    self?.previewItemTasks.removeValue(forKey: notebook.id)
+                }
+            }
+            self.previewItemTasks[notebook.id] = task
+            self.pendingPreviewWorkItems.removeValue(forKey: notebook.id)
+        }
+
+        pendingPreviewWorkItems[notebook.id] = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + previewDebounce, execute: workItem)
+    }
+
+    private func cancelPreviewWork() {
+        pendingPreviewWorkItems.values.forEach { $0.cancel() }
+        pendingPreviewWorkItems.removeAll()
+        previewItemTasks.values.forEach { $0.cancel() }
+        previewItemTasks.removeAll()
+    }
+
+    private func refreshPreviewItemsImmediately(notebook: Notebook) {
+        pendingPreviewWorkItems[notebook.id]?.cancel()
+        pendingPreviewWorkItems.removeValue(forKey: notebook.id)
+        previewItemTasks[notebook.id]?.cancel()
+        previewItemTasks[notebook.id] = Task.detached(priority: .utility) { [weak self] in
             let items = Self.previewItemsFromNotebook(notebook)
+            if Task.isCancelled { return }
             await MainActor.run {
+                guard Task.isCancelled == false else { return }
                 self?.previewItemCache[notebook.id] = items
+                self?.previewItemTasks.removeValue(forKey: notebook.id)
             }
         }
     }
@@ -976,7 +1022,7 @@ final class NotebookStore: ObservableObject {
         note.updateMetrics()
         notebooks[notebookIndex].notes[noteIndex] = note
         updateDocumentTodoIfNeeded(noteId: note.id, lineIndex: item.lineIndex)
-        applyLocalUpdate(note: note)
+        applyLocalUpdate(note: note, debouncePersistence: false)
     }
 
     private func updateChecklistLine(in content: String, lineIndex: Int) -> String {
@@ -1016,21 +1062,62 @@ final class NotebookStore: ObservableObject {
         }
     }
 
-    private func applyLocalUpdate(note: Note) {
+    private func applyLocalUpdate(note: Note, debouncePersistence: Bool) {
         var updatedNote = note
         updatedNote.updatedAt = Date()
         // Update in-memory immediately for UI.
+        var updatedNotebookId: UUID?
         for notebookIndex in notebooks.indices {
             if let noteIndex = notebooks[notebookIndex].notes.firstIndex(where: { $0.id == updatedNote.id }) {
                 notebooks[notebookIndex].notes[noteIndex] = updatedNote
+                updatedNotebookId = notebooks[notebookIndex].id
                 schedulePreviewItemsUpdate(notebook: notebooks[notebookIndex])
                 break
             }
         }
 
         guard let profileId,
-              let notebookId = notebookId(for: updatedNote.id) else { return }
+              let notebookId = updatedNotebookId ?? notebookId(for: updatedNote.id) else { return }
 
+        if debouncePersistence {
+            schedulePersistNote(updatedNote, notebookId: notebookId)
+            return
+        }
+        cancelPendingNotePersistence(noteId: updatedNote.id)
+        persistUpdatedNote(updatedNote, profileId: profileId, notebookId: notebookId)
+    }
+
+    func schedulePersistNote(_ note: Note, notebookId: UUID) {
+        guard profileId != nil else { return }
+        pendingNotePersistWorkItems[note.id]?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.flushPendingNotePersistence(noteId: note.id)
+        }
+        pendingNotePersists[note.id] = PendingNotePersistence(note: note, notebookId: notebookId)
+        pendingNotePersistWorkItems[note.id] = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + notePersistenceDebounce, execute: item)
+    }
+
+    func flushPendingNotePersistence(noteId: UUID) {
+        pendingNotePersistWorkItems[noteId]?.cancel()
+        pendingNotePersistWorkItems.removeValue(forKey: noteId)
+        guard let pending = pendingNotePersists.removeValue(forKey: noteId),
+              let profileId else { return }
+        persistUpdatedNote(pending.note, profileId: profileId, notebookId: pending.notebookId)
+    }
+
+    func flushAllPendingNotePersistence() {
+        let ids = Array(pendingNotePersists.keys)
+        ids.forEach { flushPendingNotePersistence(noteId: $0) }
+    }
+
+    private func cancelPendingNotePersistence(noteId: UUID) {
+        pendingNotePersistWorkItems[noteId]?.cancel()
+        pendingNotePersistWorkItems.removeValue(forKey: noteId)
+        pendingNotePersists.removeValue(forKey: noteId)
+    }
+
+    private func persistUpdatedNote(_ updatedNote: Note, profileId: UUID, notebookId: UUID) {
         do {
             try repository.updateNote(profileId: profileId, notebookId: notebookId, note: updatedNote)
         } catch {
@@ -1051,6 +1138,11 @@ final class NotebookStore: ObservableObject {
 private struct LinkBlocksPayload: Codable {
     let noteId: String
     let blocks: [LinkedNoteBlock]
+}
+
+private struct PendingNotePersistence {
+    let note: Note
+    let notebookId: UUID
 }
 
 struct NotebookPreviewItem: Identifiable {

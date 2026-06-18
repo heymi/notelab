@@ -164,7 +164,7 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
 
     func updateSentHighlightBlockIds(_ ids: Set<UUID>) {
         sentHighlightBlockIds = ids
-        tableView.reloadData()
+        reloadVisibleRowsWithoutAnimation()
     }
 
     func exitMultiSelectModeIfNeeded() {
@@ -318,9 +318,7 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
             }
             
             // Create block with storage path reference
-            let ext = (fileName as NSString).pathExtension
-            let storageName = ext.isEmpty ? attachmentId.uuidString : "\(attachmentId.uuidString).\(ext)"
-            let storagePath = "icloud/\(ownerId.uuidString)/\(storageName)"
+            let storagePath = AttachmentPathFactory.storagePath(ownerId: ownerId, attachmentId: attachmentId, fileName: fileName)
             attachmentBlock = Block.attachment(type: type, fileName: fileName, storagePath: storagePath, attachmentId: attachmentId)
         } else {
             // Fallback: use legacy embedded data (for when context is not available)
@@ -781,7 +779,7 @@ extension BlockEditorViewController {
         multiSelectTap.isEnabled = true
         view.endEditing(true)
         hideActiveTableControls()
-        tableView.reloadData()
+        reloadVisibleRowsWithoutAnimation()
     }
 
     func exitMultiSelectMode() {
@@ -789,7 +787,7 @@ extension BlockEditorViewController {
         multiSelectedBlockIds.removeAll()
         multiSelectTap.isEnabled = false
         activeTableIndexPath = nil
-        tableView.reloadData()
+        reloadVisibleRowsWithoutAnimation()
         onSelectionChange?("", NSRange(location: 0, length: 0))
         onSelectedBlockIdsChange?([])
     }
@@ -845,6 +843,13 @@ extension BlockEditorViewController {
         UIView.performWithoutAnimation {
             self.tableView.beginUpdates()
             self.tableView.endUpdates()
+        }
+    }
+
+    private func reloadVisibleRowsWithoutAnimation() {
+        guard let visibleRows = tableView.indexPathsForVisibleRows, !visibleRows.isEmpty else { return }
+        UIView.performWithoutAnimation {
+            tableView.reloadRows(at: visibleRows, with: .none)
         }
     }
 

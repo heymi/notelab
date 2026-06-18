@@ -73,8 +73,11 @@ struct RootView: View {
                 await configureForCurrentAccount()
             }
             .onChange(of: scenePhase) { _, newValue in
-                guard newValue == .active else { return }
-                startSync(reason: .sceneActive)
+                if newValue == .active {
+                    startSync(reason: .sceneActive)
+                } else {
+                    store.flushAllPendingNotePersistence()
+                }
             }
             .onChange(of: auth.userId) { _, newValue in
                 if newValue == nil {
@@ -106,8 +109,11 @@ struct RootView: View {
                 await configureForCurrentAccount()
             }
             .onChange(of: scenePhase) { _, newValue in
-                guard newValue == .active else { return }
-                startSync(reason: .sceneActive)
+                if newValue == .active {
+                    startSync(reason: .sceneActive)
+                } else {
+                    store.flushAllPendingNotePersistence()
+                }
             }
             .onChange(of: auth.userId) { _, newValue in
                 if newValue == nil {

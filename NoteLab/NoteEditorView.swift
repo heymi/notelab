@@ -57,6 +57,7 @@ struct NoteEditorView: View {
     @State private var showDocumentPicker = false
     @State private var showWhiteboardLinks = false
     @State private var showClearWhiteboardConfirm = false
+    @State private var flushNextDocumentChange = false
     @State private var whiteboardLinkDrag: CGSize = .zero
     @AppStorage("whiteboard.link.offset.x") private var whiteboardLinkOffsetX: Double = 0
     @AppStorage("whiteboard.link.offset.y") private var whiteboardLinkOffsetY: Double = 0
@@ -68,7 +69,11 @@ struct NoteEditorView: View {
     var body: some View {
         editorScaffold
             .onAppear { loadDocumentIfNeeded() }
-            .onChange(of: note.id) { _, _ in loadDocumentIfNeeded() }
+            .onDisappear { store.flushPendingNotePersistence(noteId: note.id) }
+            .onChange(of: note.id) { oldValue, _ in
+                store.flushPendingNotePersistence(noteId: oldValue)
+                loadDocumentIfNeeded()
+            }
             .onChange(of: aiCenter.lastAppliedNoteId) { _, newValue in
                 if newValue == note.id {
                     loadDocumentIfNeeded()
@@ -239,6 +244,10 @@ struct NoteEditorView: View {
                         onDocumentChange: { doc in
                             document = doc
                             syncNoteFromDocument(doc)
+                            if flushNextDocumentChange {
+                                flushNextDocumentChange = false
+                                store.flushPendingNotePersistence(noteId: note.id)
+                            }
                         },
                         ownerId: auth.userId,
                         noteId: note.id
@@ -318,20 +327,9 @@ struct NoteEditorView: View {
         return trimmed.isEmpty ? "无标题" : trimmed
     }
 
-    private func notePlainTextForExport() -> String {
-        let text = document.flattenPlainText().trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.isEmpty {
-            return text
-        }
-        let fallback = NoteDocument.fromMarkdown(note.content).flattenPlainText()
-        return fallback.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     private func prepareShare() {
         let title = noteTitleForExport()
-        let body = notePlainTextForExport()
-        let content = body.isEmpty ? title : "\(title)\n\n\(body)"
-        shareItems = [content]
+        shareItems = [NoteShareBuilder.plainText(title: title, document: document, fallbackMarkdown: note.content)]
         showShareSheet = true
     }
 
@@ -344,335 +342,19 @@ struct NoteEditorView: View {
     @MainActor
     private func exportPDFAsync() async {
         let title = noteTitleForExport()
-        let items = await buildPDFItems(title: title, document: document)
-        guard let data = renderPDFData(items: items, pageSize: selectedPDFSize) else {
-            exportErrorMessage = "无法生成 PDF，请稍后再试。"
-            showExportError = true
-            return
-        }
-
-        let safeName = sanitizeFileName(title.isEmpty ? "Note" : title)
-        let fileName = "\(safeName).pdf"
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
         do {
-            try data.write(to: url, options: .atomic)
-            exportPDFURL = url
+            exportPDFURL = try await NotePDFExporter.export(
+                title: title,
+                document: document,
+                pageSize: selectedPDFSize,
+                noteId: note.id
+            )
             showPDFPreview = true
         } catch {
-            exportErrorMessage = "保存 PDF 失败，请稍后再试。"
+            exportErrorMessage = (error as? NotePDFExportError) == .renderFailed
+                ? "无法生成 PDF，请稍后再试。"
+                : "保存 PDF 失败，请稍后再试。"
             showExportError = true
-        }
-    }
-
-    private func sanitizeFileName(_ name: String) -> String {
-        let invalid = CharacterSet(charactersIn: "/\\?%*|\"<>:")
-        let components = name.components(separatedBy: invalid)
-        let cleaned = components.joined(separator: "_").trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleaned.isEmpty {
-            return "Note-\(note.id.uuidString.prefix(6))"
-        }
-        return cleaned
-    }
-
-    private enum PDFItem {
-        case text(NSAttributedString)
-        case image(UIImage)
-    }
-
-    @MainActor
-    private func buildPDFItems(title: String, document: NoteDocument) async -> [PDFItem] {
-        var items: [PDFItem] = []
-
-        let titleText = parseMarkdownText(
-            title,
-            font: .systemFont(ofSize: 24, weight: .bold),
-            alignment: .center,
-            lineSpacing: 6,
-            trailingNewlines: "\n\n"
-        )
-        items.append(.text(titleText))
-
-        for (index, block) in document.blocks.enumerated() {
-            let nextBlock = index + 1 < document.blocks.count ? document.blocks[index + 1] : nil
-            let isNextParagraph = nextBlock?.kind == .paragraph || nextBlock?.kind == .bullet || nextBlock?.kind == .numbered || nextBlock?.kind == .todo
-
-            switch block.kind {
-            case .heading:
-                let level = max(1, min(block.level ?? 1, 6))
-                let fontSize: CGFloat = level == 1 ? 20 : level == 2 ? 18 : 16
-                let trailingNewlines = isNextParagraph ? "\n" : "\n\n"
-                let headingText = parseMarkdownText(
-                    block.text,
-                    font: .systemFont(ofSize: fontSize, weight: .semibold),
-                    lineSpacing: 4,
-                    trailingNewlines: trailingNewlines
-                )
-                items.append(.text(headingText))
-            case .paragraph:
-                if !block.text.isEmpty {
-                    let bodyText = parseMarkdownText(
-                        block.text,
-                        font: .systemFont(ofSize: 14),
-                        lineSpacing: 5,
-                        trailingNewlines: "\n"
-                    )
-                    items.append(.text(bodyText))
-                }
-            case .bullet:
-                let bulletText = "• " + block.text
-                let bodyText = parseMarkdownText(
-                    bulletText,
-                    font: .systemFont(ofSize: 14),
-                    lineSpacing: 5,
-                    trailingNewlines: "\n"
-                )
-                items.append(.text(bodyText))
-            case .numbered:
-                let numberedText = "1. " + block.text
-                let bodyText = parseMarkdownText(
-                    numberedText,
-                    font: .systemFont(ofSize: 14),
-                    lineSpacing: 5,
-                    trailingNewlines: "\n"
-                )
-                items.append(.text(bodyText))
-            case .todo:
-                let checked = block.isChecked ?? false
-                let todoPrefix = checked ? "☑ " : "☐ "
-                let todoText = todoPrefix + block.text
-                let bodyText = parseMarkdownText(
-                    todoText,
-                    font: .systemFont(ofSize: 14),
-                    color: checked ? .secondaryLabel : .label,
-                    lineSpacing: 5,
-                    trailingNewlines: "\n"
-                )
-                items.append(.text(bodyText))
-            case .quote:
-                let quoteText = parseMarkdownText(
-                    block.text,
-                    font: .italicSystemFont(ofSize: 14),
-                    color: .secondaryLabel,
-                    lineSpacing: 5,
-                    trailingNewlines: "\n"
-                )
-                items.append(.text(quoteText))
-            case .code:
-                let codeText = NSMutableAttributedString()
-                let codeFont = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-                let codeStyle = NSMutableParagraphStyle()
-                codeStyle.lineSpacing = 3
-                let codeAttributes: [NSAttributedString.Key: Any] = [
-                    .font: codeFont,
-                    .foregroundColor: UIColor.label,
-                    .backgroundColor: UIColor.systemGray6,
-                    .paragraphStyle: codeStyle
-                ]
-                codeText.append(NSAttributedString(string: block.text + "\n\n", attributes: codeAttributes))
-                items.append(.text(codeText))
-            case .table:
-                let tableText = block.table?.plainText ?? ""
-                if !tableText.isEmpty {
-                    let bodyText = parseMarkdownText(
-                        tableText,
-                        font: .systemFont(ofSize: 14),
-                        lineSpacing: 5,
-                        trailingNewlines: "\n\n"
-                    )
-                    items.append(.text(bodyText))
-                }
-            case .attachment:
-                if let attachment = block.attachment, attachment.type == .image {
-                    if let image = await loadImageAttachment(attachment) {
-                        items.append(.image(image))
-                    } else {
-                        let fallbackText = parseMarkdownText(
-                            "[图片未加载: \(attachment.fileName)]",
-                            font: .systemFont(ofSize: 12),
-                            color: .secondaryLabel,
-                            lineSpacing: 5,
-                            trailingNewlines: "\n"
-                        )
-                        items.append(.text(fallbackText))
-                    }
-                }
-            }
-        }
-        return items
-    }
-
-    private func parseMarkdownText(_ text: String, font: UIFont, color: UIColor = .label, alignment: NSTextAlignment = .left, lineSpacing: CGFloat = 0, trailingNewlines: String = "\n") -> NSAttributedString {
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.alignment = alignment
-        paragraphStyle.lineSpacing = lineSpacing
-
-        let baseAttributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: color,
-            .paragraphStyle: paragraphStyle
-        ]
-
-        let attributedString = NSMutableAttributedString(string: text, attributes: baseAttributes)
-
-        typealias PatternHandler = (NSMutableAttributedString, NSTextCheckingResult, UIFont, UIColor, NSMutableParagraphStyle) -> Void
-
-        let patterns: [(pattern: String, handler: PatternHandler)] = [
-            ("\\*\\*(.*?)\\*\\*", { attrStr, match, baseFont, textColor, paraStyle in
-                let fullRange = match.range
-                let contentRange = match.range(at: 1)
-                guard let range = Range(contentRange, in: attrStr.string) else { return }
-                let content = String(attrStr.string[range])
-                let descriptor = baseFont.fontDescriptor.withSymbolicTraits(.traitBold)
-                let boldFont = descriptor.map { UIFont(descriptor: $0, size: baseFont.pointSize) } ?? baseFont
-                let boldAttributes: [NSAttributedString.Key: Any] = [
-                    .font: boldFont,
-                    .foregroundColor: textColor,
-                    .paragraphStyle: paraStyle
-                ]
-                let replacement = NSAttributedString(string: content, attributes: boldAttributes)
-                attrStr.replaceCharacters(in: fullRange, with: replacement)
-            }),
-            ("(?<!\\*)\\*([^\\*]+)\\*(?!\\*)", { attrStr, match, baseFont, textColor, paraStyle in
-                let fullRange = match.range
-                let contentRange = match.range(at: 1)
-                guard let range = Range(contentRange, in: attrStr.string) else { return }
-                let content = String(attrStr.string[range])
-                let descriptor = baseFont.fontDescriptor.withSymbolicTraits(.traitItalic)
-                let italicFont = descriptor.map { UIFont(descriptor: $0, size: baseFont.pointSize) } ?? baseFont
-                let italicAttributes: [NSAttributedString.Key: Any] = [
-                    .font: italicFont,
-                    .foregroundColor: textColor,
-                    .paragraphStyle: paraStyle
-                ]
-                let replacement = NSAttributedString(string: content, attributes: italicAttributes)
-                attrStr.replaceCharacters(in: fullRange, with: replacement)
-            }),
-            ("`([^`]+)`", { attrStr, match, baseFont, textColor, paraStyle in
-                let fullRange = match.range
-                let contentRange = match.range(at: 1)
-                guard let range = Range(contentRange, in: attrStr.string) else { return }
-                let content = String(attrStr.string[range])
-                let monoFont = UIFont.monospacedSystemFont(ofSize: baseFont.pointSize * 0.9, weight: .regular)
-                let codeAttributes: [NSAttributedString.Key: Any] = [
-                    .font: monoFont,
-                    .foregroundColor: UIColor.systemRed,
-                    .backgroundColor: UIColor.systemGray6,
-                    .paragraphStyle: paraStyle
-                ]
-                let replacement = NSAttributedString(string: content, attributes: codeAttributes)
-                attrStr.replaceCharacters(in: fullRange, with: replacement)
-            }),
-            ("==(\\w+):([^=]+)==", { attrStr, match, baseFont, textColor, paraStyle in
-                let fullRange = match.range
-                let colorKeyRange = match.range(at: 1)
-                let contentRange = match.range(at: 2)
-                guard let colorKeyRng = Range(colorKeyRange, in: attrStr.string),
-                      let contentRng = Range(contentRange, in: attrStr.string) else { return }
-                let colorKey = String(attrStr.string[colorKeyRng])
-                let content = String(attrStr.string[contentRng])
-                let bgColor: UIColor
-                switch colorKey {
-                case "yellow": bgColor = UIColor.systemYellow.withAlphaComponent(0.4)
-                case "green": bgColor = UIColor.systemGreen.withAlphaComponent(0.4)
-                case "blue": bgColor = UIColor.systemBlue.withAlphaComponent(0.3)
-                case "pink": bgColor = UIColor.systemPink.withAlphaComponent(0.4)
-                case "orange": bgColor = UIColor.systemOrange.withAlphaComponent(0.4)
-                case "purple": bgColor = UIColor.systemPurple.withAlphaComponent(0.4)
-                default: bgColor = UIColor.systemYellow.withAlphaComponent(0.4)
-                }
-                let highlightAttributes: [NSAttributedString.Key: Any] = [
-                    .font: baseFont,
-                    .foregroundColor: textColor,
-                    .backgroundColor: bgColor,
-                    .paragraphStyle: paraStyle
-                ]
-                let replacement = NSAttributedString(string: content, attributes: highlightAttributes)
-                attrStr.replaceCharacters(in: fullRange, with: replacement)
-            })
-        ]
-
-        for (pattern, handler) in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
-            let matches = regex.matches(in: attributedString.string, options: [], range: NSRange(location: 0, length: attributedString.length))
-            for match in matches.reversed() {
-                handler(attributedString, match, font, color, paragraphStyle)
-            }
-        }
-
-        if !trailingNewlines.isEmpty {
-            attributedString.append(NSAttributedString(string: trailingNewlines, attributes: baseAttributes))
-        }
-
-        return attributedString
-    }
-
-    @MainActor
-    private func loadImageAttachment(_ attachment: AttachmentModel) async -> UIImage? {
-        if let data = attachment.data, let image = UIImage(data: data) {
-            return image
-        }
-        let attachmentId = attachment.id
-        let fileName = attachment.fileName
-        if let cached = AttachmentStorage.shared.loadFromCache(attachmentId: attachmentId, fileName: fileName),
-           let image = UIImage(data: cached) {
-            return image
-        }
-        if let storagePath = attachment.storagePath, !storagePath.isEmpty {
-            if let data = try? await AttachmentStorage.shared.loadAttachmentData(
-                attachmentId: attachmentId,
-                storagePath: storagePath,
-                fileName: fileName
-            ),
-               let image = UIImage(data: data) {
-                return image
-            }
-        }
-        return nil
-    }
-
-    private func renderPDFData(items: [PDFItem], pageSize: PDFPageSize) -> Data? {
-        let pageRect = pageSize.pageRect
-        let margin: CGFloat = pageSize.margin
-        let renderer = UIGraphicsPDFRenderer(bounds: pageRect)
-        let contentWidth = pageRect.width - margin * 2
-        let contentHeight = pageRect.height - margin * 2
-
-        return renderer.pdfData { context in
-            var currentY: CGFloat = 0
-
-            func beginPage() {
-                context.beginPage()
-                currentY = 0
-            }
-
-            beginPage()
-
-            for item in items {
-                switch item {
-                case .image(let image):
-                    let imageSize = image.size
-                    let maxWidth = contentWidth
-                    let maxHeight = contentHeight
-                    let scale = min(maxWidth / imageSize.width, maxHeight / imageSize.height, 1)
-                    let targetSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
-                    if currentY + targetSize.height > contentHeight {
-                        beginPage()
-                    }
-                    let rect = CGRect(x: margin, y: margin + currentY, width: targetSize.width, height: targetSize.height)
-                    image.draw(in: rect)
-                    currentY += targetSize.height + 12
-                case .text(let text):
-                    let boundingSize = CGSize(width: contentWidth, height: .greatestFiniteMagnitude)
-                    let textRect = text.boundingRect(with: boundingSize, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
-                    let textHeight = ceil(textRect.height)
-                    if currentY + textHeight > contentHeight {
-                        beginPage()
-                    }
-                    let drawRect = CGRect(x: margin, y: margin + currentY, width: contentWidth, height: textHeight)
-                    text.draw(with: drawRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
-                    currentY += textHeight + 12
-                }
-            }
         }
     }
 
@@ -704,6 +386,7 @@ struct NoteEditorView: View {
         let doc = NoteDocument.fromMarkdown(snapshot.content)
         document = doc
         syncNoteFromDocument(doc)
+        store.flushPendingNotePersistence(noteId: note.id)
         undoSnapshot = nil
         NoteUndoSnapshotStore.clear(noteId: note.id)
         Haptics.shared.play(.success)
@@ -796,33 +479,25 @@ struct NoteEditorView: View {
     }
 
     private func insertImageAttachment(_ image: UIImage) {
-        guard let data = image.jpegData(compressionQuality: 0.8) else {
+        guard let payload = NoteAttachmentInserter.imagePayload(from: image) else {
             logger.error("Failed to convert image to JPEG data")
             return
         }
-
-        let attachmentId = UUID()
-        let fileName = "\(attachmentId.uuidString).jpg"
-
-        insertAttachmentData(data: data, attachmentId: attachmentId, fileName: fileName, type: .image)
+        insertAttachmentPayload(payload)
     }
 
     private func insertDocumentAttachment(_ url: URL) {
-        guard let data = try? Data(contentsOf: url) else {
+        guard let payload = NoteAttachmentInserter.documentPayload(from: url) else {
             logger.error("Failed to read document data")
             return
         }
-
-        let attachmentId = UUID()
-        let fileName = url.lastPathComponent
-        let type: AttachmentType = fileName.lowercased().hasSuffix(".pdf") ? .pdf : .image
-
-        insertAttachmentData(data: data, attachmentId: attachmentId, fileName: fileName, type: type)
+        insertAttachmentPayload(payload)
     }
 
-    private func insertAttachmentData(data: Data, attachmentId: UUID, fileName: String, type: AttachmentType) {
+    private func insertAttachmentPayload(_ payload: NoteAttachmentPayload) {
         if !AppConfig.useWebEditor {
-            pendingCommand = EditorCommandRequest(command: .insertAttachment(data: data, type: type, fileName: fileName))
+            flushNextDocumentChange = true
+            pendingCommand = EditorCommandRequest(command: NoteAttachmentInserter.nativeCommand(for: payload))
             return
         }
 
@@ -831,28 +506,14 @@ struct NoteEditorView: View {
             return
         }
 
-        AttachmentCache.save(data: data, attachmentId: attachmentId, fileName: fileName)
-
-        let storagePath = CloudKitSchema.storagePath(ownerId: ownerId, attachmentId: attachmentId, fileName: fileName)
-
-        let markdown = "\n![Attachment](\(storagePath))\n"
-        appendPlainText(markdown)
+        appendPlainText(NoteAttachmentInserter.webMarkdown(for: payload, ownerId: ownerId))
+        store.flushPendingNotePersistence(noteId: note.id)
         Haptics.shared.play(.success)
 
         Task { @MainActor in
             do {
-                let mimeType = AttachmentStorage.mimeType(for: fileName)
-                let localAttachment = try AttachmentStorage.shared.saveNewAttachmentV3(
-                    data: data,
-                    attachmentId: attachmentId,
-                    ownerId: ownerId,
-                    noteId: note.id,
-                    fileName: fileName,
-                    mimeType: mimeType
-                )
-
-                await AttachmentStorage.shared.uploadAndUpsertMetadataV3(attachment: localAttachment)
-                logger.info("Attachment uploaded successfully: \(attachmentId)")
+                try await NoteAttachmentInserter.upload(payload: payload, ownerId: ownerId, noteId: note.id)
+                logger.info("Attachment uploaded successfully: \(payload.attachmentId)")
             } catch {
                 logger.error("Failed to upload attachment: \(error.localizedDescription)")
             }
@@ -886,6 +547,7 @@ struct NoteEditorView: View {
     }
 
     private func handleClose() {
+        store.flushPendingNotePersistence(noteId: note.id)
         onClose?()
         if !router.path.isEmpty {
             router.pop()

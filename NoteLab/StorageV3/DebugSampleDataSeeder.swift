@@ -284,7 +284,7 @@ enum DebugSampleDataSeeder {
     ) throws {
         let noteId = UUID()
         let attachmentId = UUID()
-        let storagePath = CloudKitSchema.storagePath(ownerId: profileId, attachmentId: attachmentId, fileName: imageName)
+        let storagePath = AttachmentPathFactory.storagePath(ownerId: profileId, attachmentId: attachmentId, fileName: imageName)
         let imageData = try samplePNG(palette: palette)
         var note = Note(
             id: noteId,

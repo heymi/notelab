@@ -237,4 +237,112 @@ struct NoteLabTests {
         #expect(doc.flattenMarkdown().contains("![x](#)"))
         #expect(doc.flattenMarkdown().contains("random-text-without-uuid"))
     }
+
+    @MainActor @Test func noteDocumentRoundTripsSupportedMarkdownBlocks() async throws {
+        let ownerId = UUID()
+        let attachmentId = UUID()
+        let markdown = """
+        Intro **bold** *italic* `code` ==yellow:highlight==
+
+        # Heading 1
+
+        ## Heading 2
+
+        - Bullet
+
+        2. Numbered
+
+        - [x] Done
+
+        > Quote
+
+        ```
+        let value = 1
+        ```
+
+        | Field | Value |
+        | --- | --- |
+        | name | NoteLab |
+
+        ![Attachment](\(AttachmentPathFactory.storagePath(ownerId: ownerId, attachmentId: attachmentId, fileName: "source.png")))
+        """
+
+        let first = NoteDocument.fromMarkdown(markdown)
+        let second = NoteDocument.fromMarkdown(first.flattenMarkdown())
+        #expect(second.blocks.map(\.kind) == first.blocks.map(\.kind))
+        #expect(second.blocks.count == 10)
+        #expect(second.blocks[0].text.contains("**bold**"))
+        #expect(second.blocks[1].level == 1)
+        #expect(second.blocks[2].level == 2)
+        #expect(second.blocks[5].isChecked == true)
+        #expect(second.blocks[8].table?.cells[1][1] == "NoteLab")
+        #expect(second.blocks[9].attachment?.id == attachmentId)
+    }
+
+    @MainActor @Test func attachmentPathFactoryCreatesParseableStoragePath() async throws {
+        let ownerId = UUID()
+        let attachmentId = UUID()
+        let path = AttachmentPathFactory.storagePath(ownerId: ownerId, attachmentId: attachmentId, fileName: "original.pdf")
+        let doc = NoteDocument.fromMarkdown("![Attachment](\(path))")
+        #expect(doc.blocks.count == 1)
+        #expect(doc.blocks[0].kind == .attachment)
+        #expect(doc.blocks[0].attachment?.id == attachmentId)
+        #expect(doc.blocks[0].attachment?.storagePath == path)
+    }
+
+    @MainActor @Test func notePersistenceDebounceFlushesLatestEditOnly() async throws {
+        let profileId = UUID()
+        let repository = NotebookRepository()
+        let notebook = try repository.createNotebook(
+            profileId: profileId,
+            title: "Debounce notebook",
+            color: .lime,
+            iconName: "book"
+        )
+        let note = Note(
+            id: UUID(),
+            title: "Draft",
+            summary: "",
+            paragraphCount: 0,
+            bulletCount: 0,
+            hasAdditionalContext: false,
+            createdAt: Date(),
+            contentRTF: nil,
+            content: "Initial"
+        )
+        try repository.createNote(profileId: profileId, notebookId: notebook.id, note: note)
+
+        let initialNoteOutboxCount = try repository.pendingOutbox(profileId: profileId)
+            .filter { $0.entityType == .note && $0.entityId == note.id }
+            .count
+
+        let store = NotebookStore()
+        store.configure(profileId: profileId)
+        let binding = try #require(store.noteBinding(noteId: note.id))
+        var first = binding.wrappedValue
+        first.content = "First"
+        binding.wrappedValue = first
+        var second = binding.wrappedValue
+        second.content = "Second"
+        binding.wrappedValue = second
+        var third = binding.wrappedValue
+        third.content = "Third"
+        binding.wrappedValue = third
+
+        let beforeFlushCount = try repository.pendingOutbox(profileId: profileId)
+            .filter { $0.entityType == .note && $0.entityId == note.id }
+            .count
+        #expect(beforeFlushCount == initialNoteOutboxCount)
+
+        store.flushPendingNotePersistence(noteId: note.id)
+
+        let loaded = try repository.loadNotebooks(profileId: profileId)
+        let loadedNote = try #require(loaded.flatMap(\.notes).first(where: { $0.id == note.id }))
+        #expect(loadedNote.content == "Third")
+
+        let afterFlushCount = try repository.pendingOutbox(profileId: profileId)
+            .filter { $0.entityType == .note && $0.entityId == note.id }
+            .count
+        #expect(afterFlushCount == initialNoteOutboxCount + 1)
+    }
 }
