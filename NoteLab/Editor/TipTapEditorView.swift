@@ -353,23 +353,25 @@ struct TipTapEditorView: UIViewRepresentable {
     private static func editorCSS(hideTitle: Bool) -> String {
         """
         :root {
-          --ink: #1A1A1F;
-          --ink-secondary: #8E8E93;
-          --ink-tertiary: #C4C4C6;
-          --bg: #F8F8FA;
-          --bg-hover: #F2F2F7;
-          --accent: #007AFF;
-          --border: #E8E8EA;
+          --ink: #252D2D;
+          --ink-secondary: #767F7B;
+          --ink-tertiary: #9EA5A0;
+          --bg: #FCFAF5;
+          --bg-hover: #F3F4ED;
+          --accent: #22565A;
+          --accent-soft: #D9EEE5;
+          --border: #DFDED2;
         }
         @media (prefers-color-scheme: dark) {
           :root {
             --ink: #F5F5F7;
             --ink-secondary: #98989D;
             --ink-tertiary: #636366;
-            --bg: #1C1C1E;
-            --bg-hover: #2C2C2E;
-            --accent: #0A84FF;
-            --border: #38383A;
+            --bg: #202124;
+            --bg-hover: #2A2D2E;
+            --accent: #9CDCD1;
+            --accent-soft: #203936;
+            --border: #414547;
           }
         }
         * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -384,8 +386,9 @@ struct TipTapEditorView: UIViewRepresentable {
         #title-container { padding: 20px 18px 8px 18px; }
         #title-input {
           width: 100%; border: none; outline: none; background: transparent;
-          font-size: 28px; font-weight: 700; color: var(--ink);
-          padding: 0; margin: 0; letter-spacing: -0.3px;
+          font-family: "Songti SC", "STSong", "Iowan Old Style", Georgia, serif;
+          font-size: 38px; font-weight: 700; color: var(--ink);
+          padding: 0; margin: 0; letter-spacing: 0;
         }
         #title-input::placeholder { color: var(--ink-tertiary); }
         
@@ -393,8 +396,8 @@ struct TipTapEditorView: UIViewRepresentable {
           min-height: calc(100% - 80px);
           padding: 8px 18px 120px 18px;
           outline: none;
-          line-height: 1.65;
-          font-size: 16px;
+          line-height: 1.72;
+          font-size: 17px;
           caret-color: var(--accent);
           white-space: pre-wrap;
           word-wrap: break-word;
@@ -406,23 +409,28 @@ struct TipTapEditorView: UIViewRepresentable {
         }
         #editor > * + * { margin-top: 0.4em; }
         
-        #editor h1 { font-size: 26px; font-weight: 700; margin: 24px 0 8px 0; line-height: 1.25; }
-        #editor h2 { font-size: 22px; font-weight: 600; margin: 20px 0 6px 0; line-height: 1.3; }
-        #editor h3 { font-size: 18px; font-weight: 600; margin: 16px 0 4px 0; line-height: 1.35; }
+        #editor h1 {
+          font-family: "Songti SC", "STSong", "Iowan Old Style", Georgia, serif;
+          font-size: 32px; font-weight: 700; margin: 26px 0 10px 0; line-height: 1.12;
+        }
+        #editor h2 { font-size: 23px; font-weight: 750; margin: 22px 0 7px 0; line-height: 1.18; }
+        #editor h3 { font-size: 18px; font-weight: 750; margin: 18px 0 5px 0; line-height: 1.25; }
         #editor p { margin: 0 0 2px 0; }
         #editor strong { font-weight: 600; }
         #editor em { font-style: italic; }
         #editor code {
-          background: rgba(128,128,128,0.12); border-radius: 4px; padding: 2px 5px;
+          background: var(--bg-hover); color: var(--accent); border-radius: 5px; padding: 2px 5px;
           font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em;
         }
         #editor s { text-decoration: line-through; opacity: 0.6; }
         #editor blockquote {
-          border-left: 3px solid var(--border); padding-left: 16px;
-          margin: 12px 0; color: var(--ink-secondary);
+          margin: 12px 0; padding: 14px 15px; border-radius: 14px;
+          background: var(--bg-hover); color: var(--accent);
+          font-family: "Songti SC", "STSong", "Iowan Old Style", Georgia, serif;
+          font-size: 18px; line-height: 1.58;
         }
         #editor pre {
-          background: rgba(128,128,128,0.08); border-radius: 8px; padding: 16px 18px;
+          background: var(--bg-hover); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px;
           font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px;
           line-height: 1.55; overflow-x: auto; margin: 12px 0; white-space: pre-wrap;
         }
@@ -433,7 +441,7 @@ struct TipTapEditorView: UIViewRepresentable {
         #editor hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
         #editor img.attachment-image {
           max-width: 100%;
-          border-radius: 12px;
+          border-radius: 18px;
           display: block;
           margin: 12px 0;
           background: var(--bg-hover);
@@ -446,8 +454,8 @@ struct TipTapEditorView: UIViewRepresentable {
           border: 1px solid var(--border); padding: 10px 14px;
           text-align: left; vertical-align: top;
         }
-        #editor th { background: var(--bg-hover); font-weight: 600; }
-        #editor ::selection { background: rgba(0, 122, 255, 0.2); }
+        #editor th { background: var(--bg-hover); font-weight: 650; }
+        #editor ::selection { background: var(--accent-soft); }
         
         /* Task list styles */
         #editor .task-item {

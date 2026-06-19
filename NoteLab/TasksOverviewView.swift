@@ -9,16 +9,11 @@ struct TasksOverviewView: View {
     @State private var refreshTask: Task<Void, Never>?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                Image(systemName: "checklist")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(Theme.ink)
-                Text("Tasks")
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
-                    .foregroundStyle(Theme.ink)
-            }
-            .padding(.horizontal, 4)
+        VStack(alignment: .leading, spacing: 18) {
+            Text("待办事项")
+                .font(.system(size: 24, weight: .black, design: .rounded))
+                .foregroundStyle(Theme.ink)
+                .padding(.horizontal, 4)
 
             if sections.isEmpty {
                 emptyTodos
@@ -46,82 +41,97 @@ struct TasksOverviewView: View {
         refreshTask?.cancel()
         let transientSnapshot = transientCompleted
         let notebooksSnapshot = store.notebooks
-        refreshTask = Task.detached(priority: .utility) { [store] in
-            let todos = store.collectOpenTodos()
+        refreshTask = Task { @MainActor in
+            let todos = store.collectTodos(includeCompleted: true)
             let sections = buildSections(
                 from: todos,
                 transient: transientSnapshot,
                 notebooks: notebooksSnapshot
             )
-            await MainActor.run {
-                self.sections = sections
-            }
+            guard !Task.isCancelled else { return }
+            self.sections = sections
         }
     }
 
     private func todoSectionCard(_ section: TodoSection) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(section.title)
-                .font(.system(size: 13, weight: .bold, design: .rounded))
-                .foregroundStyle(Theme.secondaryInk)
-                .textCase(.uppercase)
-                .padding(.leading, 4)
+        VStack(alignment: .leading, spacing: 16) {
+            let completedCount = section.completedCount + section.items.filter { !$0.isCompleted && transientCompleted[$0.id] != nil }.count
+            HStack(alignment: .firstTextBaseline) {
+                Text(section.title)
+                    .font(.system(size: 18, weight: .black, design: .rounded))
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                Spacer()
+                Text("\(completedCount) / \(section.totalCount) 完成")
+                    .font(.system(size: 16, weight: .black, design: .rounded))
+                    .foregroundStyle(Theme.editorAccentDeep)
+            }
+            .padding(.horizontal, 2)
 
-            VStack(spacing: 0) {
-                ForEach(Array(section.items.enumerated()), id: \.element.id) { index, item in
-                    let done = transientCompleted[item.id] != nil
-                    VStack(spacing: 0) {
-                        HStack(spacing: 14) {
-                            Button(action: { completeTodo(item) }) {
-                                ZStack {
-                                    Circle()
-                                        .stroke(done ? Color.green : Theme.secondaryInk.opacity(0.3), lineWidth: 2)
-                                        .frame(width: 22, height: 22)
-
-                                    if done {
-                                        Circle()
-                                            .fill(Color.green)
-                                            .frame(width: 14, height: 14)
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-
-                            Button(action: { openTodo(item) }) {
-                                planRowContent(title: item.title, source: item.noteTitle)
-                            }
-                            .buttonStyle(.plain)
+            VStack(spacing: 12) {
+                ForEach(section.items) { item in
+                    let done = item.isCompleted || transientCompleted[item.id] != nil
+                    HStack(spacing: 16) {
+                        Button(action: { completeTodo(item) }) {
+                            todoCheckmark(done: done)
                         }
-                        .padding(.vertical, 14)
-                        .padding(.horizontal, 16)
-                        .opacity(done ? 0.6 : 1.0)
+                        .buttonStyle(.plain)
+                        .disabled(done)
 
-                        if index < section.items.count - 1 || section.hasMore {
-                            Divider()
-                                .padding(.leading, 52)
+                        Button(action: { openTodo(item) }) {
+                            Text(item.title)
+                                .font(.system(size: 17, weight: .bold, design: .rounded))
+                                .foregroundStyle(done ? Theme.secondaryInk : Theme.ink)
+                                .lineSpacing(4)
+                                .multilineTextAlignment(.leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
+                        .buttonStyle(.plain)
                     }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 14)
+                    .background(Theme.editorPaper.opacity(done ? 0.72 : 0.95), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .opacity(done ? 0.82 : 1.0)
                 }
 
                 if section.hasMore {
                     Button(action: { openTodoSection(section) }) {
                         HStack {
-                            Text("View all \(section.moreCount) more")
-                                .font(.system(size: 14, weight: .medium, design: .rounded))
+                            Text("查看其余 \(section.moreCount) 项")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
                             Spacer()
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 12, weight: .semibold))
                         }
                         .foregroundStyle(Theme.secondaryInk)
-                        .padding(.vertical, 14)
-                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 14)
+                        .background(Theme.editorPaper.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     }
                 }
             }
-            .background(Theme.cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .shadow(color: Theme.softShadow, radius: 8, x: 0, y: 4)
         }
+        .padding(18)
+        .background(Theme.editorPaperSoft.opacity(0.72), in: RoundedRectangle(cornerRadius: 30, style: .continuous))
+        .shadow(color: Theme.softShadow.opacity(0.5), radius: 18, x: 0, y: 10)
+    }
+
+    private func todoCheckmark(done: Bool) -> some View {
+        ZStack {
+            Circle()
+                .fill(done ? Theme.editorAccentDeep : Theme.editorPaper.opacity(0.8))
+                .frame(width: 42, height: 42)
+            if done {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 16, weight: .black, design: .rounded))
+                    .foregroundStyle(.white)
+            } else {
+                Circle()
+                    .stroke(Theme.editorLine.opacity(0.55), lineWidth: 1)
+                    .frame(width: 40, height: 40)
+            }
+        }
+        .frame(width: 48, height: 48)
     }
 
     private var emptyTodos: some View {
@@ -136,21 +146,8 @@ struct TasksOverviewView: View {
         .padding(.vertical, 8)
     }
 
-    private func planRowContent(title: String, source: String) -> some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Theme.ink)
-                Text("来自 \(source)")
-                    .font(.system(size: 12, weight: .regular, design: .rounded))
-                    .foregroundStyle(Theme.secondaryInk)
-            }
-            Spacer()
-        }
-    }
-
     private func completeTodo(_ item: LocalTodoItem) {
+        if item.isCompleted { return }
         if transientCompleted[item.id] != nil { return }
         withAnimation(.easeInOut(duration: 0.2)) {
             transientCompleted[item.id] = item
@@ -203,7 +200,8 @@ private func buildSections(
                 items: limitedItems,
                 isWhiteboard: true,
                 hasMore: whiteboardItems.count > limitedItems.count,
-                moreCount: max(0, whiteboardItems.count - limitedItems.count)
+                moreCount: max(0, whiteboardItems.count - limitedItems.count),
+                completedCount: whiteboardItems.filter(\.isCompleted).count
             )
         )
     }
@@ -219,7 +217,8 @@ private func buildSections(
                     items: limitedItems,
                     isWhiteboard: false,
                     hasMore: items.count > limitedItems.count,
-                    moreCount: max(0, items.count - limitedItems.count)
+                    moreCount: max(0, items.count - limitedItems.count),
+                    completedCount: items.filter(\.isCompleted).count
                 )
             )
         }
@@ -235,4 +234,9 @@ private struct TodoSection: Identifiable {
     let isWhiteboard: Bool
     let hasMore: Bool
     let moreCount: Int
+    let completedCount: Int
+
+    var totalCount: Int {
+        items.count + moreCount
+    }
 }

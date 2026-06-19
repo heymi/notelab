@@ -58,6 +58,8 @@ struct NoteEditorView: View {
     @State private var showWhiteboardLinks = false
     @State private var showClearWhiteboardConfirm = false
     @State private var flushNextDocumentChange = false
+    @State private var detailPresentationMode: NoteDetailPresentationMode = .reading
+    @State private var bodyFocusToken = UUID()
     @State private var whiteboardLinkDrag: CGSize = .zero
     @AppStorage("whiteboard.link.offset.x") private var whiteboardLinkOffsetX: Double = 0
     @AppStorage("whiteboard.link.offset.y") private var whiteboardLinkOffsetY: Double = 0
@@ -68,11 +70,15 @@ struct NoteEditorView: View {
 
     var body: some View {
         editorScaffold
-            .onAppear { loadDocumentIfNeeded() }
+            .onAppear {
+                loadDocumentIfNeeded()
+                applyInitialPresentationMode()
+            }
             .onDisappear { store.flushPendingNotePersistence(noteId: note.id) }
             .onChange(of: note.id) { oldValue, _ in
                 store.flushPendingNotePersistence(noteId: oldValue)
                 loadDocumentIfNeeded()
+                applyInitialPresentationMode()
             }
             .onChange(of: aiCenter.lastAppliedNoteId) { _, newValue in
                 if newValue == note.id {
@@ -102,6 +108,7 @@ struct NoteEditorView: View {
                         }
                     },
                     onShare: { prepareShare() },
+                    onCopyMarkdown: { copyMarkdownToPasteboard() },
                     onExport: { showPDFSizeSheet = true },
                     onClear: { showClearWhiteboardConfirm = true }
                 )
@@ -197,12 +204,31 @@ struct NoteEditorView: View {
         mainEditor
     }
 
+    private var editorDetailBackground: some View {
+        ZStack(alignment: .top) {
+            Theme.editorBackground
+            LinearGradient(
+                colors: [
+                    Theme.editorTopWash.opacity(0.65),
+                    Theme.editorTopWash.opacity(0.22),
+                    Theme.editorBackground.opacity(0)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 230)
+            .ignoresSafeArea()
+        }
+        .ignoresSafeArea()
+    }
+
     private var mainEditor: some View {
         GeometryReader { proxy in
             let safeTop = proxy.safeAreaInsets.top
             let contentTopInset = max(0, safeTop - 44)
-            let topInset = contentTopInset + 52
+            let topInset = contentTopInset + 58
             let toolbarTopInset = max(0, safeTop - 56)
+            let bottomInset: CGFloat = detailPresentationMode == .reading ? 130 : 28
 
             Group {
                 if AppConfig.useWebEditor {
@@ -211,19 +237,16 @@ struct NoteEditorView: View {
                         selectedText: $selectedText,
                         selectedRange: $selectedRange,
                         pendingCommand: $pendingTipTapCommand,
-                        title: isWhiteboard ? "" : note.title,
-                        showsTitle: !isWhiteboard,
+                        title: "",
+                        showsTitle: false,
                         topInset: topInset,
-                        bottomInset: 24,
+                        bottomInset: bottomInset,
                         onMarkdownChange: { markdown in
                             let doc = NoteDocument.fromMarkdown(markdown)
                             document = doc
                             syncNoteFromDocument(doc)
                         },
-                        onTitleChange: { newTitle in
-                            guard !isWhiteboard else { return }
-                            note.title = newTitle
-                        }
+                        onTitleChange: { _ in }
                     )
                 } else {
                     BlockEditorRepresentable(
@@ -233,13 +256,16 @@ struct NoteEditorView: View {
                         selectedBlockIds: $selectedBlockIds,
                         pendingCommand: $pendingCommand,
                         exitMultiSelectToken: $exitMultiSelectToken,
+                        bodyFocusToken: $bodyFocusToken,
                         title: $note.title,
                         titleFocusBridge: titleFocusBridge,
+                        headerMetadata: headerMetadata,
                         linkBlocks: linkBlocks,
+                        presentationMode: detailPresentationMode,
                         sentHighlightBlockIds: sentHighlightBlockIds,
                         isWhiteboard: isWhiteboard,
                         topInset: topInset,
-                        bottomInset: 24,
+                        bottomInset: bottomInset,
                         onOpenNote: { router.push(.note($0)) },
                         onDocumentChange: { doc in
                             document = doc
@@ -249,12 +275,12 @@ struct NoteEditorView: View {
                                 store.flushPendingNotePersistence(noteId: note.id)
                             }
                         },
-                        ownerId: auth.userId,
+                        ownerId: activeProfileId,
                         noteId: note.id
                     )
                 }
             }
-            .background(Theme.background)
+            .background(editorDetailBackground)
             .background(InteractivePopGestureEnabler())
             .overlay(alignment: .top) {
                 editorTopBar
@@ -271,16 +297,16 @@ struct NoteEditorView: View {
                     whiteboardLinkFloater(topInset: toolbarTopInset)
                 }
             }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                editorBottomBar
+                    .padding(.horizontal, 18)
+                    .padding(.top, 4)
+                    .padding(.bottom, 8)
+            }
         }
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button("完成") { hideKeyboard() }
-            }
-        }
     }
 
     @ViewBuilder
@@ -310,8 +336,9 @@ struct NoteEditorView: View {
             isPresented: $showSendSheet,
             selectedText: sendDraftText,
             onSend: { notebookId, title in
+                let linkTitle = NoteTitleDeriver.title(fromMarkdown: sendDraftText, fallback: title)
                 if let newId = store.addNote(to: notebookId, title: title, content: sendDraftText) {
-                    insertLinkBlock(noteId: newId, notebookId: notebookId, title: title)
+                    insertLinkBlock(noteId: newId, notebookId: notebookId, title: linkTitle)
                     sendToast = SendToast(noteId: newId, message: "已发送到笔记本")
                     exitMultiSelectToken = UUID()
                     Haptics.shared.play(.success)
@@ -323,7 +350,8 @@ struct NoteEditorView: View {
     }
 
     private func noteTitleForExport() -> String {
-        let trimmed = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let derived = NoteTitleDeriver.title(from: document, fallback: note.title)
+        let trimmed = derived.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "无标题" : trimmed
     }
 
@@ -331,6 +359,15 @@ struct NoteEditorView: View {
         let title = noteTitleForExport()
         shareItems = [NoteShareBuilder.plainText(title: title, document: document, fallbackMarkdown: note.content)]
         showShareSheet = true
+    }
+
+    private func copyMarkdownToPasteboard() {
+        let title = noteTitleForExport()
+        let markdown = NoteShareBuilder.markdown(title: title, document: document, fallbackMarkdown: note.content)
+        guard !markdown.isEmpty else { return }
+        UIPasteboard.general.string = markdown
+        sendToast = SendToast(noteId: nil, message: "已复制 Markdown")
+        Haptics.shared.play(.success)
     }
 
     private func exportPDF() {
@@ -380,9 +417,6 @@ struct NoteEditorView: View {
 
     private func restoreUndoSnapshot() {
         guard let snapshot = undoSnapshot else { return }
-        if let title = snapshot.title, !title.isEmpty, !isWhiteboard {
-            note.title = title
-        }
         let doc = NoteDocument.fromMarkdown(snapshot.content)
         document = doc
         syncNoteFromDocument(doc)
@@ -449,10 +483,32 @@ struct NoteEditorView: View {
         #if canImport(UIKit)
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         #endif
+        detailPresentationMode = .reading
+    }
+
+    private func enterEditingMode(focusBody: Bool = true) {
+        detailPresentationMode = .editing
+        if focusBody {
+            bodyFocusToken = UUID()
+        }
+    }
+
+    private func applyInitialPresentationMode() {
+        let mode = initialPresentationMode
+        detailPresentationMode = mode
+        if mode.isEditing {
+            bodyFocusToken = UUID()
+        }
+    }
+
+    private var initialPresentationMode: NoteDetailPresentationMode {
+        isWhiteboard || !hasHeaderBodyContent ? .editing : .reading
     }
 
     private func loadDocumentIfNeeded() {
-        document = store.document(for: note.id, fallbackText: note.content)
+        let loadedDocument = store.document(for: note.id, fallbackText: note.content)
+        document = loadedDocument
+        syncDerivedTitle(from: loadedDocument)
         undoSnapshot = NoteUndoSnapshotStore.load(noteId: note.id)
         selectedText = ""
         selectedRange = NSRange(location: 0, length: 0)
@@ -462,12 +518,25 @@ struct NoteEditorView: View {
     }
 
     private func syncNoteFromDocument(_ doc: NoteDocument) {
-        note.content = doc.flattenMarkdown()
+        let markdown = doc.flattenMarkdown()
+        let contentChanged = markdown != note.content
+        note.content = markdown
+        syncDerivedTitle(from: doc)
+        if contentChanged && !isWhiteboard {
+            note.summary = ""
+            AISummaryRegistry.clear(noteId: note.id)
+        }
         note.updateMetrics()
         if note.id == store.whiteboard.id {
             store.persistWhiteboard()
         }
         store.updateDocument(noteId: note.id, document: doc)
+    }
+
+    private func syncDerivedTitle(from doc: NoteDocument) {
+        guard !isWhiteboard else { return }
+        let generatedSummary = AISummaryRegistry.isGenerated(noteId: note.id, summary: note.summary) ? note.summary : nil
+        note.title = NoteTitleDeriver.title(from: doc, fallback: "", ignoringGeneratedSummary: generatedSummary)
     }
 
     private func appendPlainText(_ text: String) {
@@ -501,7 +570,7 @@ struct NoteEditorView: View {
             return
         }
 
-        guard let ownerId = auth.userId else {
+        guard let ownerId = activeProfileId else {
             logger.error("No owner ID available for attachment upload")
             return
         }
@@ -518,6 +587,10 @@ struct NoteEditorView: View {
                 logger.error("Failed to upload attachment: \(error.localizedDescription)")
             }
         }
+    }
+
+    private var activeProfileId: UUID? {
+        store.currentProfileId ?? auth.userId
     }
 
     private func clearWhiteboard() {
@@ -557,40 +630,152 @@ struct NoteEditorView: View {
     }
 
     private var editorTopBar: some View {
-        GlassEffectContainer(spacing: 12) {
-            HStack(spacing: 10) {
-                toolbarButton(systemName: "chevron.left") {
-                    handleClose()
+        HStack(spacing: 8) {
+            toolbarButton(systemName: "chevron.left") {
+                handleClose()
+            }
+            Spacer(minLength: 0)
+            toolbarButton(systemName: "sparkles") {
+                showAIAction = true
+            }
+            toolbarButton(systemName: "paperplane") {
+                triggerSend()
+            }
+            toolbarButton(systemName: "ellipsis") {
+                showMoreMenu = true
+            }
+        }
+        .foregroundStyle(Theme.ink)
+    }
+
+    private var editorBottomBar: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 0) {
+                Button {
+                    hideKeyboard()
+                } label: {
+                    Text("阅读")
+                        .font(.system(size: 15, weight: .black, design: .rounded))
+                        .foregroundStyle(detailPresentationMode.isEditing ? Theme.secondaryInk : Theme.ink)
+                        .frame(width: 58, height: 50)
+                        .background(detailPresentationMode.isEditing ? Color.clear : Theme.editorPaper, in: Capsule())
                 }
-                Spacer(minLength: 0)
-                toolbarButton(systemName: "textformat") {
-                    showFormatMenu = true
+                .buttonStyle(.plain)
+
+                Button {
+                    enterEditingMode()
+                } label: {
+                    Text("编辑")
+                        .font(.system(size: 15, weight: detailPresentationMode.isEditing ? .black : .bold, design: .rounded))
+                        .foregroundStyle(detailPresentationMode.isEditing ? Theme.ink : Theme.secondaryInk)
+                        .frame(width: 58, height: 50)
+                        .background(detailPresentationMode.isEditing ? Theme.editorPaper : Color.clear, in: Capsule())
                 }
-                toolbarButton(systemName: "paperclip") {
-                    showAttachmentPicker = true
-                }
-                toolbarButton(systemName: "checkmark.circle") {
-                    sendFormatCommand(.todo, tipTap: .taskList)
-                }
-                toolbarButton(systemName: "paperplane") {
-                    triggerSend()
-                }
-                toolbarButton(systemName: "sparkles") {
-                    showAIAction = true
-                }
-                toolbarButton(systemName: "ellipsis") {
-                    showMoreMenu = true
+                .buttonStyle(.plain)
+            }
+            .padding(5)
+            .background(Theme.editorPaperSoft.opacity(0.54), in: Capsule())
+
+            Spacer(minLength: 0)
+
+            bottomToolButton(title: "Aa") {
+                enterEditingMode(focusBody: false)
+                showFormatMenu = true
+            }
+            bottomToolButton(systemName: "paperclip") {
+                enterEditingMode(focusBody: false)
+                showAttachmentPicker = true
+            }
+            bottomToolButton(systemName: "checkmark") {
+                enterEditingMode()
+                sendFormatCommand(.todo, tipTap: .taskList)
+            }
+            Button {
+                showAIAction = true
+            } label: {
+                Text("NL")
+                    .font(.system(size: 18, weight: .black, design: .rounded))
+                    .foregroundStyle(Theme.editorAccentDeep)
+                    .frame(width: 52, height: 52)
+                    .background(Theme.editorAccent.opacity(0.14), in: Circle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 36, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 36, style: .continuous)
+                .stroke(Theme.editorLine.opacity(0.32), lineWidth: 0.7)
+        )
+        .shadow(color: Theme.softShadow.opacity(0.75), radius: 24, x: 0, y: 12)
+    }
+
+    private func bottomToolButton(systemName: String? = nil, title: String? = nil, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Group {
+                if let systemName {
+                    Image(systemName: systemName)
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                } else if let title {
+                    Text(title)
+                        .font(.system(size: 18, weight: .black, design: .rounded))
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .glassEffect(.regular, in: Capsule())
-            .shadow(color: Theme.softShadow, radius: 14, x: 0, y: 8)
+            .foregroundStyle(Theme.secondaryInk)
+            .frame(width: 34, height: 50)
         }
+        .buttonStyle(.plain)
     }
 
     private var linkBlocks: [LinkedNoteBlock] {
         store.linkBlocks(for: note.id)
+    }
+
+    private var headerMetadata: NoteEditorHeaderMetadata {
+        let todoCount = document.blocks.filter { $0.kind == .todo && ($0.isChecked ?? false) == false }.count
+        let visibleText = document.blocks
+            .filter { $0.kind != .attachment && $0.kind != .table }
+            .map(\.text)
+            .joined(separator: " ")
+        let readingMinutes = max(1, Int(ceil(Double(visibleText.count) / 420.0)))
+        let summary = note.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        return NoteEditorHeaderMetadata(
+            updatedAt: note.updatedAt,
+            summary: summary,
+            readingMinutes: readingMinutes,
+            todoCount: todoCount,
+            notebookLabel: "本地优先",
+            preview: headerContentPreview,
+            hasBodyContent: hasHeaderBodyContent
+        )
+    }
+
+    private var hasHeaderBodyContent: Bool {
+        let title = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return document.blocks.enumerated().contains { index, block in
+            if block.kind == .attachment || block.kind == .table {
+                return true
+            }
+            let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return false }
+            if index == 0 && NoteTitleDeriver.cleanedTitleLine(text) == title {
+                return false
+            }
+            return true
+        }
+    }
+
+    private var headerContentPreview: NoteEditorHeaderMetadata.Preview? {
+        let summary = note.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard AISummaryRegistry.isGenerated(noteId: note.id, summary: summary) else { return nil }
+        let displaySummary = AISummaryText.normalized(summary)
+        return NoteEditorHeaderMetadata.Preview(
+            title: "AI 摘要",
+            detail: "已分析",
+            style: .excerpt,
+            items: [displaySummary]
+        )
     }
 
     private var currentNotebookId: UUID? {
@@ -604,7 +789,7 @@ struct NoteEditorView: View {
     private func triggerAutoOrganize() {
         aiCenter.startAutoOrganize(
             noteId: note.id,
-            title: note.title,
+            title: noteTitleForExport(),
             content: note.content,
             notebookContext: currentNotebookContext(),
             aiClient: aiClient,
@@ -624,7 +809,7 @@ struct NoteEditorView: View {
     private func triggerRewriteCommand(mode: AIRewriteMode) {
         aiCenter.startRewrite(
             noteId: note.id,
-            title: note.title,
+            title: noteTitleForExport(),
             content: note.content,
             notebookContext: currentNotebookContext(),
             mode: mode,
@@ -742,7 +927,7 @@ private struct UndoToastView: View {
 
 private struct SendToast: Identifiable, Equatable {
     let id = UUID()
-    let noteId: UUID
+    let noteId: UUID?
     let message: String
 }
 
@@ -779,7 +964,9 @@ private struct EditorToastOverlay: View {
             }
         } else if let toast = sendToast {
             SendToastView(text: toast.message) {
-                onSend(toast.noteId)
+                if let noteId = toast.noteId {
+                    onSend(noteId)
+                }
                 sendToast = nil
             }
         }
@@ -1352,6 +1539,7 @@ struct MoreMenuSheet: View {
     let canMoveNote: Bool
     let onMove: () -> Void
     let onShare: () -> Void
+    let onCopyMarkdown: () -> Void
     let onExport: () -> Void
     let onClear: () -> Void
     @Environment(\.dismiss) private var dismiss
@@ -1379,6 +1567,11 @@ struct MoreMenuSheet: View {
                     onShare()
                 }
 
+                MenuButton(title: "复制为 Markdown", icon: "doc.on.clipboard", color: .primary) {
+                    dismiss()
+                    onCopyMarkdown()
+                }
+
                 MenuButton(title: "导出 PDF", icon: "doc.text", color: .primary) {
                     dismiss()
                     onExport()
@@ -1399,7 +1592,7 @@ struct MoreMenuSheet: View {
             .padding(.bottom, 20)
         }
         .background(Color.systemBackgroundAdaptive)
-        .presentationDetents([.height(isWhiteboard ? 360 : 300)])
+        .presentationDetents([.height(isWhiteboard ? 420 : 360)])
     }
 }
 

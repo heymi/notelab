@@ -67,7 +67,7 @@ final class AIClient: ObservableObject {
             logger.error("AI extractTasks decode failed response=\(Self.truncate(string: response), privacy: .public)")
             throw AIClientError.decodingFailed
         }
-        return result.tasks
+        return normalizeTasks(result.tasks)
     }
 
     func noteInsight(text: String, title: String, notebookContext: String? = nil, protectedAttachmentTokens: [String] = []) async throws -> (formattedMarkdown: String, report: AINoteInsightReport?, tasks: [AITaskSuggestion]) {
@@ -90,7 +90,7 @@ final class AIClient: ObservableObject {
         }
         if let result = try? JSONDecoder().decode(AINoteInsightData.self, from: data) {
             logger.info("AI noteInsight parsed report successfully")
-            return (result.formattedMarkdown, result.report, result.tasks ?? [])
+            return (result.formattedMarkdown, result.report, normalizeTasks(result.tasks ?? []))
         }
         if let partial = try? JSONDecoder().decode(AIPartialInsightData.self, from: data) {
             logger.info("AI noteInsight parsed partial data")
@@ -98,6 +98,22 @@ final class AIClient: ObservableObject {
         }
         logger.error("AI noteInsight decode failed response=\(Self.truncate(string: cleaned), privacy: .public)")
         throw AIClientError.decodingFailed
+    }
+
+    private func normalizeTasks(_ tasks: [AITaskSuggestion]) -> [AITaskSuggestion] {
+        var seen = Set<String>()
+        var normalized: [AITaskSuggestion] = []
+        for task in tasks {
+            let text = task.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            let key = text
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .lowercased()
+            guard seen.insert(key).inserted else { continue }
+            normalized.append(task)
+            if normalized.count == 7 { break }
+        }
+        return normalized
     }
 
     func supplementHighlights(text: String, maxHighlights: Int) async throws -> [AIHighlightSuggestion] {
@@ -458,12 +474,15 @@ private func buildNoteInsightPrompt(text: String, title: String, notebookContext
     lines.append("}")
     lines.append("输出规则：")
     lines.append("1) formattedMarkdown 只输出正文重写，不要包含标题(H1)、摘要/要点/待办/表格等结构内容。")
-    lines.append("2) report 承担结构化内容：summary/sections/tables；tasks 只从原文显式可执行事项提取，不要编造。")
+    lines.append("2) report 承担结构化内容：title/summary/sections/tables；tasks 只提取真正需要后续跟进、决策、交付、确认或沟通的事项，不要编造。")
+    lines.append("2.0) report.title 必须是 AI 根据全文生成的短标题，中文不超过 10 个字；英文不超过 5 个词或 42 个字符。不能使用“摘要”“AI 摘要”“正文”“待办”“需求整理”等默认章节名或泛标题。")
     lines.append("2.1) tasks 字段必须存在（允许空数组）。")
     lines.append("2.2) report.tables 必须存在（允许空数组）。")
     lines.append("2.3) report.sections 必须存在（允许空数组）。")
-    lines.append("3) 计划/排期/时间线/里程碑/协作分工等结构性内容，必须放入 report.tables（默认倾向按天时间线；允许根据内容自动选择表格列）。")
-    lines.append("4) 所有待办事项必须输出到 tasks 数组（不要只写在正文里）。")
+    lines.append("3) 计划/排期/时间线/里程碑/协作分工等结构性内容，必须放入 report.tables（默认倾向按天时间线；允许根据内容自动选择表格列）。流程步骤、检查清单、操作指南优先放入正文 sections/tables，不要逐项转成待办。")
+    lines.append("3.1) report.tables 禁止生成“任务/状态”“待办/状态”这类假状态表；状态列如果全是“待办/未完成”没有信息价值，必须省略。真正待办只放 tasks 数组，由应用渲染为可勾选清单。")
+    lines.append("3.2) 如果确实需要用表格表达任务规划，表头必须包含“序号/标题/类型/重要程度”中的至少三项，不能只包含“任务/状态”。")
+    lines.append("4) 明确的后续行动必须输出到 tasks 数组（不要只写在正文里），但同一目标下的连续小步骤要合并为一个较高层级任务。")
     lines.append("4.1) 不要把 tasks 或 tables 放进 formattedMarkdown（否则会被去重剥离）。")
     lines.append("5) 代码/命令/配置片段必须使用 fenced code block：```代码```。")
     lines.append("6) 需要强调的重点请使用高亮语法：==yellow:重要内容==。可选颜色：yellow/green/blue/pink/orange/purple。")
@@ -471,9 +490,13 @@ private func buildNoteInsightPrompt(text: String, title: String, notebookContext
     lines.append("8) 高亮粒度优先 2-12 个字的短语，必要时可高亮整句；不要在代码块内插入高亮。")
     lines.append("9) 高亮内容类型优先：结论/决定、风险/注意事项、关键数字/日期、下一步、关键配置/命令说明。")
     lines.append("10) 禁止逐句复述原文，必须重组为“信息架构/数据规则/交互流程/校验规则/待办任务”。")
+    lines.append("10.1) 不要输出大段文字墙。每个 paragraph 建议 40-120 个中文字符；超过 160 个中文字符必须按主题拆成多个 paragraph 或 bullets。")
+    lines.append("10.2) 工作流、规则、步骤、排查过程优先拆成小标题 + bullets/numbered list；不要把多个流程节点塞进一个 paragraph。")
     lines.append("11) 字段清单必须输出为 Markdown 表格（至少 1 张表）。")
-    lines.append("12) 即使原文没有显式待办，也要把需求拆成 6-12 条可执行任务输出到 tasks（不需要标注推断）。")
-    lines.append("13) summary <= 2 句；sections <= 3；每节 bullets <= 6；避免套话与重复，不要在 summary 和 bullets 重复表达同一点。")
+    lines.append("12) 不要为了凑数量生成待办。没有明确后续责任、未决问题或交付动作时，tasks 返回空数组。通常 0-5 条；复杂项目最多 7 条。")
+    lines.append("12.1) 待办颗粒度要偏产品/项目管理层级，例如“完成图标资源清理与验证”，不要拆成“检查 A、删除 B、运行 C、确认 D”这类流程步骤。")
+    lines.append("12.2) 如果原文是流程文档、操作指南、规范说明或排查步骤，默认不生成待办，除非文中出现“需要/下一步/待确认/负责人/截止时间/阻塞/风险跟进”等明显任务信号。")
+    lines.append("13) summary <= 100 个中文字符，1-2 句；必须是分析性概括，综合主题、意图和关键判断，不得直接摘录标题、首句或原文连续片段；sections <= 3；每节 bullets <= 6；避免套话与重复，不要在 summary 和 bullets 重复表达同一点。")
     if isShort {
         lines.append("14) 原文较短时不要扩写或脑补，只做更清晰的表达与轻量结构化。")
         lines.append("15) 原文较短时 report.tables 必须为空，除非原文明确包含表格/字段/时间线/对比结构。")
@@ -530,13 +553,14 @@ private func buildExtractTasksPrompt(text: String) -> String {
     lines.append("  \"tasks\": [ { \"text\": string, \"dueDate\": string?, \"priority\": string, \"confidence\": number, \"sourceAnchor\": { \"paragraphIndex\": number } } ]")
     lines.append("}")
     lines.append("规则：")
-    lines.append("1) 允许轻度推断：将“下一步/风险/阻塞项/问题/待确认项”转成可执行待办，但不要编造事实。")
+    lines.append("1) 只提取真正需要后续跟进、决策、交付、确认或沟通的事项；允许把“下一步/风险/阻塞项/问题/待确认项”转成可执行待办，但不要编造事实。")
     lines.append("2) priority 为 \"high\", \"medium\", \"low\" 之一。")
     lines.append("3) confidence 为 0-1 之间的数字，表示这是待办事项的置信度。")
     lines.append("4) dueDate 格式为 ISO8601，如果没有明确日期则为 null。")
-    lines.append("5) 最多提取 12 个任务。")
-    lines.append("6) 如果没有任务，必须返回空数组：{\"tasks\": []}。")
-    lines.append("7) 不要输出除 JSON 外的任何文字。")
+    lines.append("5) 不要把流程步骤、操作指南、检查清单逐项转成待办；同一目标下的连续小步骤要合并成一个较高层级任务。")
+    lines.append("6) 不要为了凑数量生成待办。通常 0-5 条；复杂项目最多 7 条。")
+    lines.append("7) 如果没有任务，必须返回空数组：{\"tasks\": []}。")
+    lines.append("8) 不要输出除 JSON 外的任何文字。")
     lines.append("")
     lines.append("JSON 示例：")
     lines.append("{\"tasks\": [{\"text\": \"跟进日志异常原因\", \"dueDate\": null, \"priority\": \"medium\", \"confidence\": 0.62, \"sourceAnchor\": {\"paragraphIndex\": 3}}]}")

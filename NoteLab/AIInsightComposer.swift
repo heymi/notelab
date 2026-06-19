@@ -10,10 +10,6 @@ enum AIInsightComposer {
         guard let report else { return formattedMarkdown }
         var lines: [String] = []
         let finalTitle = resolvedTitle(from: report.title, fallback: fallbackTitle)
-        if !report.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            lines.append("## 摘要")
-            lines.append(report.summary)
-        }
 
         var seenBullets = Set<String>()
         for section in report.sections {
@@ -22,7 +18,7 @@ enum AIInsightComposer {
                 lines.append("## \(heading)")
             }
             for paragraph in section.paragraphs where !paragraph.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                lines.append(paragraph)
+                lines.append(contentsOf: splitLongParagraph(paragraph))
             }
             for bullet in section.bullets {
                 let cleaned = bullet.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -35,6 +31,7 @@ enum AIInsightComposer {
         }
 
         for table in report.tables {
+            guard !isLowValueTodoStatusTable(table) else { continue }
             let title = table.title.trimmingCharacters(in: .whitespacesAndNewlines)
             if !title.isEmpty {
                 lines.append("## \(title)")
@@ -76,9 +73,7 @@ enum AIInsightComposer {
     }
 
     static func resolvedTitle(from reportTitle: String?, fallback: String) -> String {
-        let title = reportTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !title.isEmpty { return title }
-        return fallback
+        NoteTitleDeriver.title(fromAI: reportTitle, fallback: fallback)
     }
 
     private static func buildStripHeadings(report: AINoteInsightReport) -> Set<String> {
@@ -99,7 +94,8 @@ enum AIInsightComposer {
         let withoutStrippedSections = stripHeadingSections(from: replaced.body, headings: stripHeadings)
         let withoutTables = stripMarkdownTables(from: withoutStrippedSections)
         let deduped = dedupeMarkdownBlocks(withoutTables, dropLines: dropLines)
-        return normalizeBlankLines(deduped)
+        let segmented = segmentLongParagraphLines(deduped)
+        return normalizeBlankLines(segmented)
     }
 
     private static func replaceLeadingH1(in markdown: String, title: String) -> (body: String, didReplace: Bool) {
@@ -230,6 +226,86 @@ enum AIInsightComposer {
         return result.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static func segmentLongParagraphLines(_ markdown: String) -> String {
+        var result: [String] = []
+        var inCodeBlock = false
+        for line in markdown.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline }).map(String.init) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                inCodeBlock.toggle()
+                result.append(line)
+                continue
+            }
+            if inCodeBlock || shouldKeepLineIntact(trimmed) {
+                result.append(line)
+                continue
+            }
+
+            let segments = splitLongParagraph(line)
+            if segments.count == 1 {
+                result.append(line)
+            } else {
+                for (index, segment) in segments.enumerated() {
+                    if index > 0 { result.append("") }
+                    result.append(segment)
+                }
+            }
+        }
+        return result.joined(separator: "\n")
+    }
+
+    private static func shouldKeepLineIntact(_ line: String) -> Bool {
+        line.isEmpty ||
+        line.hasPrefix("#") ||
+        line.hasPrefix("|") ||
+        line.hasPrefix(">") ||
+        line.hasPrefix("- ") ||
+        line.hasPrefix("* ") ||
+        line.hasPrefix("- [") ||
+        line.range(of: #"^\d+[.)]\s+"#, options: .regularExpression) != nil
+    }
+
+    private static func splitLongParagraph(_ paragraph: String) -> [String] {
+        let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 180 else { return [trimmed] }
+
+        let protected = ["AppIcon.appiconset", "Assets.xcassets", "project.pbxproj", "Info.plist"]
+        var working = trimmed
+        var placeholders: [String: String] = [:]
+        for (index, token) in protected.enumerated() where working.contains(token) {
+            let placeholder = "__NL_TOKEN_\(index)__"
+            placeholders[placeholder] = token
+            working = working.replacingOccurrences(of: token, with: placeholder)
+        }
+
+        let pieces = working.splitAfterSentencePunctuation()
+        guard pieces.count > 1 else { return [trimmed] }
+
+        var segments: [String] = []
+        var current = ""
+        for piece in pieces {
+            let candidate = current.isEmpty ? piece : current + piece
+            if candidate.count > 120, !current.isEmpty {
+                segments.append(restoreProtectedTokens(current, placeholders: placeholders))
+                current = piece
+            } else {
+                current = candidate
+            }
+        }
+        if !current.isEmpty {
+            segments.append(restoreProtectedTokens(current, placeholders: placeholders))
+        }
+        return segments.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    private static func restoreProtectedTokens(_ text: String, placeholders: [String: String]) -> String {
+        var restored = text
+        for (placeholder, token) in placeholders {
+            restored = restored.replacingOccurrences(of: placeholder, with: token)
+        }
+        return restored
+    }
+
     private static func shouldLabelBody(_ markdown: String) -> Bool {
         let trimmed = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
@@ -269,5 +345,52 @@ enum AIInsightComposer {
             lines.append("| " + cells.joined(separator: " | ") + " |")
         }
         return lines.joined(separator: "\n")
+    }
+
+    private static func isLowValueTodoStatusTable(_ table: AIReportTable) -> Bool {
+        let title = normalizedTableText(table.title)
+        let columns = table.columns.map(normalizedTableText)
+        let hasTaskColumn = columns.contains { $0.contains("任务") || $0.contains("待办") || $0.contains("事项") || $0.contains("标题") }
+        let hasStatusColumn = columns.contains { $0.contains("状态") }
+        let looksLikeTodoTable = title.contains("待办") || title.contains("任务") || title.contains("事项")
+        guard hasTaskColumn, hasStatusColumn, looksLikeTodoTable else { return false }
+
+        guard let statusIndex = columns.firstIndex(where: { $0.contains("状态") }) else { return false }
+        let statuses = table.rows.compactMap { row -> String? in
+            guard statusIndex < row.count else { return nil }
+            let status = normalizedTableText(row[statusIndex])
+            return status.isEmpty ? nil : status
+        }
+        guard !statuses.isEmpty else { return true }
+        let lowValueStatuses: Set<String> = ["待办", "代办", "未完成", "todo", "open", "pending"]
+        return statuses.allSatisfy { lowValueStatuses.contains($0) }
+    }
+
+    nonisolated private static func normalizedTableText(_ text: String) -> String {
+        text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "：", with: "")
+            .replacingOccurrences(of: ":", with: "")
+    }
+}
+
+private extension String {
+    func splitAfterSentencePunctuation() -> [String] {
+        var pieces: [String] = []
+        var current = ""
+        let delimiters = Set<Character>(["。", "；", ";", "!", "！", "?", "？"])
+        for character in self {
+            current.append(character)
+            if delimiters.contains(character) {
+                pieces.append(current)
+                current = ""
+            }
+        }
+        if !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pieces.append(current)
+        }
+        return pieces
     }
 }

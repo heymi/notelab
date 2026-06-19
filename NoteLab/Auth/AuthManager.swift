@@ -40,6 +40,10 @@ struct AppleAccount: Codable, Equatable {
     let email: String?
     let displayName: String?
     let localUserId: UUID
+
+    var isSimulatorLocalAccount: Bool {
+        appleUserId.hasPrefix("simulator-local-")
+    }
 }
 
 @MainActor
@@ -142,6 +146,7 @@ final class AuthManager: ObservableObject {
 
     private func refreshAppleCredentialState() async {
         guard let account else { return }
+        if account.isSimulatorLocalAccount { return }
         let state = await Self.credentialState(for: account.appleUserId)
         switch state {
         case .authorized, .transferred:
@@ -189,16 +194,7 @@ final class AuthManager: ObservableObject {
     }
 
     private static func stableUUID(for appleUserId: String) -> UUID {
-        let digest = SHA256.hash(data: Data(appleUserId.utf8))
-        var bytes = Array(digest.prefix(16))
-        bytes[6] = (bytes[6] & 0x0f) | 0x40
-        bytes[8] = (bytes[8] & 0x3f) | 0x80
-        return UUID(uuid: (
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7],
-            bytes[8], bytes[9], bytes[10], bytes[11],
-            bytes[12], bytes[13], bytes[14], bytes[15]
-        ))
+        StableIdentity.uuid(for: appleUserId)
     }
 }
 

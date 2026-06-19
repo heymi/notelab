@@ -37,6 +37,143 @@ struct NoteLabTests {
         #expect(pending.contains(where: { $0.entityType == .notebook && $0.entityId == notebook.id }))
     }
 
+    @Test func stableIdentityUsesCloudKitRecordNameAsCanonicalScope() async throws {
+        let recordName = "_abc123"
+        let first = StableIdentity.uuid(for: "icloud:\(recordName)")
+        let second = StableIdentity.uuid(for: "icloud:\(recordName)")
+        let local = StableIdentity.uuid(for: "simulator-local-com.psg.NoteLab")
+
+        #expect(first == second)
+        #expect(first != local)
+    }
+
+    @Test func noteTitleDeriverSkipsGeneratedStructureHeadings() async throws {
+        let markdown = """
+        ## 摘要
+
+        本文档说明原生图标资源规则。
+
+        ## 核心规则
+        """
+        let title = NoteTitleDeriver.title(fromMarkdown: markdown, fallback: "")
+        #expect(title == "本文档说明原生图标资源规则。")
+    }
+
+    @Test func aiTitleDeriverRejectsGenericHeadingsAndLimitsLength() async throws {
+        #expect(NoteTitleDeriver.title(fromAI: "摘要", fallback: "正文标题") == "正文标题")
+        #expect(NoteTitleDeriver.title(fromAI: "原生图标资源配置验证流程", fallback: "") == "原生图标资源配置验证")
+        #expect(NoteTitleDeriver.title(fromAI: "Native Icon Resource Validation Workflow Details", fallback: "") == "Native Icon Resource Validation Workflow")
+    }
+
+    @Test func aiInsightComposerDropsLowValueTodoStatusTable() async throws {
+        let report = AINoteInsightReport(
+            title: "云条录音",
+            summary: "",
+            sections: [],
+            tables: [
+                AIReportTable(
+                    title: "待办事项清单",
+                    columns: ["任务", "状态"],
+                    rows: [
+                        ["在首页顶部添加云条 UI 组件", "待办"],
+                        ["实现长按手势识别与录音功能", "待办"]
+                    ],
+                    notes: nil
+                )
+            ]
+        )
+        let tasks = [
+            AITaskSuggestion(
+                text: "完成云条录音入口设计与验证",
+                dueDate: nil,
+                priority: "high",
+                confidence: 0.8,
+                sourceAnchor: AIAnchor(paragraphIndex: 2)
+            )
+        ]
+        let markdown = AIInsightComposer.composeInsightMarkdown(
+            formattedMarkdown: "",
+            report: report,
+            tasks: tasks,
+            fallbackTitle: "云条录音"
+        )
+        #expect(!markdown.contains("| 任务 | 状态 |"))
+        #expect(markdown.contains("## 待办"))
+        #expect(markdown.contains("- [ ] 完成云条录音入口设计与验证"))
+    }
+
+    @Test func aiInsightComposerSegmentsLongParagraphs() async throws {
+        let longParagraph = "识别项目类型和图标源：如果仓库是 Expo/React Native，使用 Expo 应用图标工作流；如果是原生 Xcode，检查 .xcodeproj/project.pbxproj、Assets.xcassets 和 Info.plist 输出。选择恰好一个图标系统：保留 AppIcon.appiconset 以获得保守兼容性；仅当目标明确配置为使用 .icon 文件时，才迁移到 Icon Composer。移除冲突资源：删除复制的 AppIcon.icon 资源，删除过时的 appicon.imageset，删除过时的项目引用和资源构建阶段条目。验证源图片：必须尺寸正确、不透明，并确保 1024 营销图标存在。"
+        let report = AINoteInsightReport(
+            title: "图标验证",
+            summary: "",
+            sections: [
+                AIReportSection(heading: "工作流步骤", paragraphs: [longParagraph], bullets: [])
+            ],
+            tables: []
+        )
+        let markdown = AIInsightComposer.composeInsightMarkdown(
+            formattedMarkdown: "",
+            report: report,
+            tasks: [],
+            fallbackTitle: "图标验证"
+        )
+        #expect(markdown.contains("工作流步骤"))
+        let hasBlankSeparator = markdown
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .contains { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        #expect(hasBlankSeparator)
+        #expect(markdown.contains("选择恰好一个图标系统"))
+        #expect(markdown.contains("Assets.xcassets"))
+        #expect(markdown.contains("AppIcon.appiconset"))
+    }
+
+    @MainActor @Test func legacyProfileMigratesIntoCanonicalProfileWithoutDuplicateNotebook() async throws {
+        let account = AppleAccount(
+            appleUserId: "simulator-local-test-\(UUID().uuidString)",
+            email: nil,
+            displayName: "Simulator Local",
+            localUserId: UUID()
+        )
+        let canonicalProfileId = UUID()
+        let repository = NotebookRepository()
+        let notebook = try repository.createNotebook(
+            profileId: account.localUserId,
+            title: "Legacy notebook",
+            color: .sky,
+            iconName: "book"
+        )
+        let note = Note(
+            id: UUID(),
+            title: "Legacy note",
+            summary: "migrate me",
+            paragraphCount: 0,
+            bulletCount: 0,
+            hasAdditionalContext: false,
+            createdAt: Date(),
+            contentRTF: nil,
+            content: "legacy"
+        )
+        _ = try repository.createNote(profileId: account.localUserId, notebookId: notebook.id, note: note)
+
+        let identity = SyncProfileIdentity(
+            profileId: canonicalProfileId,
+            legacyProfileId: account.localUserId,
+            iCloudAccountHash: "test-hash",
+            source: .cloudKit
+        )
+        let profile = try ProfileRepository().ensureProfile(account: account, syncIdentity: identity)
+
+        #expect(profile.profileId == canonicalProfileId)
+        #expect(try repository.loadNotebooks(profileId: account.localUserId).isEmpty)
+        let migrated = try repository.loadNotebooks(profileId: canonicalProfileId)
+        #expect(migrated.filter { $0.id == notebook.id }.count == 1)
+        #expect(migrated.first(where: { $0.id == notebook.id })?.notes.contains(where: { $0.id == note.id }) == true)
+        let pending = try repository.pendingOutbox(profileId: canonicalProfileId)
+        #expect(pending.contains(where: { $0.entityType == .notebook && $0.entityId == notebook.id }))
+        #expect(pending.contains(where: { $0.entityType == .note && $0.entityId == note.id }))
+    }
+
     @MainActor @Test func syncSummaryMergePreservesFailureMessage() async throws {
         var summary = SyncSummary(reason: .manual, pushed: 1)
         summary.merge(SyncSummary(reason: .manual, failed: 1, message: "部分内容同步失败，稍后会自动重试"))
@@ -188,6 +325,50 @@ struct NoteLabTests {
         let snapped = WhiteboardLinkSnapper.snap(offset: nearLeftTop, container: container, insets: insets, overlaySize: overlay, padding: 12)
         #expect(snapped.width == -176)
         #expect(snapped.height == 0)
+    }
+
+    @Test func noteShareBuilderCopiesMarkdownWithTitleHeading() async throws {
+        let doc = NoteDocument.fromMarkdown("""
+        Body paragraph
+
+        - Item
+        """)
+        let markdown = NoteShareBuilder.markdown(title: "Meeting Notes", document: doc, fallbackMarkdown: "")
+        #expect(markdown == """
+        # Meeting Notes
+
+        Body paragraph
+
+        - Item
+        """)
+    }
+
+    @Test func noteShareBuilderDoesNotDuplicateExistingMarkdownTitle() async throws {
+        let doc = NoteDocument.fromMarkdown("""
+        # Meeting Notes
+
+        Body paragraph
+        """)
+        let markdown = NoteShareBuilder.markdown(title: "Meeting Notes", document: doc, fallbackMarkdown: "")
+        #expect(markdown == """
+        # Meeting Notes
+
+        Body paragraph
+        """)
+    }
+
+    @Test func noteShareBuilderFallsBackToPersistedMarkdownForEmptyDocument() async throws {
+        let doc = NoteDocument.fromPlainText("")
+        let markdown = NoteShareBuilder.markdown(title: "Existing", document: doc, fallbackMarkdown: """
+        ## Existing
+
+        - [ ] Task
+        """)
+        #expect(markdown == """
+        ## Existing
+
+        - [ ] Task
+        """)
     }
 
     @MainActor @Test func noteDocumentParsesLegacyAttachmentToken() async throws {

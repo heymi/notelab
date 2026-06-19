@@ -323,21 +323,22 @@ struct RootView: View {
         avatarStore.updateUserId(auth.userId)
         guard let account = auth.account else { return }
         do {
-            let profile = try profileRepository.ensureProfile(account: account)
+            let syncIdentity = await SyncProfileIdentityResolver.resolve(account: account)
+            let profile = try profileRepository.ensureProfile(account: account, syncIdentity: syncIdentity)
             store.configure(profileId: profile.profileId)
             syncEngine.configure(profileId: profile.profileId)
-            startLegacyMigrationIfNeeded(profileId: profile.profileId)
+            startLegacyMigrationIfNeeded(profileId: profile.profileId, isCloudBacked: syncIdentity.isCloudBacked)
             startSync(reason: .launch)
         } catch {
             syncLogger.error("profile setup failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
-    private func startLegacyMigrationIfNeeded(profileId: UUID) {
+    private func startLegacyMigrationIfNeeded(profileId: UUID, isCloudBacked: Bool) {
         migrationTask = Task(priority: .utility) {
             await SwiftDataV3MigrationService.migrateIfNeeded(profileId: profileId)
             #if DEBUG
-            await DebugSampleDataSeeder.seedIfNeeded(profileId: profileId)
+            await DebugSampleDataSeeder.seedIfNeeded(profileId: profileId, isCloudBacked: isCloudBacked)
             #endif
             if Task.isCancelled { return }
             await MainActor.run {

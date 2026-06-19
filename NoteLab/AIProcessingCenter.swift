@@ -122,6 +122,7 @@ final class AIProcessingCenter: ObservableObject {
                     noteId: noteId,
                     title: newTitle,
                     markdown: highlighted,
+                    aiSummary: payload.report?.summary,
                     store: store
                 )
                 // 记录用量
@@ -305,11 +306,20 @@ final class AIProcessingCenter: ObservableObject {
         }
     }
 
-    private func applyFormattedResult(noteId: UUID, title: String, markdown: String, store: NotebookStore) {
+    private func applyFormattedResult(noteId: UUID, title: String, markdown: String, aiSummary: String? = nil, store: NotebookStore) {
         guard let binding = store.noteBinding(noteId: noteId) else { return }
         var updated = binding.wrappedValue
         NoteUndoSnapshotStore.save(noteId: updated.id, title: updated.title, content: updated.content)
-        if !title.isEmpty { updated.title = title }
+        let resolvedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.title = resolvedTitle.isEmpty ? NoteTitleDeriver.title(fromMarkdown: markdown, fallback: title) : resolvedTitle
+        if let aiSummary {
+            let summary = AISummaryText.normalized(aiSummary)
+            updated.summary = summary
+            AISummaryRegistry.mark(noteId: updated.id, summary: summary)
+        } else {
+            updated.summary = ""
+            AISummaryRegistry.clear(noteId: updated.id)
+        }
         updated.content = markdown
         updated.updateMetrics()
         binding.wrappedValue = updated
@@ -331,6 +341,7 @@ final class AIProcessingCenter: ObservableObject {
         let merged = NoteDocument(version: 1, blocks: blocks + doc.blocks)
         let markdown = merged.flattenMarkdown()
         updated.content = markdown
+        updated.title = NoteTitleDeriver.title(from: merged, fallback: updated.title)
         updated.updateMetrics()
         binding.wrappedValue = updated
         store.updateDocument(noteId: updated.id, document: merged)

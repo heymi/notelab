@@ -50,27 +50,15 @@ final class AttachmentBlockCell: UITableViewCell {
     private var imageAspectRatioConstraint: NSLayoutConstraint?
     
     private var containerBackgroundColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.15, alpha: 1.0) :
-                UIColor(white: 0.97, alpha: 1.0)
-        }
+        .noteEditorPaperSoft
     }
     
     private var containerBorderColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.3, alpha: 1.0) :
-                UIColor(white: 0.9, alpha: 1.0)
-        }
+        .noteEditorLine
     }
     
     private var infoLabelColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.7, alpha: 1.0) :
-                UIColor.darkGray
-        }
+        .noteEditorSecondaryInk
     }
     
     private var dragHandleBackgroundColor: UIColor {
@@ -93,11 +81,7 @@ final class AttachmentBlockCell: UITableViewCell {
     }
     
     private var sentHighlightColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(red: 0.3, green: 0.25, blue: 0.05, alpha: 1.0) :
-                UIColor(red: 1.0, green: 0.95, blue: 0.64, alpha: 1.0)
-        }
+        .noteEditorSelection
     }
 
     private func setupViews() {
@@ -107,16 +91,16 @@ final class AttachmentBlockCell: UITableViewCell {
         contentView.addSubview(sentHighlightBackgroundView)
         sentHighlightBackgroundView.translatesAutoresizingMaskIntoConstraints = false
         
-        multiSelectBackgroundView.backgroundColor = UIColor.black.withAlphaComponent(0.06)
+        multiSelectBackgroundView.backgroundColor = UIColor.noteEditorSelection
         multiSelectBackgroundView.layer.cornerRadius = 12
         multiSelectBackgroundView.isHidden = true
         contentView.addSubview(multiSelectBackgroundView)
         multiSelectBackgroundView.translatesAutoresizingMaskIntoConstraints = false
         
         containerView.backgroundColor = containerBackgroundColor
-        containerView.layer.cornerRadius = 12
+        containerView.layer.cornerRadius = 18
         containerView.clipsToBounds = true
-        containerView.layer.borderWidth = 0.5
+        containerView.layer.borderWidth = 0.7
         containerView.layer.borderColor = containerBorderColor.cgColor
         
         contentView.addSubview(containerView)
@@ -131,7 +115,7 @@ final class AttachmentBlockCell: UITableViewCell {
         thumbnailImageView.clipsToBounds = true
         thumbnailImageView.backgroundColor = .white
         
-        infoLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        infoLabel.font = .systemFont(ofSize: 14, weight: .semibold)
         infoLabel.textColor = infoLabelColor
         infoLabel.numberOfLines = 1
         
@@ -161,10 +145,10 @@ final class AttachmentBlockCell: UITableViewCell {
             multiSelectBackgroundView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
             multiSelectBackgroundView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
             
-            containerView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-            containerView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
-            containerView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            containerView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            containerView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
+            containerView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
+            containerView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 22),
+            containerView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -22),
             heightConstraint,
             
             thumbnailImageView.topAnchor.constraint(equalTo: containerView.topAnchor),

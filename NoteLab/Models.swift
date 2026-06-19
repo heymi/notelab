@@ -106,6 +106,142 @@ extension Note {
     }
 }
 
+enum NoteTitleDeriver {
+    private static let structuralTitles: Set<String> = [
+        "摘要",
+        "ai摘要",
+        "ai 摘要",
+        "内容摘要",
+        "正文",
+        "待办",
+        "待办事项",
+        "任务",
+        "需求整理"
+    ]
+
+    static func title(from document: NoteDocument, fallback: String = "") -> String {
+        title(from: document, fallback: fallback, ignoringGeneratedSummary: nil)
+    }
+
+    static func title(from document: NoteDocument, fallback: String = "", ignoringGeneratedSummary summary: String?) -> String {
+        let generatedSummary = summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        for block in document.blocks {
+            guard block.kind != .attachment, block.kind != .table else { continue }
+            let title = cleanedTitleLine(block.text)
+            guard !title.isEmpty else { continue }
+            if isStructuralTitle(title) {
+                continue
+            }
+            if !generatedSummary.isEmpty && title == generatedSummary {
+                continue
+            }
+            return clipped(title)
+        }
+        return fallback
+    }
+
+    static func title(fromMarkdown markdown: String, fallback: String = "") -> String {
+        title(from: NoteDocument.fromMarkdown(markdown), fallback: fallback)
+    }
+
+    static func title(fromAI rawTitle: String?, fallback: String = "") -> String {
+        let cleaned = cleanedTitleLine(rawTitle ?? "")
+        guard !cleaned.isEmpty, !isStructuralTitle(cleaned) else { return fallback }
+        return clippedAITitle(cleaned)
+    }
+
+    static func cleanedTitleLine(_ text: String) -> String {
+        guard let firstLine = text
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .first
+        else {
+            return ""
+        }
+
+        var line = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        let patterns = [
+            #"^#{1,6}\s+"#,
+            #"^>\s+"#,
+            #"^- \[[ xX]\]\s+"#,
+            #"^[-*•]\s+"#,
+            #"^\d+[.)]\s+"#
+        ]
+        for pattern in patterns {
+            line = line.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        line = line.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if line.hasPrefix("![") || line.hasPrefix("attachment:") {
+            return ""
+        }
+        return line
+    }
+
+    private static func isStructuralTitle(_ title: String) -> Bool {
+        let normalized = title
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "：", with: "")
+            .replacingOccurrences(of: ":", with: "")
+        return structuralTitles.contains(normalized)
+    }
+
+    private static func clipped(_ title: String) -> String {
+        let maxCount = 64
+        guard title.count > maxCount else { return title }
+        return String(title.prefix(maxCount)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func clippedAITitle(_ title: String) -> String {
+        if title.range(of: #"\p{Han}"#, options: .regularExpression) != nil {
+            guard title.count > 10 else { return title }
+            return String(title.prefix(10)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let words = title.split(whereSeparator: \.isWhitespace).map(String.init)
+        let byWords = words.count > 5 ? words.prefix(5).joined(separator: " ") : title
+        guard byWords.count > 42 else { return byWords }
+        return String(byWords.prefix(42)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+enum AISummaryRegistry {
+    private static let keyPrefix = "ai.summary.generated."
+
+    static func mark(noteId: UUID, summary: String) {
+        let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            clear(noteId: noteId)
+            return
+        }
+        UserDefaults.standard.set(trimmed, forKey: key(for: noteId))
+    }
+
+    static func isGenerated(noteId: UUID, summary: String) -> Bool {
+        let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        return UserDefaults.standard.string(forKey: key(for: noteId)) == trimmed
+    }
+
+    static func clear(noteId: UUID) {
+        UserDefaults.standard.removeObject(forKey: key(for: noteId))
+    }
+
+    private static func key(for noteId: UUID) -> String {
+        keyPrefix + noteId.uuidString
+    }
+}
+
+enum AISummaryText {
+    static func normalized(_ summary: String) -> String {
+        summary
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 // MARK: - Notification Names
 // Centralized notification names for cross-file visibility with Swift 6's MEMBER_IMPORT_VISIBILITY
 extension Notification.Name {

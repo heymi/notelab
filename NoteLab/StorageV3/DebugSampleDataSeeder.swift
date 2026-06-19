@@ -9,7 +9,8 @@ import os
 enum DebugSampleDataSeeder {
     private static let logger = Logger(subsystem: "NoteLab", category: "DebugSampleDataSeeder")
 
-    static func seedIfNeeded(profileId: UUID) async {
+    static func seedIfNeeded(profileId: UUID, isCloudBacked: Bool) async {
+        guard shouldSeedSamples(isCloudBacked: isCloudBacked) else { return }
         let userDefaultsKey = "debug.sampleDataSeeded.v3.\(profileId.uuidString.lowercased())"
         let repository = NotebookRepository()
         do {
@@ -22,6 +23,14 @@ enum DebugSampleDataSeeder {
         } catch {
             logger.error("sample data seed failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    private static func shouldSeedSamples(isCloudBacked: Bool) -> Bool {
+        let arguments = ProcessInfo.processInfo.arguments
+        if isCloudBacked {
+            return arguments.contains("--seed-cloud-debug-samples")
+        }
+        return !arguments.contains("--disable-debug-samples")
     }
 
     private static func seed(profileId: UUID, repository: NotebookRepository) throws {

@@ -333,64 +333,90 @@ struct NotebookDetailView: View {
     }
 
     private func notesList(notebookIndex: Int) -> some View {
-        List {
+        VStack(spacing: 0) {
             ForEach(store.notebooks[notebookIndex].notes) { note in
-                Button {
-                    Haptics.shared.play(.selection)
-                    router.push(.note(note.id))
-                } label: {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 6) {
-                                if note.isPinned {
-                                    Image(systemName: "pin.fill")
-                                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                        .foregroundStyle(Theme.secondaryInk)
-                                }
-                                Text(note.title)
-                                    .font(.system(size: 16, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(Theme.ink)
-                            }
-                            Text(note.contextText)
-                                .font(.system(size: 13, weight: .regular, design: .rounded))
-                                .foregroundStyle(Theme.secondaryInk)
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 14, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Theme.secondaryInk)
-                    }
-                    .padding(.vertical, 8)
-                    .contentShape(Rectangle())
+                noteRow(note)
+
+                if note.id != store.notebooks[notebookIndex].notes.last?.id {
+                    Divider()
+                        .padding(.leading, 16)
+                        .padding(.trailing, 16)
+                        .opacity(0.45)
                 }
-                .buttonStyle(.plain)
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(role: .destructive) {
-                        Haptics.shared.play(.tap(.medium))
-                        noteToDelete = note
-                        showDeleteConfirmation = true
-                    } label: {
-                        Label("删除", systemImage: "trash")
-                    }
-                    
-                    Button {
-                        Haptics.shared.play(.selection)
-                        store.toggleNotePinned(noteId: note.id, in: notebookId)
-                    } label: {
-                        Label(note.isPinned ? "取消置顶" : "置顶", systemImage: note.isPinned ? "pin.slash" : "pin")
-                    }
-                    .tint(.orange)
-                }
-                .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
-                .listRowSeparator(.hidden)
-                .listRowBackground(Color.clear)
             }
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
+        .padding(.vertical, 8)
         .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .shadow(color: Theme.softShadow, radius: 14, x: 0, y: 8)
-        .frame(minHeight: CGFloat(store.notebooks[notebookIndex].notes.count * 70))
+    }
+
+    private func noteRow(_ note: Note) -> some View {
+        Button {
+            Haptics.shared.play(.selection)
+            router.push(.note(note.id))
+        } label: {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        if note.isPinned {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                        Text(note.title.isEmpty ? "无标题" : note.title)
+                            .font(.system(size: 16, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Theme.ink)
+                            .lineLimit(2)
+                    }
+                    Text(note.contextText.isEmpty ? "暂无内容" : note.contextText)
+                        .font(.system(size: 13, weight: .regular, design: .rounded))
+                        .foregroundStyle(Theme.secondaryInk)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 12)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Theme.secondaryInk)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                Haptics.shared.play(.tap(.medium))
+                noteToDelete = note
+                showDeleteConfirmation = true
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+
+            Button {
+                Haptics.shared.play(.selection)
+                store.toggleNotePinned(noteId: note.id, in: notebookId)
+            } label: {
+                Label(note.isPinned ? "取消置顶" : "置顶", systemImage: note.isPinned ? "pin.slash" : "pin")
+            }
+            .tint(.orange)
+        }
+        .contextMenu {
+            Button {
+                Haptics.shared.play(.selection)
+                store.toggleNotePinned(noteId: note.id, in: notebookId)
+            } label: {
+                Label(note.isPinned ? "取消置顶" : "置顶", systemImage: note.isPinned ? "pin.slash" : "pin")
+            }
+
+            Button(role: .destructive) {
+                Haptics.shared.play(.tap(.medium))
+                noteToDelete = note
+                showDeleteConfirmation = true
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
     }
 }
 

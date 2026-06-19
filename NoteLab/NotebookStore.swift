@@ -22,6 +22,10 @@ final class NotebookStore: ObservableObject {
     private let notePersistenceDebounce: TimeInterval = 0.5
     private let previewDebounce: TimeInterval = 0.35
 
+    var currentProfileId: UUID? {
+        profileId
+    }
+
     private let whiteboardId = UUID(uuidString: "E5E00B5A-0A95-4F8E-8F6A-0E1C1D7F3B55")!
     private let whiteboardContentKey = "whiteboard.content"
     private let whiteboardContentRTFKey = "whiteboard.content.rtf"
@@ -187,7 +191,7 @@ final class NotebookStore: ObservableObject {
 
         let newNote = Note(
             id: UUID(),
-            title: "新笔记",
+            title: "",
             summary: "",
             paragraphCount: 0,
             bulletCount: 0,
@@ -214,7 +218,7 @@ final class NotebookStore: ObservableObject {
 
         var newNote = Note(
             id: UUID(),
-            title: title,
+            title: NoteTitleDeriver.title(fromMarkdown: content, fallback: title),
             summary: "",
             paragraphCount: 0,
             bulletCount: 0,
@@ -454,13 +458,18 @@ final class NotebookStore: ObservableObject {
     }
 
     func collectOpenTodos() -> [LocalTodoItem] {
+        collectTodos(includeCompleted: false)
+    }
+
+    func collectTodos(includeCompleted: Bool = true) -> [LocalTodoItem] {
         var results: [LocalTodoItem] = []
 
         func appendTodos(from note: Note, notebookId: UUID, notebookTitle: String, isWhiteboard: Bool) {
             let lines = note.content.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline })
             for (idx, line) in lines.enumerated() {
                 let text = String(line)
-                guard let item = parseChecklistLine(text), !item.isChecked else { continue }
+                guard let item = parseChecklistLine(text) else { continue }
+                guard includeCompleted || !item.isChecked else { continue }
                 let id = "\(note.id.uuidString):\(idx)"
                 results.append(
                     LocalTodoItem(
@@ -471,7 +480,8 @@ final class NotebookStore: ObservableObject {
                         notebookId: notebookId,
                         notebookTitle: notebookTitle,
                         lineIndex: idx,
-                        isWhiteboard: isWhiteboard
+                        isWhiteboard: isWhiteboard,
+                        isCompleted: item.isChecked
                     )
                 )
             }

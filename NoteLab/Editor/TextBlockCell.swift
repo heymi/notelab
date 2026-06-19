@@ -25,6 +25,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
     private let quoteBorderView = UIView()
     private let multiSelectBackgroundView = UIView()
     private let sentHighlightBackgroundView = UIView()
+    private let todoCardBackgroundView = UIView()
 
     private var kind: BlockKind = .paragraph
     private var blockId: UUID = UUID()
@@ -33,6 +34,8 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
     private var todoChecked: Bool = false
     private var isMultiSelected: Bool = false
     private var isSentHighlighted: Bool = false
+    private var isVisuallyCollapsed: Bool = false
+    private var presentationMode: NoteDetailPresentationMode = .reading
     private var lastRenderedText: String = ""
     private var isApplyingStyle: Bool = false
     private var fontSizeOffset: CGFloat = 0
@@ -40,51 +43,27 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
     
 
     private var inkColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(red: 0.94, green: 0.94, blue: 0.96, alpha: 1) :
-                UIColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1)
-        }
+        .noteEditorInk
     }
     
     private var secondaryInkColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(red: 0.60, green: 0.60, blue: 0.65, alpha: 1) :
-                UIColor(red: 0.42, green: 0.42, blue: 0.45, alpha: 1)
-        }
+        .noteEditorSecondaryInk
     }
 
     private var codeBackgroundColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.15, alpha: 1.0) :
-                UIColor(red: 0.96, green: 0.96, blue: 0.98, alpha: 1)
-        }
+        .noteEditorPaperSoft
     }
 
     private var codeBorderColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.3, alpha: 1.0) :
-                UIColor(white: 0.9, alpha: 1.0)
-        }
+        .noteEditorLine
     }
 
     private var quoteBackgroundColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.15, alpha: 1.0) :
-                UIColor(red: 0.97, green: 0.97, blue: 0.98, alpha: 1.0)
-        }
+        .noteEditorPaperSoft
     }
     
     private var quoteBorderColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.4, alpha: 1.0) :
-                UIColor(white: 0.8, alpha: 1.0)
-        }
+        .noteEditorAccent
     }
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -99,11 +78,32 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
     }
 
     private var sentHighlightColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(red: 0.3, green: 0.25, blue: 0.05, alpha: 1.0) :
-                UIColor(red: 1.0, green: 0.95, blue: 0.64, alpha: 1.0)
-        }
+        .noteEditorSelection
+    }
+
+    private func displayFont(size: CGFloat, weight: UIFont.Weight = .semibold) -> UIFont {
+        UIFont(name: "STSongti-SC-Black", size: size)
+            ?? UIFont(name: "STSongti-SC-Bold", size: size)
+            ?? UIFont(name: "SongtiSC-Black", size: size)
+            ?? UIFont(name: "SongtiSC-Bold", size: size)
+            ?? UIFont.systemFont(ofSize: size, weight: weight)
+    }
+
+    private func bodyFont(size: CGFloat, weight: UIFont.Weight = .regular) -> UIFont {
+        UIFont.systemFont(ofSize: size, weight: weight)
+    }
+
+    private func readingBodyFont(size: CGFloat, weight: UIFont.Weight = .regular) -> UIFont {
+        UIFont.systemFont(ofSize: size, weight: weight)
+    }
+
+    private func readingParagraphStyle(size: CGFloat, lineHeightMultiple: CGFloat = 1.44, lineSpacing: CGFloat = 2.5, paragraphSpacing: CGFloat = 7) -> NSMutableParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        let scale = size / 17
+        style.lineHeightMultiple = lineHeightMultiple
+        style.lineSpacing = lineSpacing * scale
+        style.paragraphSpacing = paragraphSpacing * scale
+        return style
     }
 
     private func setupViews() {
@@ -119,7 +119,20 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         contentView.addSubview(quoteBorderView)
         quoteBorderView.translatesAutoresizingMaskIntoConstraints = false
 
-        multiSelectBackgroundView.backgroundColor = UIColor.black.withAlphaComponent(0.06)
+        todoCardBackgroundView.backgroundColor = UIColor.white.withAlphaComponent(0.72)
+        todoCardBackgroundView.layer.cornerRadius = 22
+        todoCardBackgroundView.layer.cornerCurve = .continuous
+        todoCardBackgroundView.layer.borderColor = UIColor.noteEditorLine.withAlphaComponent(0.2).cgColor
+        todoCardBackgroundView.layer.borderWidth = 0.6
+        todoCardBackgroundView.layer.shadowColor = UIColor.black.cgColor
+        todoCardBackgroundView.layer.shadowOpacity = 0.035
+        todoCardBackgroundView.layer.shadowRadius = 18
+        todoCardBackgroundView.layer.shadowOffset = CGSize(width: 0, height: 8)
+        todoCardBackgroundView.isHidden = true
+        contentView.addSubview(todoCardBackgroundView)
+        todoCardBackgroundView.translatesAutoresizingMaskIntoConstraints = false
+
+        multiSelectBackgroundView.backgroundColor = UIColor.noteEditorSelection
         multiSelectBackgroundView.layer.cornerRadius = 12
         multiSelectBackgroundView.isHidden = true
         contentView.addSubview(multiSelectBackgroundView)
@@ -133,20 +146,24 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         NSLayoutConstraint.activate([
             sentHighlightBackgroundView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 2),
             sentHighlightBackgroundView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -2),
-            sentHighlightBackgroundView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
-            sentHighlightBackgroundView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
-            quoteBorderView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            sentHighlightBackgroundView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 34),
+            sentHighlightBackgroundView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -34),
+            quoteBorderView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 40),
             quoteBorderView.topAnchor.constraint(equalTo: hStack.topAnchor, constant: 2),
             quoteBorderView.bottomAnchor.constraint(equalTo: hStack.bottomAnchor, constant: -2),
             quoteBorderView.widthAnchor.constraint(equalToConstant: 4),
+            todoCardBackgroundView.topAnchor.constraint(equalTo: hStack.topAnchor),
+            todoCardBackgroundView.bottomAnchor.constraint(equalTo: hStack.bottomAnchor),
+            todoCardBackgroundView.leadingAnchor.constraint(equalTo: hStack.leadingAnchor),
+            todoCardBackgroundView.trailingAnchor.constraint(equalTo: hStack.trailingAnchor),
             multiSelectBackgroundView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 2),
             multiSelectBackgroundView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -2),
-            multiSelectBackgroundView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
-            multiSelectBackgroundView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
-            hStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-            hStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
-            hStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            hStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16)
+            multiSelectBackgroundView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 34),
+            multiSelectBackgroundView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -34),
+            hStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
+            hStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
+            hStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 46),
+            hStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -46)
         ])
 
         prefixLabel.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
@@ -160,8 +177,9 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         checkboxButton.setContentHuggingPriority(.required, for: .horizontal)
         checkboxButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        textView.font = UIFont.systemFont(ofSize: 16, weight: .regular)
+        textView.font = bodyFont(size: 17)
         textView.textColor = inkColor
+        textView.tintColor = .noteEditorAccentDeep
         textView.backgroundColor = .clear
         textView.isScrollEnabled = false
         textView.delegate = self
@@ -196,13 +214,34 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         sentHighlightBackgroundView.isHidden = !isSentHighlighted || isMultiSelected
     }
 
-    func setContentInteractionEnabled(_ enabled: Bool) {
-        textView.isEditable = enabled
-        textView.isSelectable = enabled
-        textView.isUserInteractionEnabled = enabled
+    func setContentInteraction(editable: Bool, selectable: Bool) {
+        textView.isEditable = editable && !isVisuallyCollapsed
+        textView.isSelectable = selectable && !isVisuallyCollapsed
+        textView.isUserInteractionEnabled = (editable || selectable) && !isVisuallyCollapsed
     }
 
-    func configure(with block: Block, numberIndex: Int) {
+    func setContentInteractionEnabled(_ enabled: Bool) {
+        setContentInteraction(editable: enabled, selectable: enabled)
+    }
+
+    func setVisuallyCollapsed(_ collapsed: Bool) {
+        isVisuallyCollapsed = collapsed
+        contentView.isHidden = collapsed
+        isUserInteractionEnabled = !collapsed
+        textView.isHidden = collapsed
+        prefixLabel.isHidden = collapsed || prefixLabel.isHidden
+        checkboxButton.isHidden = collapsed || checkboxButton.isHidden
+        quoteBorderView.isHidden = true
+        multiSelectBackgroundView.isHidden = true
+        sentHighlightBackgroundView.isHidden = true
+    }
+
+    func configure(with block: Block, numberIndex: Int, presentationMode: NoteDetailPresentationMode = .reading) {
+        isVisuallyCollapsed = false
+        contentView.isHidden = false
+        isUserInteractionEnabled = true
+        self.presentationMode = presentationMode
+        textView.isHidden = false
         self.kind = block.kind
         self.blockId = block.id
         self.numberIndex = numberIndex
@@ -228,12 +267,14 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         prefixLabel.isHidden = true
         checkboxButton.isHidden = true
         quoteBorderView.isHidden = true
+        todoCardBackgroundView.isHidden = true
         textView.textColor = inkColor
         textView.backgroundColor = .clear
         textView.layer.cornerRadius = 0
         textView.layer.borderWidth = 0
-        textView.textContainerInset = UIEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
+        textView.textContainerInset = UIEdgeInsets(top: 7, left: 0, bottom: 7, right: 0)
         hStack.alignment = .top
+        hStack.spacing = presentationMode.isEditing ? 8 : 11
         hStack.isLayoutMarginsRelativeArrangement = false
         
         let currentText = textView.text ?? ""
@@ -241,155 +282,223 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         
         // Default paragraph style with good line spacing
         let defaultParagraphStyle = NSMutableParagraphStyle()
-        let defaultScale = (16 + fontSizeOffset) / 16
-        defaultParagraphStyle.lineSpacing = 4 * defaultScale
-        defaultParagraphStyle.lineHeightMultiple = 1.15
+        let defaultScale = (17 + fontSizeOffset) / 17
+        defaultParagraphStyle.lineSpacing = 6 * defaultScale
+        defaultParagraphStyle.lineHeightMultiple = 1.2
+
+        if presentationMode.isEditing {
+            applyPlainEditingStyle(currentText: currentText, paragraphStyle: defaultParagraphStyle, animated: animated)
+            restoreSelection(savedSelection)
+            updateTypingAttributes(paragraphStyle: defaultParagraphStyle)
+            lastRenderedText = currentText
+            return
+        }
 
         switch kind {
         case .heading:
             let baseSize: CGFloat
             switch headingLevel {
-            case 1: baseSize = 30
-            case 2: baseSize = 24
-            case 3: baseSize = 20
+            case 1: baseSize = 31
+            case 2: baseSize = 23
+            case 3: baseSize = 19
             default: baseSize = 18
             }
             let size = baseSize + fontSizeOffset
             let scale = size / baseSize
             let headingParagraphStyle = NSMutableParagraphStyle()
-            headingParagraphStyle.lineSpacing = 4 * scale
-            headingParagraphStyle.lineHeightMultiple = 1.1
-            headingParagraphStyle.paragraphSpacingBefore = 12 // Add spacing before heading
+            headingParagraphStyle.lineSpacing = (headingLevel == 1 ? 2 : 4) * scale
+            headingParagraphStyle.lineHeightMultiple = headingLevel == 1 ? 1.08 : 1.16
+            headingParagraphStyle.paragraphSpacingBefore = headingLevel == 1 ? 16 : 12
+            headingParagraphStyle.paragraphSpacing = headingLevel == 1 ? 8 : 6
             let attrString = NSMutableAttributedString(string: currentText)
             attrString.addAttribute(.paragraphStyle, value: headingParagraphStyle, range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.font, value: UIFont.systemFont(ofSize: size, weight: .bold), range: NSMakeRange(0, attrString.length))
+            let headingFont = headingLevel == 1 ? displayFont(size: size) : bodyFont(size: size, weight: .bold)
+            attrString.addAttribute(.font, value: headingFont, range: NSMakeRange(0, attrString.length))
             attrString.addAttribute(.foregroundColor, value: inkColor, range: NSMakeRange(0, attrString.length))
-            applyInlineMarkdownStyles(to: attrString, baseFont: UIFont.systemFont(ofSize: size, weight: .bold))
+            applyInlineMarkdownStyles(to: attrString, baseFont: headingFont)
             setAttributedTextAnimated(attrString, animated: animated)
-            textView.textContainerInset = UIEdgeInsets(top: 12, left: 0, bottom: 4, right: 0)
+            textView.textContainerInset = UIEdgeInsets(top: headingLevel == 1 ? 15 : 12, left: 0, bottom: headingLevel == 1 ? 10 : 7, right: 0)
             
         case .quote:
-            quoteBorderView.isHidden = false
-            // Add background for quote
             textView.backgroundColor = quoteBackgroundColor
-            textView.layer.cornerRadius = 6
+            textView.layer.cornerRadius = 18
             
-            let size = 16 + fontSizeOffset
-            let scale = size / 16
-            let quoteParagraphStyle = NSMutableParagraphStyle()
-            quoteParagraphStyle.lineSpacing = 5 * scale
-            quoteParagraphStyle.lineHeightMultiple = 1.2
+            let size = 17 + fontSizeOffset
+            let quoteParagraphStyle = readingParagraphStyle(size: size, lineHeightMultiple: 1.42, lineSpacing: 3, paragraphSpacing: 7)
             let attrString = NSMutableAttributedString(string: currentText)
             attrString.addAttribute(.paragraphStyle, value: quoteParagraphStyle, range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.font, value: UIFont.italicSystemFont(ofSize: size), range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.foregroundColor, value: secondaryInkColor, range: NSMakeRange(0, attrString.length))
-            applyInlineMarkdownStyles(to: attrString, baseFont: UIFont.italicSystemFont(ofSize: size))
+            let quoteFont = readingBodyFont(size: size, weight: .regular)
+            attrString.addAttribute(.font, value: quoteFont, range: NSMakeRange(0, attrString.length))
+            attrString.addAttribute(.foregroundColor, value: UIColor.noteEditorAccentDeep, range: NSMakeRange(0, attrString.length))
+            applyInlineMarkdownStyles(to: attrString, baseFont: quoteFont)
             setAttributedTextAnimated(attrString, animated: animated)
-            hStack.layoutMargins = UIEdgeInsets(top: 0, left: 12, bottom: 0, right: 0)
+            hStack.layoutMargins = UIEdgeInsets(top: 6, left: 2, bottom: 8, right: 2)
             hStack.isLayoutMarginsRelativeArrangement = true
-            textView.textContainerInset = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+            textView.textContainerInset = UIEdgeInsets(top: 16, left: 18, bottom: 16, right: 18)
             
         case .bullet:
             prefixLabel.isHidden = false
             prefixLabel.text = "•"
-            let size = 16 + fontSizeOffset
-            prefixLabel.font = UIFont.systemFont(ofSize: 20 + fontSizeOffset, weight: .bold)
-            prefixLabel.textColor = inkColor.withAlphaComponent(0.7)
+            let size = 16.5 + fontSizeOffset
+            prefixLabel.font = UIFont.systemFont(ofSize: 15 + fontSizeOffset, weight: .bold)
+            prefixLabel.textColor = .noteEditorAccent
             let attrString = NSMutableAttributedString(string: currentText)
-            attrString.addAttribute(.paragraphStyle, value: defaultParagraphStyle, range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.font, value: UIFont.systemFont(ofSize: size, weight: .regular), range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.foregroundColor, value: inkColor, range: NSMakeRange(0, attrString.length))
-            applyInlineMarkdownStyles(to: attrString, baseFont: UIFont.systemFont(ofSize: size, weight: .regular))
+            let listParagraphStyle = readingParagraphStyle(size: size, lineHeightMultiple: 1.42, lineSpacing: 2.5, paragraphSpacing: 5)
+            attrString.addAttribute(.paragraphStyle, value: listParagraphStyle, range: NSMakeRange(0, attrString.length))
+            let font = readingBodyFont(size: size)
+            attrString.addAttribute(.font, value: font, range: NSMakeRange(0, attrString.length))
+            attrString.addAttribute(.foregroundColor, value: UIColor.noteEditorBody, range: NSMakeRange(0, attrString.length))
+            applyInlineMarkdownStyles(to: attrString, baseFont: font)
             setAttributedTextAnimated(attrString, animated: animated)
             hStack.alignment = .firstBaseline
-            textView.textContainerInset = UIEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+            textView.textContainerInset = UIEdgeInsets(top: 4, left: 0, bottom: 7, right: 0)
             
         case .numbered:
             prefixLabel.isHidden = false
             prefixLabel.text = "\(numberIndex)."
-            let size = 16 + fontSizeOffset
+            let size = 16.5 + fontSizeOffset
             prefixLabel.font = UIFont.monospacedDigitSystemFont(ofSize: size, weight: .medium)
-            prefixLabel.textColor = inkColor.withAlphaComponent(0.7)
+            prefixLabel.textColor = .noteEditorAccentDeep
             let attrString = NSMutableAttributedString(string: currentText)
-            attrString.addAttribute(.paragraphStyle, value: defaultParagraphStyle, range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.font, value: UIFont.systemFont(ofSize: size, weight: .regular), range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.foregroundColor, value: inkColor, range: NSMakeRange(0, attrString.length))
-            applyInlineMarkdownStyles(to: attrString, baseFont: UIFont.systemFont(ofSize: size, weight: .regular))
+            let listParagraphStyle = readingParagraphStyle(size: size, lineHeightMultiple: 1.42, lineSpacing: 2.5, paragraphSpacing: 5)
+            attrString.addAttribute(.paragraphStyle, value: listParagraphStyle, range: NSMakeRange(0, attrString.length))
+            let font = readingBodyFont(size: size)
+            attrString.addAttribute(.font, value: font, range: NSMakeRange(0, attrString.length))
+            attrString.addAttribute(.foregroundColor, value: UIColor.noteEditorBody, range: NSMakeRange(0, attrString.length))
+            applyInlineMarkdownStyles(to: attrString, baseFont: font)
             setAttributedTextAnimated(attrString, animated: animated)
             hStack.alignment = .firstBaseline
-            textView.textContainerInset = UIEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+            textView.textContainerInset = UIEdgeInsets(top: 4, left: 0, bottom: 7, right: 0)
             
         case .todo:
             checkboxButton.isHidden = false
-            hStack.alignment = .top // Align to top for multiline support
-            let size = 16 + fontSizeOffset
-            let config = UIImage.SymbolConfiguration(pointSize: 17 + fontSizeOffset, weight: .regular)
+            hStack.alignment = presentationMode.isEditing ? .top : .center
+            todoCardBackgroundView.isHidden = false
+            hStack.layoutMargins = UIEdgeInsets(top: 13, left: 16, bottom: 13, right: 16)
+            hStack.isLayoutMarginsRelativeArrangement = true
+            hStack.spacing = 14
+            let size = 16.5 + fontSizeOffset
+            let config = UIImage.SymbolConfiguration(pointSize: 21, weight: .regular)
             let name = todoChecked ? "checkmark.circle.fill" : "circle"
             checkboxButton.setImage(UIImage(systemName: name, withConfiguration: config), for: .normal)
-            checkboxButton.tintColor = todoChecked ? UIColor.systemBlue : UIColor(white: 0.35, alpha: 1.0)
+            checkboxButton.tintColor = todoChecked ? .noteEditorAccentDeep : .noteEditorSecondaryInk
             checkboxButton.imageView?.contentMode = .scaleAspectFit // Prevent distortion
             
             // Adjust text inset to align visually with checkbox
-            textView.textContainerInset = UIEdgeInsets(top: 2, left: 0, bottom: 4, right: 0)
+            textView.textContainerInset = UIEdgeInsets(top: 1, left: 0, bottom: 4, right: 0)
             
             let attrString = NSMutableAttributedString(string: currentText)
-            attrString.addAttribute(.paragraphStyle, value: defaultParagraphStyle, range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.font, value: UIFont.systemFont(ofSize: size, weight: .regular), range: NSMakeRange(0, attrString.length))
+            let todoParagraphStyle = readingParagraphStyle(size: size, lineHeightMultiple: 1.42, lineSpacing: 2.5, paragraphSpacing: 5)
+            attrString.addAttribute(.paragraphStyle, value: todoParagraphStyle, range: NSMakeRange(0, attrString.length))
+            let font = readingBodyFont(size: size, weight: .regular)
+            attrString.addAttribute(.font, value: font, range: NSMakeRange(0, attrString.length))
             
             if todoChecked {
                 attrString.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: NSMakeRange(0, attrString.length))
                 attrString.addAttribute(.foregroundColor, value: UIColor.secondaryLabel, range: NSMakeRange(0, attrString.length))
             } else {
-                attrString.addAttribute(.foregroundColor, value: inkColor, range: NSMakeRange(0, attrString.length))
-                applyInlineMarkdownStyles(to: attrString, baseFont: UIFont.systemFont(ofSize: size, weight: .regular))
+                attrString.addAttribute(.foregroundColor, value: UIColor.noteEditorBody, range: NSMakeRange(0, attrString.length))
+                applyInlineMarkdownStyles(to: attrString, baseFont: font)
             }
             setAttributedTextAnimated(attrString, animated: animated)
             
         case .code:
-            let size = 14 + fontSizeOffset
-            let scale = size / 14
+            let size = 14.5 + fontSizeOffset
+            let scale = size / 14.5
             let codeParagraphStyle = NSMutableParagraphStyle()
-            codeParagraphStyle.lineSpacing = 2 * scale
-            codeParagraphStyle.lineHeightMultiple = 1.3
+            codeParagraphStyle.lineSpacing = 4 * scale
+            codeParagraphStyle.lineHeightMultiple = 1.38
+            codeParagraphStyle.paragraphSpacing = 4 * scale
             let attrString = NSMutableAttributedString(string: currentText)
             attrString.addAttribute(.paragraphStyle, value: codeParagraphStyle, range: NSMakeRange(0, attrString.length))
             attrString.addAttribute(.font, value: UIFont.monospacedSystemFont(ofSize: size, weight: .regular), range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.foregroundColor, value: inkColor, range: NSMakeRange(0, attrString.length))
+            attrString.addAttribute(.foregroundColor, value: UIColor.noteEditorInk, range: NSMakeRange(0, attrString.length))
             // Don't apply inline markdown to code blocks
             setAttributedTextAnimated(attrString, animated: animated)
             textView.backgroundColor = codeBackgroundColor
-            textView.layer.cornerRadius = 8
-            textView.layer.borderWidth = 1
+            textView.layer.cornerRadius = 18
+            textView.layer.borderWidth = 0.7
             textView.layer.borderColor = codeBorderColor.cgColor
-            textView.textContainerInset = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+            textView.textContainerInset = UIEdgeInsets(top: 16, left: 18, bottom: 16, right: 18)
             
         default:
             // Paragraph style with inline markdown
-            let size = 16 + fontSizeOffset
+            let size = 17 + fontSizeOffset
             let attrString = NSMutableAttributedString(string: currentText)
-            attrString.addAttribute(.paragraphStyle, value: defaultParagraphStyle, range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.font, value: UIFont.systemFont(ofSize: size, weight: .regular), range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.foregroundColor, value: inkColor, range: NSMakeRange(0, attrString.length))
-            applyInlineMarkdownStyles(to: attrString, baseFont: UIFont.systemFont(ofSize: size, weight: .regular))
+            let paragraphStyle = readingParagraphStyle(size: size)
+            attrString.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSMakeRange(0, attrString.length))
+            let font = readingBodyFont(size: size)
+            attrString.addAttribute(.font, value: font, range: NSMakeRange(0, attrString.length))
+            attrString.addAttribute(.foregroundColor, value: UIColor.noteEditorBody, range: NSMakeRange(0, attrString.length))
+            applyInlineMarkdownStyles(to: attrString, baseFont: font)
             setAttributedTextAnimated(attrString, animated: animated)
-            textView.textContainerInset = UIEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
+            textView.textContainerInset = UIEdgeInsets(top: 6, left: 0, bottom: 10, right: 0)
         }
-        
-        // Restore selection (NSRange uses UTF-16 lengths)
+
+        restoreSelection(savedSelection)
+        updateTypingAttributes(paragraphStyle: defaultParagraphStyle)
+
+        lastRenderedText = currentText
+    }
+
+    private func applyPlainEditingStyle(currentText: String, paragraphStyle: NSMutableParagraphStyle, animated: Bool) {
+        switch kind {
+        case .bullet:
+            prefixLabel.isHidden = false
+            prefixLabel.text = "•"
+            prefixLabel.font = UIFont.systemFont(ofSize: 18 + fontSizeOffset, weight: .bold)
+            prefixLabel.textColor = .noteEditorAccent
+            hStack.alignment = .firstBaseline
+            textView.textContainerInset = UIEdgeInsets(top: 4, left: 0, bottom: 5, right: 0)
+        case .numbered:
+            prefixLabel.isHidden = false
+            prefixLabel.text = "\(numberIndex)."
+            prefixLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 17 + fontSizeOffset, weight: .semibold)
+            prefixLabel.textColor = .noteEditorAccentDeep
+            hStack.alignment = .firstBaseline
+            textView.textContainerInset = UIEdgeInsets(top: 4, left: 0, bottom: 5, right: 0)
+        case .todo:
+            checkboxButton.isHidden = false
+            hStack.alignment = .top
+            let config = UIImage.SymbolConfiguration(pointSize: 17 + fontSizeOffset, weight: .regular)
+            let name = todoChecked ? "checkmark.circle.fill" : "circle"
+            checkboxButton.setImage(UIImage(systemName: name, withConfiguration: config), for: .normal)
+            checkboxButton.tintColor = todoChecked ? .noteEditorAccentDeep : .noteEditorSecondaryInk
+            textView.textContainerInset = UIEdgeInsets(top: 2, left: 0, bottom: 4, right: 0)
+        case .code:
+            textView.textContainerInset = UIEdgeInsets(top: 7, left: 0, bottom: 7, right: 0)
+        default:
+            textView.textContainerInset = UIEdgeInsets(top: 7, left: 0, bottom: 7, right: 0)
+        }
+
+        let size: CGFloat = kind == .code ? 15 + fontSizeOffset : 17 + fontSizeOffset
+        let font = kind == .code
+            ? UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
+            : bodyFont(size: size)
+        let attrString = NSMutableAttributedString(string: currentText)
+        attrString.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSMakeRange(0, attrString.length))
+        attrString.addAttribute(.font, value: font, range: NSMakeRange(0, attrString.length))
+        attrString.addAttribute(.foregroundColor, value: todoChecked ? UIColor.secondaryLabel : UIColor.noteEditorBody, range: NSMakeRange(0, attrString.length))
+        if kind == .todo && todoChecked {
+            attrString.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: NSMakeRange(0, attrString.length))
+        }
+        setAttributedTextAnimated(attrString, animated: animated)
+    }
+
+    private func restoreSelection(_ savedSelection: NSRange) {
         let textLength = (textView.text as NSString).length
         if savedSelection.location <= textLength {
             let clampedLength = min(savedSelection.length, max(0, textLength - savedSelection.location))
             textView.selectedRange = NSRange(location: savedSelection.location, length: clampedLength)
         }
-        
-        // Set typing attributes to maintain consistent formatting when typing
+    }
+
+    private func updateTypingAttributes(paragraphStyle: NSMutableParagraphStyle) {
         textView.typingAttributes = [
-            .font: textView.font ?? UIFont.systemFont(ofSize: 16, weight: .regular),
+            .font: textView.font ?? bodyFont(size: 17),
             .foregroundColor: textView.textColor ?? inkColor,
-            .paragraphStyle: defaultParagraphStyle
+            .paragraphStyle: paragraphStyle
         ]
-        
-        lastRenderedText = currentText
     }
     
     // MARK: - Inline Markdown Rendering
@@ -412,18 +521,18 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
     }
     
     private func applyHighlightPattern(to attrString: NSMutableAttributedString, in range: NSRange) {
-        let pattern = "==(\\w+):([^=]+)=="
+        let pattern = "==([A-Za-z]+):([\\s\\S]+?)=="
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return }
         let text = attrString.string as NSString
         let matches = regex.matches(in: text as String, options: [], range: range)
         
         let highlightColors: [String: UIColor] = [
-            "yellow": UIColor(red: 1.0, green: 0.95, blue: 0.4, alpha: 1.0),
-            "green": UIColor(red: 0.6, green: 0.95, blue: 0.6, alpha: 1.0),
-            "blue": UIColor(red: 0.6, green: 0.85, blue: 1.0, alpha: 1.0),
-            "pink": UIColor(red: 1.0, green: 0.75, blue: 0.85, alpha: 1.0),
-            "orange": UIColor(red: 1.0, green: 0.85, blue: 0.5, alpha: 1.0),
-            "purple": UIColor(red: 0.85, green: 0.75, blue: 1.0, alpha: 1.0)
+            "yellow": UIColor(red: 1.0, green: 0.91, blue: 0.36, alpha: 0.42),
+            "green": UIColor(red: 0.62, green: 0.88, blue: 0.68, alpha: 0.34),
+            "blue": UIColor(red: 0.62, green: 0.80, blue: 0.95, alpha: 0.32),
+            "pink": UIColor(red: 1.0, green: 0.74, blue: 0.84, alpha: 0.32),
+            "orange": UIColor(red: 1.0, green: 0.78, blue: 0.46, alpha: 0.34),
+            "purple": UIColor(red: 0.78, green: 0.70, blue: 0.94, alpha: 0.32)
         ]
         
         let markerHiddenFont = UIFont.systemFont(ofSize: 0.1)
@@ -464,7 +573,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         let matches = regex.matches(in: text as String, options: [], range: range)
         
         let markerHiddenFont = UIFont.systemFont(ofSize: 0.1)
-        let codeBg = UIColor.black.withAlphaComponent(0.06)
+        let codeBg = UIColor.noteEditorPaperSoft
         
         for match in matches.reversed() {
             guard match.numberOfRanges >= 2 else { continue }
@@ -474,7 +583,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
             // Apply style to inner content
             switch style {
             case .bold:
-                let boldFont = UIFont.systemFont(ofSize: baseFont.pointSize, weight: .semibold)
+                let boldFont = UIFont.systemFont(ofSize: baseFont.pointSize, weight: .medium)
                 attrString.addAttribute(.font, value: boldFont, range: innerRange)
                 // Hide the ** markers
                 let prefixRange = NSRange(location: fullRange.location, length: 2)
@@ -499,6 +608,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
                 let codeFont = UIFont.monospacedSystemFont(ofSize: baseFont.pointSize * 0.9, weight: .regular)
                 attrString.addAttribute(.font, value: codeFont, range: innerRange)
                 attrString.addAttribute(.backgroundColor, value: codeBg, range: innerRange)
+                attrString.addAttribute(.foregroundColor, value: UIColor.noteEditorAccentDeep, range: innerRange)
                 // Hide the ` markers
                 let prefixRange = NSRange(location: fullRange.location, length: 1)
                 let suffixRange = NSRange(location: fullRange.location + fullRange.length - 1, length: 1)
@@ -595,7 +705,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         
         // Re-apply inline markdown styles if text changed and contains markdown markers
         let currentText = textView.text ?? ""
-        if currentText != lastRenderedText && kind != .code {
+        if !presentationMode.isEditing && currentText != lastRenderedText && kind != .code {
             // Check if text contains any markdown patterns that need rendering
             if containsInlineMarkdown(currentText) {
                 applyStyle(animated: true)
@@ -635,6 +745,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
     @available(iOS 16.0, *)
     func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
         guard range.length > 0 else { return UIMenu(children: suggestedActions) }
+        guard presentationMode.isEditing else { return UIMenu(children: suggestedActions) }
         
         // 高亮颜色子菜单
         let highlightColors: [(String, String, UIColor)] = [

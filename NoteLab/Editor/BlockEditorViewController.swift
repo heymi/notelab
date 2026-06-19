@@ -15,6 +15,7 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     var noteId: UUID?
 
     private let tableView = UITableView(frame: .zero, style: .plain)
+    private let bodyPaperView = UIView()
     private var activeIndexPath: IndexPath?
     private var activeTableIndexPath: IndexPath?
     private var headerHost: UIHostingController<NoteEditorHeaderView>?
@@ -28,6 +29,9 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     private var isMultiSelecting: Bool = false
     private var multiSelectedBlockIds: Set<UUID> = []
     private var sentHighlightBlockIds: Set<UUID> = []
+    private var currentTitle: String = ""
+    private var currentAISummary: String = ""
+    private var presentationMode: NoteDetailPresentationMode = .reading
     private lazy var multiSelectLongPress = UILongPressGestureRecognizer(target: self, action: #selector(handleMultiSelectLongPress(_:)))
     private lazy var multiSelectTap = UITapGestureRecognizer(target: self, action: #selector(handleMultiSelectTap(_:)))
     private lazy var tableDismissTap = UITapGestureRecognizer(target: self, action: #selector(handleTableDismissTap(_:)))
@@ -45,16 +49,27 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
+        bodyPaperView.backgroundColor = .noteEditorPaper
+        bodyPaperView.layer.cornerRadius = 28
+        bodyPaperView.layer.cornerCurve = .continuous
+        bodyPaperView.layer.shadowColor = UIColor.black.cgColor
+        bodyPaperView.layer.shadowOpacity = 0.04
+        bodyPaperView.layer.shadowRadius = 24
+        bodyPaperView.layer.shadowOffset = CGSize(width: 0, height: 10)
+        bodyPaperView.isUserInteractionEnabled = false
+
         tableView.separatorStyle = .none
         tableView.backgroundColor = .clear
+        tableView.contentInsetAdjustmentBehavior = .never
         tableView.rowHeight = UITableView.automaticDimension
-        tableView.estimatedRowHeight = 120
+        tableView.estimatedRowHeight = 132
         tableView.dataSource = self
         tableView.delegate = self
         tableView.keyboardDismissMode = .interactive
         tableView.register(TextBlockCell.self, forCellReuseIdentifier: TextBlockCell.reuseIdentifier)
         tableView.register(TableBlockCell.self, forCellReuseIdentifier: TableBlockCell.reuseIdentifier)
         tableView.register(AttachmentBlockCell.self, forCellReuseIdentifier: AttachmentBlockCell.reuseIdentifier)
+        tableView.insertSubview(bodyPaperView, at: 0)
 
         setupNavigationBar()
 
@@ -83,12 +98,13 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateHeaderLayoutIfNeeded()
+        updateBodyPaperLayout()
     }
     
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         // Auto-focus on empty note
-        if shouldAutoFocusOnAppear {
+        if shouldAutoFocusOnAppear && presentationMode.isEditing {
             shouldAutoFocusOnAppear = false
             focusFirstBlockIfEmpty()
         }
@@ -122,9 +138,22 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
         tableView.scrollIndicatorInsets.bottom = bottom
     }
 
-    func updateHeader(title: Binding<String>, linkBlocks: [LinkedNoteBlock], isWhiteboard: Bool, focusBridge: TitleFocusBridge, onOpenNote: @escaping (UUID) -> Void) {
+    func updatePresentationMode(_ mode: NoteDetailPresentationMode) {
+        guard presentationMode != mode else { return }
+        presentationMode = mode
+        if !mode.isEditing {
+            view.endEditing(true)
+            hideActiveTableControls()
+        }
+        reloadVisibleRowsWithoutAnimation()
+        updateBodyPaperLayout()
+    }
+
+    func updateHeader(title: Binding<String>, metadata: NoteEditorHeaderMetadata, linkBlocks: [LinkedNoteBlock], presentationMode: NoteDetailPresentationMode, isWhiteboard: Bool, focusBridge: TitleFocusBridge, onOpenNote: @escaping (UUID) -> Void) {
         titleFocusBridge = focusBridge
-        let root = NoteEditorHeaderView(title: title, focusBridge: focusBridge, linkBlocks: linkBlocks, isWhiteboard: isWhiteboard, onOpenNote: onOpenNote)
+        currentTitle = title.wrappedValue
+        currentAISummary = metadata.preview?.style == .excerpt ? (metadata.preview?.items.first ?? "") : ""
+        let root = NoteEditorHeaderView(title: title, focusBridge: focusBridge, metadata: metadata, linkBlocks: linkBlocks, presentationMode: presentationMode, isWhiteboard: isWhiteboard, onOpenNote: onOpenNote)
         if let host = headerHost {
             host.rootView = root
         } else {
@@ -134,6 +163,7 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
             tableView.tableHeaderView = host.view
         }
         updateHeaderLayoutIfNeeded()
+        updateBodyPaperLayout()
     }
 
     private func updateHeaderLayoutIfNeeded() {
@@ -147,12 +177,42 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
         if headerView.frame.size.height != size.height {
             headerView.frame = CGRect(x: 0, y: 0, width: width, height: size.height)
             tableView.tableHeaderView = headerView
+            updateBodyPaperLayout()
+        }
+    }
+
+    private func updateBodyPaperLayout() {
+        bodyPaperView.isHidden = true
+        guard !bodyPaperView.isHidden else { return }
+        let headerHeight = tableView.tableHeaderView?.frame.height ?? 0
+        let y = headerHeight + 8
+        let horizontalInset: CGFloat = 18
+        let contentHeight = max(tableView.contentSize.height - headerHeight + 30, 0)
+        bodyPaperView.frame = CGRect(
+            x: horizontalInset,
+            y: y,
+            width: max(0, tableView.bounds.width - horizontalInset * 2),
+            height: contentHeight
+        )
+        tableView.sendSubviewToBack(bodyPaperView)
+    }
+
+    private func hasBodyPaperContent() -> Bool {
+        document.blocks.enumerated().contains { index, block in
+            if isHiddenReadingBlock(at: index) {
+                return false
+            }
+            if block.kind == .attachment || block.kind == .table {
+                return true
+            }
+            return !block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
 
     func updateDocument(_ newDocument: NoteDocument) {
         document = newDocument
         tableView.reloadData()
+        updateBodyPaperLayout()
         if isMultiSelecting {
             pruneMultiSelection()
             notifyMultiSelectionChanged()
@@ -170,6 +230,23 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     func exitMultiSelectModeIfNeeded() {
         if isMultiSelecting {
             exitMultiSelectMode()
+        }
+    }
+
+    func focusPreferredTextBlock() {
+        let target = activeIndexPath.flatMap { indexPath -> IndexPath? in
+            guard indexPath.row < document.blocks.count else { return nil }
+            let block = document.blocks[indexPath.row]
+            return block.kind == .table || block.kind == .attachment ? nil : indexPath
+        } ?? firstEditableTextIndexPath()
+
+        guard let target else { return }
+        tableView.scrollToRow(at: target, at: .none, animated: false)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if let cell = self.tableView.cellForRow(at: target) as? TextBlockCell {
+                cell.beginEditing(atEnd: true)
+            }
         }
     }
 
@@ -242,7 +319,57 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     }
 
     private func firstVisibleTextIndexPath() -> IndexPath? {
-        return tableView.indexPathsForVisibleRows?.first
+        return tableView.indexPathsForVisibleRows?.first { !isHiddenReadingBlock(at: $0.row) }
+    }
+
+    private func firstEditableTextIndexPath() -> IndexPath? {
+        document.blocks.indices.first { index in
+            let block = document.blocks[index]
+            return block.kind != .table && block.kind != .attachment && !isHiddenReadingBlock(at: index)
+        }.map { IndexPath(row: $0, section: 0) }
+    }
+
+    private func isHiddenReadingBlock(at index: Int) -> Bool {
+        isDuplicateTitleBlock(at: index) || isDuplicateAISummaryBlock(at: index)
+    }
+
+    private func isDuplicateTitleBlock(at index: Int) -> Bool {
+        guard presentationMode == .reading else { return false }
+        guard index == 0, index < document.blocks.count else { return false }
+        let block = document.blocks[index]
+        guard block.kind != .attachment, block.kind != .table else { return false }
+        let title = currentTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let blockTitle = NoteTitleDeriver.cleanedTitleLine(block.text)
+        return !title.isEmpty && title == blockTitle
+    }
+
+    private func isDuplicateAISummaryBlock(at index: Int) -> Bool {
+        guard presentationMode == .reading, index < document.blocks.count else { return false }
+        let summary = currentAISummary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !summary.isEmpty else { return false }
+        let block = document.blocks[index]
+        guard block.kind != .attachment, block.kind != .table else { return false }
+        let blockTitle = NoteTitleDeriver.cleanedTitleLine(block.text)
+        if block.kind == .heading && blockTitle == "摘要" {
+            return index <= 1 && nextTextBlockMatchesSummary(after: index, summary: summary)
+        }
+        return index <= 2 &&
+            previousTextBlockIsSummaryHeading(before: index) &&
+            block.text.trimmingCharacters(in: .whitespacesAndNewlines) == summary
+    }
+
+    private func nextTextBlockMatchesSummary(after index: Int, summary: String) -> Bool {
+        guard index + 1 < document.blocks.count else { return false }
+        let next = document.blocks[index + 1]
+        guard next.kind != .attachment, next.kind != .table else { return false }
+        return next.text.trimmingCharacters(in: .whitespacesAndNewlines) == summary
+    }
+
+    private func previousTextBlockIsSummaryHeading(before index: Int) -> Bool {
+        guard index > 0 else { return false }
+        let previous = document.blocks[index - 1]
+        guard previous.kind == .heading else { return false }
+        return NoteTitleDeriver.cleanedTitleLine(previous.text) == "摘要"
     }
     
     private func setupNavigationBar() {
@@ -400,6 +527,18 @@ extension BlockEditorViewController: UITableViewDataSource, UITableViewDelegate 
         document.blocks.count
     }
 
+    func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+        isHiddenReadingBlock(at: indexPath.row) ? 0.01 : UITableView.automaticDimension
+    }
+
+    func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
+        isHiddenReadingBlock(at: indexPath.row) ? 0.01 : 132
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        updateBodyPaperLayout()
+    }
+
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let block = document.blocks[indexPath.row]
         switch block.kind {
@@ -408,8 +547,8 @@ extension BlockEditorViewController: UITableViewDataSource, UITableViewDelegate 
             cell.delegate = self
             cell.configure(with: block.table ?? TableModel(rows: 3, cols: 3), blockId: block.id)
             cell.setMultiSelected(isMultiSelecting && multiSelectedBlockIds.contains(block.id))
-            cell.setContentInteractionEnabled(!isMultiSelecting)
-            cell.setControlsVisible(!isMultiSelecting && activeTableIndexPath == indexPath)
+            cell.setContentInteraction(editable: presentationMode.isEditing && !isMultiSelecting, selectable: !isMultiSelecting)
+            cell.setControlsVisible(presentationMode.isEditing && !isMultiSelecting && activeTableIndexPath == indexPath)
             cell.setSentHighlight(sentHighlightBlockIds.contains(block.id))
             return cell
         case .attachment:
@@ -423,9 +562,10 @@ extension BlockEditorViewController: UITableViewDataSource, UITableViewDelegate 
             let cell = tableView.dequeueReusableCell(withIdentifier: TextBlockCell.reuseIdentifier, for: indexPath) as! TextBlockCell
             cell.delegate = self
             let numberIndex = numberIndexForBlock(at: indexPath.row)
-            cell.configure(with: block, numberIndex: numberIndex)
+            cell.configure(with: block, numberIndex: numberIndex, presentationMode: presentationMode)
+            cell.setVisuallyCollapsed(isHiddenReadingBlock(at: indexPath.row))
             cell.setMultiSelected(isMultiSelecting && multiSelectedBlockIds.contains(block.id))
-            cell.setContentInteractionEnabled(!isMultiSelecting)
+            cell.setContentInteraction(editable: presentationMode.isEditing && !isMultiSelecting, selectable: !isMultiSelecting)
             cell.setSentHighlight(sentHighlightBlockIds.contains(block.id))
             return cell
         }
@@ -584,7 +724,6 @@ extension BlockEditorViewController: TextBlockCellDelegate {
     func textBlockCellDidRequestBackspaceAtStart(_ cell: TextBlockCell) {
         guard let indexPath = tableView.indexPath(for: cell) else { return }
         if indexPath.row == 0 {
-            titleFocusBridge?.requestFocus = true
             return
         }
         let previousIndex = IndexPath(row: indexPath.row - 1, section: 0)
@@ -698,6 +837,7 @@ extension BlockEditorViewController: TableBlockCellDelegate {
     }
 
     func tableBlockCellDidBeginEditing(_ cell: TableBlockCell) {
+        guard presentationMode.isEditing else { return }
         guard !isMultiSelecting else { return }
         guard let indexPath = tableView.indexPath(for: cell) else { return }
         let previous = activeTableIndexPath
@@ -826,6 +966,7 @@ extension BlockEditorViewController {
     }
 
     private func restoreTableFocusIfNeeded(indexPath: IndexPath, focus: (row: Int, col: Int)?) {
+        guard presentationMode.isEditing else { return }
         guard let focus = focus else { return }
         DispatchQueue.main.async {
             guard let cell = self.tableView.cellForRow(at: indexPath) as? TableBlockCell else { return }
