@@ -9,6 +9,7 @@ enum StorageModelFactory {
             notebook(),
             note(),
             attachment(),
+            voiceNote(),
             outbox(),
             syncState(),
             tombstone()
@@ -65,6 +66,25 @@ enum StorageModelFactory {
             attr("missingLocalFile", .booleanAttributeType, optional: false, defaultValue: false),
             attr("isUploaded", .booleanAttributeType, optional: false, defaultValue: false)
         ], uniqueness: [["profileId", "id"]])
+    }
+
+    private static func voiceNote() -> NSEntityDescription {
+        entity(VoiceNoteEntity.self, properties: [
+            attr("id", .stringAttributeType, optional: false, indexed: true),
+            attr("profileId", .stringAttributeType, optional: false, indexed: true),
+            attr("noteId", .stringAttributeType, optional: false, indexed: true),
+            attr("notebookId", .stringAttributeType, optional: false, indexed: true),
+            attr("audioAttachmentId", .stringAttributeType, optional: false, indexed: true),
+            attr("audioStoragePath", .stringAttributeType, optional: false),
+            attr("audioFileName", .stringAttributeType, optional: false),
+            attr("duration", .doubleAttributeType, optional: false, defaultValue: 0),
+            attr("statusRaw", .stringAttributeType, optional: false, indexed: true),
+            attr("rawTranscript", .stringAttributeType, optional: false, defaultValue: ""),
+            attr("errorMessage", .stringAttributeType),
+            attr("retryCount", .integer64AttributeType, optional: false, defaultValue: 0),
+            attr("createdAt", .dateAttributeType, optional: false),
+            attr("updatedAt", .dateAttributeType, optional: false)
+        ], uniqueness: [["profileId", "id"], ["profileId", "noteId"]])
     }
 
     private static func outbox() -> NSEntityDescription {

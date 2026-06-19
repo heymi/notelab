@@ -17,6 +17,7 @@ struct RootView: View {
     @StateObject private var store = NotebookStore()
     @StateObject private var aiClient = AIClient()
     @StateObject private var aiCenter = AIProcessingCenter()
+    @StateObject private var voiceCoordinator = VoiceNoteCoordinator()
     @StateObject private var planStore = PlanStore()
     @StateObject private var router = AppRouter()
     @StateObject private var avatarStore = AvatarStore()
@@ -35,6 +36,7 @@ struct RootView: View {
             .environmentObject(store)
             .environmentObject(aiClient)
             .environmentObject(aiCenter)
+            .environmentObject(voiceCoordinator)
             .environmentObject(planStore)
             .environmentObject(router)
             .environmentObject(avatarStore)
@@ -154,7 +156,19 @@ struct RootView: View {
                 content
                 
                 if router.path.isEmpty {
-                    BottomNavBar(selection: $selection)
+                    BottomNavBar(
+                        selection: $selection,
+                        isVoiceRecording: voiceCoordinator.isRecording,
+                        voiceLevel: voiceCoordinator.inputLevel,
+                        onVoiceTap: {
+                            voiceCoordinator.toggleRecording(store: store, aiClient: aiClient)
+                        },
+                        onWhiteboardTap: {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                                selection = .whiteboard
+                            }
+                        }
+                    )
                         .transition(.move(edge: .bottom))
                 }
             }
@@ -183,6 +197,51 @@ struct RootView: View {
                 .padding(.horizontal, 16)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
+        }
+        .overlay(alignment: .bottom) {
+            if voiceCoordinator.isRecording {
+                VoiceRecordingOverlay(
+                    elapsed: voiceCoordinator.elapsed,
+                    level: voiceCoordinator.inputLevel,
+                    onStop: { voiceCoordinator.stopRecording() },
+                    onCancel: { voiceCoordinator.discardCurrentRecording() }
+                )
+                .padding(.horizontal, 16)
+                .padding(.bottom, 104)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if case .failed(let message) = voiceCoordinator.phase {
+                VoiceNoteErrorToast(message: message) {
+                    voiceCoordinator.discardCurrentRecording()
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 104)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if let noteId = voiceCoordinator.completedNoteId {
+                VoiceNoteSavedToast(
+                    onOpen: {
+                        router.push(.note(noteId))
+                        voiceCoordinator.clearCompletedNote()
+                    },
+                    onClose: {
+                        voiceCoordinator.clearCompletedNote()
+                    }
+                )
+                .padding(.horizontal, 16)
+                .padding(.bottom, 104)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .sheet(isPresented: $voiceCoordinator.isSelectingNotebook) {
+            VoiceNotebookSelectionSheet(
+                notebooks: store.notebooks,
+                onSelect: { notebookId in
+                    voiceCoordinator.savePendingRecording(to: notebookId, store: store, aiClient: aiClient)
+                },
+                onDiscard: {
+                    voiceCoordinator.discardCurrentRecording()
+                }
+            )
+            .presentationDetents([.medium, .large])
         }
         .background(WindowTapHapticsInstaller())
     }

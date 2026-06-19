@@ -14,6 +14,7 @@ struct NoteEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var aiClient: AIClient
     @EnvironmentObject private var aiCenter: AIProcessingCenter
+    @EnvironmentObject private var voiceCoordinator: VoiceNoteCoordinator
     @EnvironmentObject private var store: NotebookStore
     @EnvironmentObject private var router: AppRouter
     @EnvironmentObject private var auth: AuthManager
@@ -65,6 +66,7 @@ struct NoteEditorView: View {
     @AppStorage("whiteboard.link.offset.y") private var whiteboardLinkOffsetY: Double = 0
     @State private var whiteboardLinkSize: CGSize = .zero
     @State private var isDraggingWhiteboardLink = false
+    @State private var voiceNoteRecord: VoiceNoteRecord?
     @StateObject private var titleFocusBridge = TitleFocusBridge()
     @State private var exitMultiSelectToken: UUID = UUID()
 
@@ -73,17 +75,29 @@ struct NoteEditorView: View {
             .onAppear {
                 loadDocumentIfNeeded()
                 applyInitialPresentationMode()
+                refreshVoiceNoteRecord()
             }
             .onDisappear { store.flushPendingNotePersistence(noteId: note.id) }
             .onChange(of: note.id) { oldValue, _ in
                 store.flushPendingNotePersistence(noteId: oldValue)
                 loadDocumentIfNeeded()
                 applyInitialPresentationMode()
+                refreshVoiceNoteRecord()
             }
             .onChange(of: aiCenter.lastAppliedNoteId) { _, newValue in
                 if newValue == note.id {
                     loadDocumentIfNeeded()
                 }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .voiceNoteDidUpdate)) { notification in
+                guard let updatedNoteId = notification.object as? UUID, updatedNoteId == note.id else { return }
+                refreshVoiceNoteRecord()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .voiceNoteRetryRequested)) { notification in
+                guard let recordId = notification.object as? UUID,
+                      let record = voiceNoteRecord,
+                      record.id == recordId else { return }
+                voiceCoordinator.retry(recordId: record.id, profileId: record.profileId, store: store, aiClient: aiClient)
             }
             .sheet(isPresented: $showAIAction) {
                 AIMenuSheet(
@@ -747,8 +761,13 @@ struct NoteEditorView: View {
             todoCount: todoCount,
             notebookLabel: "本地优先",
             preview: headerContentPreview,
-            hasBodyContent: hasHeaderBodyContent
+            hasBodyContent: hasHeaderBodyContent,
+            voiceNote: voiceNoteRecord
         )
+    }
+
+    private func refreshVoiceNoteRecord() {
+        voiceNoteRecord = voiceCoordinator.record(for: note.id)
     }
 
     private var hasHeaderBodyContent: Bool {

@@ -119,6 +119,7 @@ struct NoteEditorView: View {
             exitMultiSelectToken: $exitMultiSelectToken,
             title: $note.title,
             titleFocusBridge: titleFocusBridge,
+            headerMetadata: headerMetadata,
             linkBlocks: store.linkBlocks(for: note.id),
             sentHighlightBlockIds: sentHighlightBlockIds,
             isWhiteboard: isWhiteboard,
@@ -135,9 +136,43 @@ struct NoteEditorView: View {
                     store.flushPendingNotePersistence(noteId: note.id)
                 }
             },
-            ownerId: auth.userId,
+            ownerId: activeProfileId,
             noteId: note.id
         )
+    }
+
+    private var activeProfileId: UUID? {
+        store.currentProfileId ?? auth.userId
+    }
+
+    private var headerMetadata: NoteEditorHeaderMetadata {
+        let todoCount = document.blocks.filter { $0.kind == .todo && ($0.isChecked ?? false) == false }.count
+        let visibleText = document.blocks
+            .filter { $0.kind != .attachment && $0.kind != .table }
+            .map(\.text)
+            .joined(separator: " ")
+        let readingMinutes = max(1, Int(ceil(Double(visibleText.count) / 420.0)))
+        let summary = note.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        return NoteEditorHeaderMetadata(
+            updatedAt: note.updatedAt,
+            summary: summary.isEmpty ? "继续记录想法、线索和下一步动作。" : summary,
+            readingMinutes: readingMinutes,
+            todoCount: todoCount,
+            notebookLabel: "本地优先",
+            preview: nil,
+            hasBodyContent: hasHeaderBodyContent
+        )
+    }
+
+    private var hasHeaderBodyContent: Bool {
+        let title = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return document.blocks.contains { block in
+            if block.kind == .attachment || block.kind == .table {
+                return true
+            }
+            let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !text.isEmpty && text != title
+        }
     }
     
     // MARK: - Toolbar
@@ -176,6 +211,7 @@ struct NoteEditorView: View {
                     Button("移动笔记") { showMoveSheet = true }
                 }
                 Button("分享") { shareContent() }
+                Button("复制为 Markdown") { copyMarkdownContent() }
                 Button("导出 PDF") { exportPDF() }
                 Divider()
                 if isWhiteboard {
@@ -324,6 +360,12 @@ struct NoteEditorView: View {
         }
         showSendSheet = true
     }
+
+    private func noteTitleForExport() -> String {
+        let derived = NoteTitleDeriver.title(from: document, fallback: note.title)
+        let trimmed = derived.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "无标题" : trimmed
+    }
     
     private func runFormat() {
         aiMode = .format
@@ -412,6 +454,17 @@ struct NoteEditorView: View {
            let contentView = window.contentView {
             picker.show(relativeTo: .zero, of: contentView, preferredEdge: .minY)
         }
+    }
+
+    private func copyMarkdownContent() {
+        let markdown = NoteShareBuilder.markdown(
+            title: noteTitleForExport(),
+            document: document,
+            fallbackMarkdown: note.content
+        )
+        guard !markdown.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(markdown, forType: .string)
     }
     
     // MARK: - PDF Export

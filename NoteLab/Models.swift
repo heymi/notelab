@@ -28,6 +28,53 @@ struct Note: Identifiable, Hashable {
     var isPinned: Bool = false
 }
 
+enum VoiceNoteStatus: String, Codable, Hashable, CaseIterable {
+    case recording
+    case transcribing
+    case organizing
+    case completed
+    case failed
+    case needsAI
+
+    nonisolated var displayText: String {
+        switch self {
+        case .recording:
+            return "正在录音"
+        case .transcribing:
+            return "正在转写"
+        case .organizing:
+            return "正在分析"
+        case .completed:
+            return "已完成"
+        case .failed:
+            return "处理失败"
+        case .needsAI:
+            return "待整理"
+        }
+    }
+
+    nonisolated var isProcessing: Bool {
+        self == .transcribing || self == .organizing
+    }
+}
+
+struct VoiceNoteRecord: Identifiable, Hashable {
+    let id: UUID
+    let profileId: UUID
+    let noteId: UUID
+    let notebookId: UUID
+    let audioAttachmentId: UUID
+    let audioStoragePath: String
+    let audioFileName: String
+    var duration: TimeInterval
+    var status: VoiceNoteStatus
+    var rawTranscript: String
+    var errorMessage: String?
+    var retryCount: Int
+    var createdAt: Date
+    var updatedAt: Date
+}
+
 enum NotebookColor: String, CaseIterable, Hashable {
     case lime
     case sky
@@ -247,4 +294,6 @@ enum AISummaryText {
 extension Notification.Name {
     static let whiteboardSyncDidUpdate = Notification.Name("whiteboard.sync.didUpdate")
     static let profileSyncDidUpdate = Notification.Name("profile.sync.didUpdate")
+    static let voiceNoteDidUpdate = Notification.Name("voice.note.didUpdate")
+    static let voiceNoteRetryRequested = Notification.Name("voice.note.retryRequested")
 }

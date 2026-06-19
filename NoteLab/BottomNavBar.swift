@@ -2,7 +2,25 @@ import SwiftUI
 
 struct BottomNavBar: View {
     @Binding var selection: AppTab
+    let isVoiceRecording: Bool
+    let voiceLevel: Double
+    let onVoiceTap: () -> Void
+    let onWhiteboardTap: () -> Void
     @Namespace private var animation
+
+    init(
+        selection: Binding<AppTab>,
+        isVoiceRecording: Bool = false,
+        voiceLevel: Double = 0,
+        onVoiceTap: @escaping () -> Void = {},
+        onWhiteboardTap: @escaping () -> Void = {}
+    ) {
+        self._selection = selection
+        self.isVoiceRecording = isVoiceRecording
+        self.voiceLevel = voiceLevel
+        self.onVoiceTap = onVoiceTap
+        self.onWhiteboardTap = onWhiteboardTap
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -24,22 +42,39 @@ struct BottomNavBar: View {
 
                 GlassEffectContainer(spacing: 0) {
                     Button(action: {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
-                            selection = .whiteboard
-                        }
+                        onVoiceTap()
                         Haptics.shared.play(.selection)
                     }) {
-                        Image(systemName: "pencil")
-                            .font(.system(size: 24, weight: .semibold, design: .rounded))
-                            .foregroundStyle(selection == .whiteboard ? Theme.ink : Theme.secondaryInk)
-                            .opacity(selection == .whiteboard ? 1 : 0.65)
-                            .scaleEffect(selection == .whiteboard ? 1.02 : 1)
-                            .frame(width: rightButtonSize, height: rightButtonSize)
-                            .contentShape(Circle())
-                            .glassEffect(.regular, in: Circle())
-                            .shadow(color: Theme.softShadow, radius: 14, x: 0, y: 8)
+                        ZStack {
+                            if isVoiceRecording {
+                                Circle()
+                                    .fill(Theme.ink.opacity(0.08 + 0.12 * voiceLevel))
+                                    .scaleEffect(1.05 + 0.18 * voiceLevel)
+                            }
+                            Image(systemName: isVoiceRecording ? "stop.fill" : "mic.fill")
+                                .font(.system(size: isVoiceRecording ? 21 : 24, weight: .semibold, design: .rounded))
+                                .foregroundStyle(isVoiceRecording ? Theme.ink : Theme.secondaryInk)
+                                .opacity(isVoiceRecording ? 1 : 0.75)
+                                .scaleEffect(isVoiceRecording ? 1.04 : 1)
+                        }
+                        .frame(width: rightButtonSize, height: rightButtonSize)
+                        .contentShape(Circle())
+                        .glassEffect(.regular, in: Circle())
+                        .shadow(color: Theme.softShadow, radius: 14, x: 0, y: 8)
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button {
+                            onVoiceTap()
+                        } label: {
+                            Label(isVoiceRecording ? "停止录音" : "语音输入", systemImage: isVoiceRecording ? "stop.fill" : "mic.fill")
+                        }
+                        Button {
+                            onWhiteboardTap()
+                        } label: {
+                            Label("打开白板", systemImage: "pencil")
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)

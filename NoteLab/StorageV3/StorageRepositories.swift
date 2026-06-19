@@ -1006,6 +1006,105 @@ final class AttachmentRepository {
 }
 
 @MainActor
+final class VoiceNoteRepository {
+    private let storage: StorageController
+
+    init(storage: StorageController = .shared) {
+        self.storage = storage
+    }
+
+    @discardableResult
+    func create(_ record: VoiceNoteRecord) throws -> VoiceNoteRecord {
+        let entity = try fetch(profileId: record.profileId, id: record.id) ?? VoiceNoteEntity(context: storage.mainContext)
+        apply(record, to: entity)
+        try storage.saveMainContext()
+        notify(noteId: record.noteId)
+        return record
+    }
+
+    func update(_ record: VoiceNoteRecord) throws {
+        guard let entity = try fetch(profileId: record.profileId, id: record.id) else { return }
+        apply(record, to: entity)
+        try storage.saveMainContext()
+        notify(noteId: record.noteId)
+    }
+
+    func update(
+        id: UUID,
+        profileId: UUID,
+        status: VoiceNoteStatus,
+        rawTranscript: String? = nil,
+        errorMessage: String? = nil,
+        incrementRetry: Bool = false
+    ) throws -> VoiceNoteRecord? {
+        guard let entity = try fetch(profileId: profileId, id: id) else { return nil }
+        entity.statusRaw = status.rawValue
+        if let rawTranscript {
+            entity.rawTranscript = rawTranscript
+        }
+        entity.errorMessage = errorMessage
+        if incrementRetry {
+            entity.retryCount += 1
+        }
+        entity.updatedAt = Date()
+        try storage.saveMainContext()
+        let record = entity.record
+        notify(noteId: record.noteId)
+        return record
+    }
+
+    func record(id: UUID, profileId: UUID) throws -> VoiceNoteRecord? {
+        try fetch(profileId: profileId, id: id)?.record
+    }
+
+    func record(noteId: UUID) throws -> VoiceNoteRecord? {
+        let request = VoiceNoteEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "noteId == %@", noteId.uuidString.lowercased())
+        request.fetchLimit = 1
+        return try storage.mainContext.fetch(request).first?.record
+    }
+
+    func pendingRecords(profileId: UUID) throws -> [VoiceNoteRecord] {
+        let request = VoiceNoteEntity.fetchRequest()
+        request.predicate = NSPredicate(
+            format: "profileId == %@ AND statusRaw IN %@",
+            profileId.uuidString.lowercased(),
+            [VoiceNoteStatus.transcribing.rawValue, VoiceNoteStatus.organizing.rawValue, VoiceNoteStatus.needsAI.rawValue]
+        )
+        request.sortDescriptors = [NSSortDescriptor(key: "updatedAt", ascending: true)]
+        return try storage.mainContext.fetch(request).map(\.record)
+    }
+
+    private func fetch(profileId: UUID, id: UUID) throws -> VoiceNoteEntity? {
+        let request = VoiceNoteEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "profileId == %@ AND id == %@", profileId.uuidString.lowercased(), id.uuidString.lowercased())
+        request.fetchLimit = 1
+        return try storage.mainContext.fetch(request).first
+    }
+
+    private func apply(_ record: VoiceNoteRecord, to entity: VoiceNoteEntity) {
+        entity.id = record.id.uuidString.lowercased()
+        entity.profileId = record.profileId.uuidString.lowercased()
+        entity.noteId = record.noteId.uuidString.lowercased()
+        entity.notebookId = record.notebookId.uuidString.lowercased()
+        entity.audioAttachmentId = record.audioAttachmentId.uuidString.lowercased()
+        entity.audioStoragePath = record.audioStoragePath
+        entity.audioFileName = record.audioFileName
+        entity.duration = record.duration
+        entity.statusRaw = record.status.rawValue
+        entity.rawTranscript = record.rawTranscript
+        entity.errorMessage = record.errorMessage
+        entity.retryCount = Int64(record.retryCount)
+        entity.createdAt = record.createdAt
+        entity.updatedAt = record.updatedAt
+    }
+
+    private func notify(noteId: UUID) {
+        NotificationCenter.default.post(name: .voiceNoteDidUpdate, object: noteId)
+    }
+}
+
+@MainActor
 final class SyncStateRepository {
     private let storage: StorageController
 
@@ -1037,6 +1136,27 @@ final class SyncStateRepository {
 
     private func key(profileId: UUID, iCloudAccountHash: String, zoneName: String) -> String {
         "\(profileId.uuidString.lowercased()):\(iCloudAccountHash):\(zoneName)"
+    }
+}
+
+private extension VoiceNoteEntity {
+    var record: VoiceNoteRecord {
+        VoiceNoteRecord(
+            id: UUID(uuidString: id) ?? UUID(),
+            profileId: UUID(uuidString: profileId) ?? UUID(),
+            noteId: UUID(uuidString: noteId) ?? UUID(),
+            notebookId: UUID(uuidString: notebookId) ?? UUID(),
+            audioAttachmentId: UUID(uuidString: audioAttachmentId) ?? UUID(),
+            audioStoragePath: audioStoragePath,
+            audioFileName: audioFileName,
+            duration: duration,
+            status: VoiceNoteStatus(rawValue: statusRaw) ?? .failed,
+            rawTranscript: rawTranscript,
+            errorMessage: errorMessage,
+            retryCount: Int(retryCount),
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
     }
 }
 

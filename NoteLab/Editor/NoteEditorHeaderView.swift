@@ -31,6 +31,7 @@ struct NoteEditorHeaderMetadata: Equatable {
     var notebookLabel: String
     var preview: Preview?
     var hasBodyContent: Bool
+    var voiceNote: VoiceNoteRecord? = nil
 
     var updatedLabel: String {
         updatedAt.formatted(date: .omitted, time: .shortened)
@@ -108,6 +109,10 @@ struct NoteEditorHeaderView: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                     if showsReadingChrome {
+                        if let voiceNote = metadata.voiceNote {
+                            VoicePlaybackCard(record: voiceNote)
+                        }
+
                         if !metadata.lede.isEmpty && metadata.preview == nil {
                             Text(metadata.lede)
                                 .font(.system(size: 18, weight: .regular))

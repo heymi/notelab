@@ -72,6 +72,24 @@ final class AttachmentEntity: NSManagedObject {
     @NSManaged var deviceId: String
 }
 
+@objc(VoiceNoteEntity)
+final class VoiceNoteEntity: NSManagedObject {
+    @NSManaged var id: String
+    @NSManaged var profileId: String
+    @NSManaged var noteId: String
+    @NSManaged var notebookId: String
+    @NSManaged var audioAttachmentId: String
+    @NSManaged var audioStoragePath: String
+    @NSManaged var audioFileName: String
+    @NSManaged var duration: Double
+    @NSManaged var statusRaw: String
+    @NSManaged var rawTranscript: String
+    @NSManaged var errorMessage: String?
+    @NSManaged var retryCount: Int64
+    @NSManaged var createdAt: Date
+    @NSManaged var updatedAt: Date
+}
+
 @objc(SyncOutboxEntity)
 final class SyncOutboxEntity: NSManagedObject {
     @NSManaged var id: String
@@ -129,6 +147,12 @@ extension NoteEntity {
 extension AttachmentEntity {
     @nonobjc class func fetchRequest() -> NSFetchRequest<AttachmentEntity> {
         NSFetchRequest<AttachmentEntity>(entityName: "AttachmentEntity")
+    }
+}
+
+extension VoiceNoteEntity {
+    @nonobjc class func fetchRequest() -> NSFetchRequest<VoiceNoteEntity> {
+        NSFetchRequest<VoiceNoteEntity>(entityName: "VoiceNoteEntity")
     }
 }
 

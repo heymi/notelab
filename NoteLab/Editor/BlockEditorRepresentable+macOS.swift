@@ -12,6 +12,7 @@ struct BlockEditorRepresentableMac: NSViewControllerRepresentable {
     @Binding var exitMultiSelectToken: UUID
     @Binding var title: String
     var titleFocusBridge: TitleFocusBridge
+    var headerMetadata: NoteEditorHeaderMetadata
     var linkBlocks: [LinkedNoteBlock]
     var sentHighlightBlockIds: Set<UUID>
     var isWhiteboard: Bool
@@ -59,6 +60,7 @@ struct BlockEditorRepresentableMac: NSViewControllerRepresentable {
         // Update header
         nsViewController.updateHeader(
             title: $title,
+            metadata: headerMetadata,
             linkBlocks: linkBlocks,
             isWhiteboard: isWhiteboard,
             focusBridge: titleFocusBridge,

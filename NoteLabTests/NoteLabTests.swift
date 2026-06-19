@@ -37,6 +37,65 @@ struct NoteLabTests {
         #expect(pending.contains(where: { $0.entityType == .notebook && $0.entityId == notebook.id }))
     }
 
+    @MainActor @Test func voiceNoteRepositoryPersistsAndUpdatesStatus() async throws {
+        let profileId = UUID()
+        let notebookId = UUID()
+        let noteId = UUID()
+        let attachmentId = UUID()
+        let repository = VoiceNoteRepository()
+        let now = Date()
+        let record = VoiceNoteRecord(
+            id: UUID(),
+            profileId: profileId,
+            noteId: noteId,
+            notebookId: notebookId,
+            audioAttachmentId: attachmentId,
+            audioStoragePath: "icloud/\(profileId.uuidString)/\(attachmentId.uuidString).m4a",
+            audioFileName: "\(attachmentId.uuidString).m4a",
+            duration: 12.4,
+            status: .transcribing,
+            rawTranscript: "",
+            errorMessage: nil,
+            retryCount: 0,
+            createdAt: now,
+            updatedAt: now
+        )
+
+        try repository.create(record)
+        let loadedRecord = try repository.record(noteId: noteId)
+        let loaded = try #require(loadedRecord)
+        #expect(loaded.status == .transcribing)
+        #expect(loaded.audioAttachmentId == attachmentId)
+
+        let updatedRecord = try repository.update(
+            id: record.id,
+            profileId: profileId,
+            status: .failed,
+            rawTranscript: "嗯 今天要整理需求",
+            errorMessage: "network timeout",
+            incrementRetry: true
+        )
+        let updated = try #require(updatedRecord)
+        #expect(updated.status == .failed)
+        #expect(updated.rawTranscript == "嗯 今天要整理需求")
+        #expect(updated.errorMessage == "network timeout")
+        #expect(updated.retryCount == 1)
+    }
+
+    @Test func voiceNoteStatusProcessingFlagsAreNarrow() async throws {
+        #expect(VoiceNoteStatus.transcribing.isProcessing)
+        #expect(VoiceNoteStatus.organizing.isProcessing)
+        #expect(!VoiceNoteStatus.completed.isProcessing)
+        #expect(!VoiceNoteStatus.failed.isProcessing)
+        #expect(!VoiceNoteStatus.needsAI.isProcessing)
+    }
+
+    @Test func voiceAudioMimeTypeUsesStandardAudioMP4ForM4A() async throws {
+        #expect(AttachmentStorage.mimeType(for: "recording.m4a") == "audio/mp4")
+        #expect(AttachmentStorage.mimeType(for: "recording.mp3") == "audio/mpeg")
+        #expect(AttachmentStorage.mimeType(for: "recording.wav") == "audio/wav")
+    }
+
     @Test func stableIdentityUsesCloudKitRecordNameAsCanonicalScope() async throws {
         let recordName = "_abc123"
         let first = StableIdentity.uuid(for: "icloud:\(recordName)")

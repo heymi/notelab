@@ -156,6 +156,33 @@ final class AIClient: ObservableObject {
         return (result.title, markdown)
     }
 
+    func organizeVoiceTranscript(
+        rawTranscript: String,
+        titleHint: String,
+        notebookContext: String? = nil
+    ) async throws -> VoiceNoteAIResult {
+        let prompt = buildVoiceNotePrompt(
+            rawTranscript: rawTranscript,
+            titleHint: titleHint,
+            notebookContext: notebookContext
+        )
+        let response = try await sendPrompt(prompt)
+        let cleaned = cleanJSONResponse(response)
+        guard let data = cleaned.data(using: .utf8),
+              let result = try? JSONDecoder().decode(VoiceNoteAIResult.self, from: data) else {
+            logger.error("AI voice note decode failed response=\(Self.truncate(string: cleaned), privacy: .public)")
+            throw AIClientError.decodingFailed
+        }
+        let markdown = result.markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !markdown.isEmpty else { throw AIClientError.emptyResponse }
+        let title = NoteTitleDeriver.title(fromAI: result.title, fallback: titleHint)
+        return VoiceNoteAIResult(
+            title: title.isEmpty ? "语音笔记" : title,
+            summary: AISummaryText.normalized(result.summary),
+            markdown: markdown
+        )
+    }
+
     func plan(mode: String, goal: String, tasks: [PlanTaskRequest]) async throws -> AIPlanData {
         let prompt = buildPlanPrompt(mode: mode, goal: goal, tasks: tasks)
         let response = try await sendPrompt(prompt)
@@ -683,6 +710,37 @@ private func buildRewritePrompt(
     lines.append("【原文内容】")
     lines.append(trimmed.isEmpty ? "<empty>" : trimmed)
     
+    return lines.joined(separator: "\n")
+}
+
+private func buildVoiceNotePrompt(
+    rawTranscript: String,
+    titleHint: String,
+    notebookContext: String? = nil
+) -> String {
+    let trimmed = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+    var lines: [String] = []
+    lines.append("你是 NoteLab 的语音笔记整理助手。请把一段中文口语转写整理为可阅读的 Markdown 笔记，并只输出 JSON。")
+    lines.append("只输出 JSON，不要输出任何额外文字、注释或 markdown。")
+    lines.append("必须遵循以下 JSON 结构：")
+    lines.append("{\"title\": string, \"summary\": string, \"markdown\": string}")
+    lines.append("")
+    lines.append("整理规则：")
+    lines.append("1) 去除无意义口语填充词，例如“嗯、啊、呃、那个、就是、然后、你知道吧、对吧”等；如果这些词承担真实语义或连接关系，保留其语义但改写成书面表达。")
+    lines.append("2) 删除明显重复、口误、断裂重启的表达，但不得删掉事实、数字、日期、人名、地点、任务、决策和风险。")
+    lines.append("3) 根据内容自动加二级/三级标题、列表、待办和表格；不要为了格式而编造内容。")
+    lines.append("4) title 必须是根据全文生成的短标题，中文不超过 10 个字，不能用“语音笔记/摘要/正文/待办”等泛标题。")
+    lines.append("5) summary 不超过 100 个中文字符，概括主题、意图和关键结论。")
+    lines.append("6) markdown 不要包含 H1 标题；正文应比原始转写更清晰，但保留原意。")
+    if let notebookContext, !notebookContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        lines.append("")
+        lines.append("笔记本背景介绍：")
+        lines.append(notebookContext)
+    }
+    lines.append("")
+    lines.append("标题提示：\(titleHint)")
+    lines.append("原始转写如下：")
+    lines.append(trimmed.isEmpty ? "<empty>" : trimmed)
     return lines.joined(separator: "\n")
 }
 

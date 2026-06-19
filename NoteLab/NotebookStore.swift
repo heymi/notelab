@@ -239,6 +239,25 @@ final class NotebookStore: ObservableObject {
         return newNote.id
     }
 
+    func updateVoiceNote(noteId: UUID, title: String, summary: String, content: String) {
+        guard let notebookIndex = notebooks.firstIndex(where: { notebook in
+            notebook.notes.contains(where: { $0.id == noteId })
+        }),
+              let noteIndex = notebooks[notebookIndex].notes.firstIndex(where: { $0.id == noteId }) else {
+            return
+        }
+
+        var note = notebooks[notebookIndex].notes[noteIndex]
+        note.title = NoteTitleDeriver.title(fromMarkdown: content, fallback: title)
+        note.summary = summary
+        note.content = content
+        note.contentRTF = nil
+        note.updateMetrics()
+        notebooks[notebookIndex].notes[noteIndex] = note
+        documents[noteId] = NoteDocument.fromMarkdown(content)
+        applyLocalUpdate(note: note, debouncePersistence: false)
+    }
+
     /// 检查是否可以创建新笔记本（返回 nil 表示已达限制）
     /// 如果达到限制，会发送通知触发付费墙
     func addNotebook(title: String, color: NotebookColor, iconName: String) -> UUID? {

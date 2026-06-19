@@ -344,7 +344,7 @@ final class AttachmentStorage: ObservableObject {
 }
 
 extension AttachmentStorage {
-    static func mimeType(for fileName: String) -> String {
+    nonisolated static func mimeType(for fileName: String) -> String {
         let ext = (fileName as NSString).pathExtension.lowercased()
         switch ext {
         case "jpg", "jpeg":
@@ -359,6 +359,12 @@ extension AttachmentStorage {
             return "image/heic"
         case "pdf":
             return "application/pdf"
+        case "m4a", "mp4":
+            return "audio/mp4"
+        case "wav":
+            return "audio/wav"
+        case "mp3":
+            return "audio/mpeg"
         default:
             return "application/octet-stream"
         }
