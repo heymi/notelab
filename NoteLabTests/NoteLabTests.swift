@@ -65,6 +65,50 @@ struct NoteLabTests {
         #expect(NoteTitleDeriver.title(fromAI: "Native Icon Resource Validation Workflow Details", fallback: "") == "Native Icon Resource Validation Workflow")
     }
 
+    @Test func aiInsightComposerPersistsAITitleAsFirstMarkdownLine() async throws {
+        let report = AINoteInsightReport(
+            title: "图标治理",
+            summary: "说明图标资源配置策略。",
+            sections: [
+                AIReportSection(heading: "核心规则", paragraphs: ["只保留一个图标系统。"], bullets: [])
+            ],
+            tables: []
+        )
+        let markdown = AIInsightComposer.composeInsightMarkdown(
+            formattedMarkdown: "保留 AppIcon.appiconset 并移除冲突资源。",
+            report: report,
+            tasks: [],
+            fallbackTitle: "旧标题"
+        )
+
+        #expect(markdown.hasPrefix("# 图标治理\n\n"))
+        #expect(NoteTitleDeriver.title(fromMarkdown: markdown, fallback: "") == "图标治理")
+    }
+
+    @Test func aiInsightComposerDoesNotDuplicateLeadingBodyTitle() async throws {
+        let report = AINoteInsightReport(
+            title: "图标治理",
+            summary: "",
+            sections: [],
+            tables: []
+        )
+        let markdown = AIInsightComposer.composeInsightMarkdown(
+            formattedMarkdown: """
+            # 旧标题
+
+            保留 AppIcon.appiconset 并移除冲突资源。
+            """,
+            report: report,
+            tasks: [],
+            fallbackTitle: "旧标题"
+        )
+
+        let titleOccurrences = markdown.components(separatedBy: "# 图标治理").count - 1
+        #expect(titleOccurrences == 1)
+        #expect(markdown.hasPrefix("# 图标治理\n\n"))
+        #expect(markdown.contains("保留 AppIcon.appiconset"))
+    }
+
     @Test func aiInsightComposerDropsLowValueTodoStatusTable() async throws {
         let report = AINoteInsightReport(
             title: "云条录音",

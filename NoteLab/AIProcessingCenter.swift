@@ -311,7 +311,9 @@ final class AIProcessingCenter: ObservableObject {
         var updated = binding.wrappedValue
         NoteUndoSnapshotStore.save(noteId: updated.id, title: updated.title, content: updated.content)
         let resolvedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        updated.title = resolvedTitle.isEmpty ? NoteTitleDeriver.title(fromMarkdown: markdown, fallback: title) : resolvedTitle
+        let finalTitle = resolvedTitle.isEmpty ? NoteTitleDeriver.title(fromMarkdown: markdown, fallback: title) : resolvedTitle
+        let persistedMarkdown = AIInsightComposer.markdownWithLeadingTitle(finalTitle, body: markdown)
+        updated.title = finalTitle
         if let aiSummary {
             let summary = AISummaryText.normalized(aiSummary)
             updated.summary = summary
@@ -320,10 +322,10 @@ final class AIProcessingCenter: ObservableObject {
             updated.summary = ""
             AISummaryRegistry.clear(noteId: updated.id)
         }
-        updated.content = markdown
+        updated.content = persistedMarkdown
         updated.updateMetrics()
         binding.wrappedValue = updated
-        store.updateDocument(noteId: updated.id, document: NoteDocument.fromMarkdown(markdown))
+        store.updateDocument(noteId: updated.id, document: NoteDocument.fromMarkdown(persistedMarkdown))
         store.flushPendingNotePersistence(noteId: updated.id)
         lastAppliedNoteId = updated.id
     }

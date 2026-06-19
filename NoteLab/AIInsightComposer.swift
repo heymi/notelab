@@ -69,11 +69,34 @@ enum AIInsightComposer {
             lines.append(processedBody)
         }
 
-        return lines.joined(separator: "\n\n")
+        return markdownWithLeadingTitle(finalTitle, body: lines.joined(separator: "\n\n"))
     }
 
     static func resolvedTitle(from reportTitle: String?, fallback: String) -> String {
         NoteTitleDeriver.title(fromAI: reportTitle, fallback: fallback)
+    }
+
+    static func markdownWithLeadingTitle(_ title: String, body: String) -> String {
+        let cleanTitle = NoteTitleDeriver.cleanedTitleLine(title)
+        let cleanBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty else { return cleanBody }
+
+        let lines = cleanBody.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline }).map(String.init)
+        var index = 0
+        while index < lines.count, lines[index].trimmingCharacters(in: .whitespaces).isEmpty { index += 1 }
+        guard index < lines.count else { return "# \(cleanTitle)" }
+
+        var newLines = lines
+        let first = newLines[index].trimmingCharacters(in: .whitespaces)
+        if first.hasPrefix("# ") {
+            newLines[index] = "# \(cleanTitle)"
+        } else if NoteTitleDeriver.cleanedTitleLine(first) == cleanTitle {
+            newLines[index] = "# \(cleanTitle)"
+        } else {
+            newLines.insert("", at: index)
+            newLines.insert("# \(cleanTitle)", at: index)
+        }
+        return normalizeBlankLines(newLines.joined(separator: "\n"))
     }
 
     private static func buildStripHeadings(report: AINoteInsightReport) -> Set<String> {
@@ -90,25 +113,26 @@ enum AIInsightComposer {
     }
 
     private static func processBodyMarkdown(_ markdown: String, title: String, stripHeadings: Set<String>, dropLines: Set<String>) -> String {
-        let replaced = replaceLeadingH1(in: markdown, title: title)
-        let withoutStrippedSections = stripHeadingSections(from: replaced.body, headings: stripHeadings)
+        let withoutLeadingTitle = removeLeadingTitleLine(in: markdown, title: title)
+        let withoutStrippedSections = stripHeadingSections(from: withoutLeadingTitle, headings: stripHeadings)
         let withoutTables = stripMarkdownTables(from: withoutStrippedSections)
         let deduped = dedupeMarkdownBlocks(withoutTables, dropLines: dropLines)
         let segmented = segmentLongParagraphLines(deduped)
         return normalizeBlankLines(segmented)
     }
 
-    private static func replaceLeadingH1(in markdown: String, title: String) -> (body: String, didReplace: Bool) {
-        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return (markdown, false) }
+    private static func removeLeadingTitleLine(in markdown: String, title: String) -> String {
+        let cleanTitle = NoteTitleDeriver.cleanedTitleLine(title)
+        guard !cleanTitle.isEmpty else { return markdown }
         let lines = markdown.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline }).map(String.init)
         var index = 0
         while index < lines.count, lines[index].trimmingCharacters(in: .whitespaces).isEmpty { index += 1 }
-        guard index < lines.count else { return (markdown, false) }
+        guard index < lines.count else { return markdown }
         let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
-        guard trimmed.hasPrefix("# ") else { return (markdown, false) }
+        guard trimmed.hasPrefix("# ") || NoteTitleDeriver.cleanedTitleLine(trimmed) == cleanTitle else { return markdown }
         var newLines = lines
-        newLines[index] = "# \(title)"
-        return (newLines.joined(separator: "\n"), true)
+        newLines.remove(at: index)
+        return newLines.joined(separator: "\n")
     }
 
     private static func stripHeadingSections(from markdown: String, headings: Set<String>) -> String {
