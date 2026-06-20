@@ -35,12 +35,12 @@ final class MaterialsLibraryModel: ObservableObject {
         }
     }
 
-    private static func buildGroups(attachments: [AttachmentRecord], notes: [Note]) -> [MaterialGroup] {
+    static func buildGroups(attachments: [AttachmentRecord], notes: [Note]) -> [MaterialGroup] {
         let noteLookup = notes
             .reduce(into: [UUID: Note]()) { $0[$1.id] = $1 }
 
         let validAttachments = attachments
-            .filter { noteLookup[$0.noteId] != nil }
+            .filter { noteLookup[$0.noteId] != nil && !$0.isAudioAttachment }
             .reduce(into: [UUID: AttachmentRecord]()) { result, attachment in
                 if let existing = result[attachment.id], existing.updatedAt >= attachment.updatedAt {
                     return
@@ -69,5 +69,15 @@ final class MaterialsLibraryModel: ObservableObject {
         }
 
         return results.sorted { $0.newestAt > $1.newestAt }
+    }
+}
+
+private extension AttachmentRecord {
+    var isAudioAttachment: Bool {
+        if mimeType.lowercased().hasPrefix("audio/") {
+            return true
+        }
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        return ["aac", "aif", "aiff", "amr", "caf", "flac", "m4a", "mp3", "ogg", "opus", "wav"].contains(ext)
     }
 }

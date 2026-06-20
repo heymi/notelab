@@ -96,6 +96,61 @@ struct NoteLabTests {
         #expect(AttachmentStorage.mimeType(for: "recording.wav") == "audio/wav")
     }
 
+    @MainActor @Test func materialsLibraryExcludesVoiceAudioAttachments() async throws {
+        let profileId = UUID()
+        let noteId = UUID()
+        let createdAt = Date()
+        let note = Note(
+            id: noteId,
+            title: "会议资料",
+            summary: "",
+            paragraphCount: 0,
+            bulletCount: 0,
+            hasAdditionalContext: false,
+            createdAt: createdAt,
+            contentRTF: nil,
+            content: ""
+        )
+        let imageAttachment = AttachmentRecord(
+            id: UUID(),
+            profileId: profileId,
+            noteId: noteId,
+            storagePath: "attachments/image.png",
+            fileName: "image.png",
+            mimeType: "image/png",
+            fileSize: 128,
+            originalPath: nil,
+            createdAt: createdAt,
+            updatedAt: createdAt,
+            deletedAt: nil,
+            missingLocalFile: false,
+            isUploaded: false
+        )
+        let voiceAttachment = AttachmentRecord(
+            id: UUID(),
+            profileId: profileId,
+            noteId: noteId,
+            storagePath: "attachments/recording.m4a",
+            fileName: "recording.m4a",
+            mimeType: "audio/mp4",
+            fileSize: 256,
+            originalPath: nil,
+            createdAt: createdAt.addingTimeInterval(1),
+            updatedAt: createdAt.addingTimeInterval(1),
+            deletedAt: nil,
+            missingLocalFile: false,
+            isUploaded: false
+        )
+
+        let groups = MaterialsLibraryModel.buildGroups(
+            attachments: [voiceAttachment, imageAttachment],
+            notes: [note]
+        )
+
+        #expect(groups.count == 1)
+        #expect(groups.first?.attachments == [imageAttachment])
+    }
+
     @Test func stableIdentityUsesCloudKitRecordNameAsCanonicalScope() async throws {
         let recordName = "_abc123"
         let first = StableIdentity.uuid(for: "icloud:\(recordName)")
