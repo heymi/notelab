@@ -25,7 +25,6 @@ struct BottomNavBar: View {
     var body: some View {
         GeometryReader { proxy in
             let bottomInset = max(proxy.safeAreaInsets.bottom, 12)
-            let rightButtonSize: CGFloat = 64
             HStack(spacing: 14) {
                 GlassEffectContainer(spacing: 10) {
                     HStack(spacing: 6) {
@@ -40,41 +39,29 @@ struct BottomNavBar: View {
                     .shadow(color: Theme.softShadow, radius: 14, x: 0, y: 8)
                 }
 
-                GlassEffectContainer(spacing: 0) {
-                    Button(action: {
-                        onVoiceTap()
-                        Haptics.shared.play(.selection)
-                    }) {
-                        ZStack {
-                            if isVoiceRecording {
-                                Circle()
-                                    .fill(Theme.ink.opacity(0.08 + 0.12 * voiceLevel))
-                                    .scaleEffect(1.05 + 0.18 * voiceLevel)
+                if !isVoiceRecording {
+                    GlassEffectContainer(spacing: 0) {
+                        Button(action: onVoiceTap) {
+                            VoiceNavGlyph()
+                                .opacity(0.78)
+                                .frame(width: 64, height: 64)
+                                .contentShape(Circle())
+                                .glassEffect(.regular, in: Circle())
+                                .shadow(color: Theme.softShadow, radius: 14, x: 0, y: 8)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button(action: onVoiceTap) {
+                                Label("语音输入", systemImage: "waveform")
                             }
-                            Image(systemName: isVoiceRecording ? "stop.fill" : "mic.fill")
-                                .font(.system(size: isVoiceRecording ? 21 : 24, weight: .semibold, design: .rounded))
-                                .foregroundStyle(isVoiceRecording ? Theme.ink : Theme.secondaryInk)
-                                .opacity(isVoiceRecording ? 1 : 0.75)
-                                .scaleEffect(isVoiceRecording ? 1.04 : 1)
-                        }
-                        .frame(width: rightButtonSize, height: rightButtonSize)
-                        .contentShape(Circle())
-                        .glassEffect(.regular, in: Circle())
-                        .shadow(color: Theme.softShadow, radius: 14, x: 0, y: 8)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button {
-                            onVoiceTap()
-                        } label: {
-                            Label(isVoiceRecording ? "停止录音" : "语音输入", systemImage: isVoiceRecording ? "stop.fill" : "mic.fill")
-                        }
-                        Button {
-                            onWhiteboardTap()
-                        } label: {
-                            Label("打开白板", systemImage: "pencil")
+                            Button {
+                                onWhiteboardTap()
+                            } label: {
+                                Label("打开白板", systemImage: "pencil")
+                            }
                         }
                     }
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
@@ -109,5 +96,23 @@ struct BottomNavBar: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct VoiceNavGlyph: View {
+    var body: some View {
+        HStack(spacing: 3.5) {
+            ForEach(0..<5, id: \.self) { index in
+                Capsule()
+                    .fill(Theme.secondaryInk)
+                    .frame(width: 3.5, height: idleHeight(index))
+            }
+        }
+        .frame(width: 32, height: 32)
+    }
+
+    private func idleHeight(_ index: Int) -> CGFloat {
+        let heights: [CGFloat] = [9, 16, 23, 15, 10]
+        return heights[index]
     }
 }

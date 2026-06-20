@@ -7,10 +7,13 @@ struct VoiceRecordingOverlay: View {
     let level: Double
     let onStop: () -> Void
     let onCancel: () -> Void
+    @State private var displayedLevel: Double = 0
 
     var body: some View {
         HStack(spacing: 14) {
-            Button(action: onCancel) {
+            Button {
+                onCancel()
+            } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .foregroundStyle(Theme.secondaryInk)
@@ -23,14 +26,18 @@ struct VoiceRecordingOverlay: View {
                 Text("正在录音")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .foregroundStyle(Theme.ink)
-                HStack(spacing: 3) {
-                    ForEach(0..<16, id: \.self) { index in
-                        Capsule()
-                            .fill(Theme.editorAccent.opacity(0.45 + 0.45 * level))
-                            .frame(width: 4, height: barHeight(index: index))
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+                    let time = timeline.date.timeIntervalSinceReferenceDate
+                    HStack(spacing: 3) {
+                        ForEach(0..<18, id: \.self) { index in
+                            Capsule()
+                                .fill(Theme.editorAccent.opacity(0.38 + 0.52 * displayedLevel))
+                                .frame(width: 3.5, height: barHeight(index: index, time: time))
+                                .animation(.smooth(duration: 0.16), value: displayedLevel)
+                        }
                     }
+                    .frame(height: 26, alignment: .center)
                 }
-                .frame(height: 24, alignment: .center)
             }
 
             Spacer(minLength: 0)
@@ -40,7 +47,9 @@ struct VoiceRecordingOverlay: View {
                 .monospacedDigit()
                 .foregroundStyle(Theme.ink)
 
-            Button(action: onStop) {
+            Button {
+                onStop()
+            } label: {
                 Image(systemName: "stop.fill")
                     .font(.system(size: 15, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
@@ -57,11 +66,23 @@ struct VoiceRecordingOverlay: View {
                 .stroke(Theme.editorLine.opacity(0.32), lineWidth: 0.7)
         )
         .shadow(color: Theme.softShadow.opacity(0.8), radius: 24, x: 0, y: 12)
+        .onAppear {
+            displayedLevel = level
+        }
+        .onChange(of: level) { _, newValue in
+            withAnimation(.smooth(duration: 0.18)) {
+                displayedLevel = displayedLevel * 0.55 + min(max(newValue, 0), 1) * 0.45
+            }
+        }
     }
 
-    private func barHeight(index: Int) -> CGFloat {
-        let phase = Double(index % 5) / 4
-        return CGFloat(6 + (level * 22 * (0.42 + phase)))
+    private func barHeight(index: Int, time: TimeInterval) -> CGFloat {
+        let weights: [Double] = [0.36, 0.54, 0.78, 0.48, 0.9, 0.64, 1.0, 0.7, 0.92, 0.58, 0.86, 0.46, 0.74, 0.5, 0.82, 0.6, 0.7, 0.42]
+        let weight = weights[index % weights.count]
+        let tremor = 0.94 + 0.06 * sin(time * 9 + Double(index) * 0.73)
+        let activeLevel = min(max(displayedLevel, 0), 1)
+        let height = 5 + 24 * max(0.04, activeLevel * weight * tremor)
+        return CGFloat(height)
     }
 
     private static func format(_ interval: TimeInterval) -> String {

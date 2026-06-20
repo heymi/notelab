@@ -101,6 +101,28 @@ final class AppleSpeechTranscriptionProvider: VoiceTranscriptionProvider {
 #endif
 
 #if os(iOS)
+private enum VoiceRecordingFeedback {
+    static func start() {
+        Haptics.shared.play(.tap(.medium))
+    }
+
+    static func stop() {
+        Haptics.shared.play(.tap(.heavy))
+    }
+
+    static func cancel() {
+        Haptics.shared.play(.tap(.light))
+    }
+
+    static func saved() {
+        Haptics.shared.play(.success)
+    }
+
+    static func error() {
+        Haptics.shared.play(.error)
+    }
+}
+
 @MainActor
 final class VoiceNoteCoordinator: NSObject, ObservableObject {
     enum Phase: Equatable {
@@ -152,6 +174,7 @@ final class VoiceNoteCoordinator: NSObject, ObservableObject {
 
     func startRecording() {
         completedNoteId = nil
+        VoiceRecordingFeedback.start()
         Task {
             do {
                 guard await requestMicrophonePermission() else {
@@ -166,13 +189,14 @@ final class VoiceNoteCoordinator: NSObject, ObservableObject {
 
     func stopRecording() {
         guard isRecording else { return }
+        VoiceRecordingFeedback.stop()
         recorder?.stop()
         meterTimer?.invalidate()
         meterTimer = nil
         inputLevel = 0
         elapsed = Date().timeIntervalSince(recordingStartedAt ?? Date())
         guard elapsed >= 1 else {
-            discardCurrentRecording()
+            resetRecordingState()
             fail(VoiceNoteError.recordingTooShort)
             return
         }
@@ -181,18 +205,8 @@ final class VoiceNoteCoordinator: NSObject, ObservableObject {
     }
 
     func discardCurrentRecording() {
-        recorder?.stop()
-        meterTimer?.invalidate()
-        meterTimer = nil
-        if let recordingURL {
-            try? FileManager.default.removeItem(at: recordingURL)
-        }
-        recorder = nil
-        recordingURL = nil
-        recordingStartedAt = nil
-        elapsed = 0
-        inputLevel = 0
-        isSelectingNotebook = false
+        VoiceRecordingFeedback.cancel()
+        resetRecordingState()
         phase = .idle
     }
 
@@ -249,7 +263,8 @@ final class VoiceNoteCoordinator: NSObject, ObservableObject {
             )
             try voiceRepository.create(record)
             completedNoteId = noteId
-            phase = .completed
+            phase = .transcribing
+            VoiceRecordingFeedback.saved()
             processingTask?.cancel()
             processingTask = Task { [weak self] in
                 await self?.process(record: record, audioURL: recordingURL, store: store, aiClient: aiClient)
@@ -317,8 +332,11 @@ final class VoiceNoteCoordinator: NSObject, ObservableObject {
         guard let recorder else { return }
         recorder.updateMeters()
         elapsed = Date().timeIntervalSince(recordingStartedAt ?? Date())
-        let power = recorder.averagePower(forChannel: 0)
-        inputLevel = max(0, min(1, (Double(power) + 55) / 55))
+        let average = Self.normalizedLevel(from: recorder.averagePower(forChannel: 0), floor: -58)
+        let peak = Self.normalizedLevel(from: recorder.peakPower(forChannel: 0), floor: -44)
+        let rawLevel = min(1, max(0, average * 0.62 + peak * 0.38))
+        let attack = rawLevel > inputLevel ? 0.42 : 0.24
+        inputLevel = inputLevel * (1 - attack) + rawLevel * attack
     }
 
     private func process(record: VoiceNoteRecord, audioURL: URL, store: NotebookStore, aiClient: AIClient) async {
@@ -356,6 +374,7 @@ final class VoiceNoteCoordinator: NSObject, ObservableObject {
 
     private func processTranscription(record: VoiceNoteRecord, audioURL: URL, store: NotebookStore, aiClient: AIClient) async {
         do {
+            phase = .transcribing
             let transcript = try await transcriptionProvider.transcribe(fileURL: audioURL, locale: Locale(identifier: AppConfig.locale))
             let rawText = transcript.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !rawText.isEmpty else { throw VoiceNoteError.emptyTranscript }
@@ -365,7 +384,12 @@ final class VoiceNoteCoordinator: NSObject, ObservableObject {
                 status: .organizing,
                 rawTranscript: rawText,
                 errorMessage: nil
-            ) else { return }
+            ) else {
+                clearProcessingToast(for: record.noteId)
+                phase = .completed
+                return
+            }
+            phase = .organizing
 
             guard SubscriptionManager.shared.canUseAIFeature(.organize) else {
                 NotificationCenter.default.post(name: .showPaywall, object: PaywallTrigger.aiQuotaExceeded)
@@ -377,6 +401,7 @@ final class VoiceNoteCoordinator: NSObject, ObservableObject {
                     rawTranscript: rawText,
                     errorMessage: "AI 配额不足，已保留原始转写"
                 )
+                markProcessingFinished(for: record.noteId)
                 return
             }
 
@@ -401,6 +426,7 @@ final class VoiceNoteCoordinator: NSObject, ObservableObject {
                 errorMessage: nil
             )
             try? FileManager.default.removeItem(at: audioURL)
+            markProcessingFinished(for: record.noteId)
         } catch AIClientError.missingAPIKey {
             let rawText = (try? voiceRepository.record(id: record.id, profileId: record.profileId)?.rawTranscript) ?? ""
             if !rawText.isEmpty {
@@ -413,6 +439,7 @@ final class VoiceNoteCoordinator: NSObject, ObservableObject {
                 rawTranscript: rawText,
                 errorMessage: "请先在设置中配置 API Key"
             )
+            markProcessingFinished(for: record.noteId)
         } catch {
             _ = try? voiceRepository.update(
                 id: record.id,
@@ -420,7 +447,41 @@ final class VoiceNoteCoordinator: NSObject, ObservableObject {
                 status: .failed,
                 errorMessage: localized(error)
             )
+            clearProcessingToast(for: record.noteId)
+            fail(error)
         }
+    }
+
+    private func resetRecordingState() {
+        recorder?.stop()
+        meterTimer?.invalidate()
+        meterTimer = nil
+        if let recordingURL {
+            try? FileManager.default.removeItem(at: recordingURL)
+        }
+        recorder = nil
+        recordingURL = nil
+        recordingStartedAt = nil
+        elapsed = 0
+        inputLevel = 0
+        isSelectingNotebook = false
+    }
+
+    private func markProcessingFinished(for noteId: UUID) {
+        clearProcessingToast(for: noteId)
+        phase = .completed
+    }
+
+    private func clearProcessingToast(for noteId: UUID) {
+        guard completedNoteId == noteId else { return }
+        completedNoteId = nil
+    }
+
+    private static func normalizedLevel(from power: Float, floor: Float) -> Double {
+        guard power.isFinite, power > floor else { return 0 }
+        let clamped = min(power, 0)
+        let normalized = (clamped - floor) / abs(floor)
+        return Double(pow(max(0, min(1, normalized)), 1.35))
     }
 
     private func requestMicrophonePermission() async -> Bool {
@@ -439,6 +500,7 @@ final class VoiceNoteCoordinator: NSObject, ObservableObject {
 
     private func fail(_ error: Error) {
         phase = .failed(localized(error))
+        VoiceRecordingFeedback.error()
     }
 
     private func localized(_ error: Error) -> String {

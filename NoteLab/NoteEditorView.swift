@@ -91,6 +91,7 @@ struct NoteEditorView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .voiceNoteDidUpdate)) { notification in
                 guard let updatedNoteId = notification.object as? UUID, updatedNoteId == note.id else { return }
+                loadDocumentIfNeeded()
                 refreshVoiceNoteRecord()
             }
             .onReceive(NotificationCenter.default.publisher(for: .voiceNoteRetryRequested)) { notification in
