@@ -132,10 +132,7 @@ final class AIProcessingCenter: ObservableObject {
             } catch {
                 if Task.isCancelled { return }
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                self.error = message
-                completeProgress(success: false)
-                isLoading = false
-                isVisible = true
+                fail(with: message)
             }
         }
     }
@@ -166,10 +163,7 @@ final class AIProcessingCenter: ObservableObject {
             } catch {
                 if Task.isCancelled { return }
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                self.error = message
-                completeProgress(success: false)
-                isLoading = false
-                isVisible = true
+                fail(with: message)
             }
         }
     }
@@ -229,10 +223,7 @@ final class AIProcessingCenter: ObservableObject {
             } catch {
                 if Task.isCancelled { return }
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                self.error = message
-                completeProgress(success: false)
-                isLoading = false
-                isVisible = true
+                fail(with: message)
             }
         }
     }
@@ -250,6 +241,7 @@ final class AIProcessingCenter: ObservableObject {
 
     func dismiss() {
         dismissTask?.cancel()
+        error = nil
         isCompleted = false
         isVisible = false
     }
@@ -296,11 +288,20 @@ final class AIProcessingCenter: ObservableObject {
         scheduleDismiss(after: 3.0)
     }
 
+    private func fail(with message: String) {
+        error = message
+        completeProgress(success: false)
+        isLoading = false
+        isVisible = true
+        scheduleDismiss(after: 8.0)
+    }
+
     private func scheduleDismiss(after delay: TimeInterval) {
         dismissTask?.cancel()
         dismissTask = Task {
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
+            error = nil
             isCompleted = false
             isVisible = false
         }

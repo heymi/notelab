@@ -185,6 +185,7 @@ struct RootView: View {
                     detail: aiCenter.statusDetail,
                     isLoading: aiCenter.isLoading,
                     isCompleted: aiCenter.isCompleted,
+                    hasError: aiCenter.error != nil,
                     onCancel: { aiCenter.cancel() },
                     onTap: {
                         if let noteId = aiCenter.activeNoteId {
