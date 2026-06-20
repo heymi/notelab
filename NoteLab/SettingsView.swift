@@ -8,6 +8,9 @@ struct SettingsView: View {
     @StateObject private var subscriptionManager = SubscriptionManager.shared
     @AppStorage("appearanceMode") private var appearanceMode: Int = 0 // 0: Auto, 1: Light, 2: Dark
     @AppStorage("launchPage") private var launchPage: String = "library"
+    @AppStorage("AgentAccessEnabled") private var agentAccessEnabled = false
+    @AppStorage("AgentWriteEnabled") private var agentWriteEnabled = false
+    @AppStorage("AgentAccessToken") private var agentAccessToken = ""
     @State private var showClearCacheConfirm = false
     @State private var cacheCleared = false
     @State private var showAISettings = false
@@ -111,6 +114,58 @@ struct SettingsView: View {
                         }
                         .buttonStyle(.plain)
                     }
+
+                    #if os(macOS)
+                    SettingsSection(title: "本机 Agent") {
+                        Toggle(isOn: $agentAccessEnabled) {
+                            HStack(spacing: 16) {
+                                SettingsIcon(icon: "terminal.fill", color: .teal)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("允许本机 AI 访问")
+                                        .font(.system(size: 16, weight: .medium, design: .rounded))
+                                        .foregroundStyle(Theme.ink)
+                                    Text("127.0.0.1:47719")
+                                        .font(.system(size: 13, weight: .regular, design: .rounded))
+                                        .foregroundStyle(Theme.secondaryInk)
+                                }
+                            }
+                        }
+                        .toggleStyle(.switch)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+
+                        Divider().padding(.leading, 52)
+
+                        Toggle(isOn: $agentWriteEnabled) {
+                            HStack(spacing: 16) {
+                                SettingsIcon(icon: "square.and.pencil", color: .orange)
+                                Text("允许写入和删除")
+                                    .font(.system(size: 16, weight: .medium, design: .rounded))
+                                    .foregroundStyle(Theme.ink)
+                            }
+                        }
+                        .toggleStyle(.switch)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+                        .disabled(!agentAccessEnabled)
+
+                        Divider().padding(.leading, 52)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 16) {
+                                SettingsIcon(icon: "key.fill", color: .blue)
+                                SecureField("Agent token", text: $agentAccessToken)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                            Text("配置 Cloudflare Tunnel/Worker 时使用同一个 token。留空则只适合本机临时调试。")
+                                .font(.system(size: 12, weight: .regular, design: .rounded))
+                                .foregroundStyle(Theme.secondaryInk)
+                                .padding(.leading, 48)
+                        }
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+                    }
+                    #endif
                     
                     // Account
                     SettingsSection(title: "账号") {
@@ -278,6 +333,13 @@ struct SettingsView: View {
             sanitizeUserDefaults()
             syncEngine.refreshPendingCount()
         }
+        #if os(macOS)
+        .onChange(of: agentAccessEnabled) { _, enabled in
+            if enabled {
+                AgentAccessServer.shared.start()
+            }
+        }
+        #endif
     }
 
     private var syncStatusDetail: String {

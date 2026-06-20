@@ -30,6 +30,13 @@ struct NoteLabApp: App {
                 .onAppear {
                     #if DEBUG
                     SubscriptionManager.shared.debugSetTier(.pro)
+                    #if os(macOS)
+                    AgentAccessServer.shared.start()
+                    #endif
+                    #elseif os(macOS)
+                    if UserDefaults.standard.bool(forKey: "AgentAccessEnabled") {
+                        AgentAccessServer.shared.start()
+                    }
                     #endif
                     #if os(iOS)
                     UIApplication.shared.registerForRemoteNotifications()
