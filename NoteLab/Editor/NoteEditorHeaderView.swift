@@ -78,6 +78,13 @@ struct NoteEditorHeaderView: View {
         return trimmed.isEmpty ? "无标题" : trimmed
     }
 
+    private var aiPosterText: String? {
+        guard metadata.preview?.style == .excerpt,
+              let text = metadata.preview?.items.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else { return nil }
+        return text
+    }
+
     var body: some View {
         Group {
             if isWhiteboard || presentationMode.isEditing {
@@ -100,13 +107,18 @@ struct NoteEditorHeaderView: View {
                         }
                     }
 
-                    Text(displayTitle)
-                        .font(.custom("STSongti-SC-Black", size: 52))
-                        .foregroundStyle(Theme.ink)
-                        .lineSpacing(3)
-                        .lineLimit(nil)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if let aiPosterText, showsReadingChrome {
+                        aiPoster(text: aiPosterText)
+                    } else {
+                        Text(displayTitle)
+                            .font(.custom("STSongti-SC-Black", size: 52))
+                            .foregroundStyle(Theme.ink)
+                            .lineSpacing(3)
+                            .lineLimit(nil)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
 
                     if showsReadingChrome {
                         if let voiceNote = metadata.voiceNote {
@@ -119,6 +131,7 @@ struct NoteEditorHeaderView: View {
                                 .lineSpacing(8)
                                 .foregroundStyle(Theme.ink.opacity(0.84))
                                 .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
 
                         HStack(spacing: 10) {
@@ -128,7 +141,7 @@ struct NoteEditorHeaderView: View {
                         }
                         .padding(.top, -4)
 
-                        if let preview = metadata.preview {
+                        if let preview = metadata.preview, preview.style != .excerpt {
                             contentPreviewCard(preview)
                         }
                     }
@@ -137,11 +150,50 @@ struct NoteEditorHeaderView: View {
                         linkBlockSection
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 24)
                 .padding(.top, 28)
                 .padding(.bottom, 30)
                 .background(Color.clear)
             }
+        }
+    }
+
+    private func aiPoster(text: String) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(displayTitle)
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(Theme.secondaryInk)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+
+            Text(verbatim: text)
+                .font(.custom("STSongti-SC-Bold", size: posterFontSize(for: text), relativeTo: .largeTitle))
+                .foregroundStyle(Theme.ink)
+                .lineSpacing(6)
+                .lineLimit(nil)
+                .minimumScaleFactor(0.84)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text("AI 摘要")
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(Theme.secondaryInk.opacity(0.58))
+                .tracking(1.2)
+        }
+        .padding(.top, 10)
+        .padding(.bottom, 8)
+    }
+
+    private func posterFontSize(for text: String) -> CGFloat {
+        switch text.count {
+        case 0...38:
+            return 43
+        case 39...72:
+            return 37
+        default:
+            return 32
         }
     }
 
