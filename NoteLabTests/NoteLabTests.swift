@@ -186,6 +186,29 @@ struct NoteLabTests {
         #expect(first != local)
     }
 
+    @Test func authLaunchGateDropsKeychainAccountOnlyForFreshInstall() async throws {
+        #expect(AuthManager.shouldDiscardStoredAccountOnLaunch(
+            hasStoredAccount: true,
+            hasInstallMarker: false,
+            hasLocalInstallData: false
+        ))
+        #expect(!AuthManager.shouldDiscardStoredAccountOnLaunch(
+            hasStoredAccount: true,
+            hasInstallMarker: true,
+            hasLocalInstallData: false
+        ))
+        #expect(!AuthManager.shouldDiscardStoredAccountOnLaunch(
+            hasStoredAccount: true,
+            hasInstallMarker: false,
+            hasLocalInstallData: true
+        ))
+        #expect(!AuthManager.shouldDiscardStoredAccountOnLaunch(
+            hasStoredAccount: false,
+            hasInstallMarker: false,
+            hasLocalInstallData: false
+        ))
+    }
+
     @Test func noteTitleDeriverSkipsGeneratedStructureHeadings() async throws {
         let markdown = """
         ## 摘要

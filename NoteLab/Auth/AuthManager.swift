@@ -70,7 +70,18 @@ final class AuthManager: ObservableObject {
     }
 
     init() {
-        account = Self.loadStoredAccount()
+        let storedAccount = Self.loadStoredAccount()
+        if Self.shouldDiscardStoredAccountOnLaunch(
+            hasStoredAccount: storedAccount != nil,
+            hasInstallMarker: Self.hasInstallMarker,
+            hasLocalInstallData: Self.hasLocalInstallData()
+        ) {
+            Self.deleteStoredAccount()
+            account = nil
+        } else {
+            account = storedAccount
+        }
+        Self.markInstalled()
         Task {
             await refreshAppleCredentialState()
             await refreshICloudAccountState()
@@ -201,6 +212,7 @@ final class AuthManager: ObservableObject {
 private extension AuthManager {
     static let keychainService = "com.psg.NoteLab.apple-auth"
     static let keychainAccount = "current-account"
+    static let installMarkerKey = "AuthManager.didRecordInstall"
 
     static func loadStoredAccount() -> AppleAccount? {
         var query = baseKeychainQuery()
@@ -234,5 +246,33 @@ private extension AuthManager {
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: keychainAccount
         ]
+    }
+
+    static var hasInstallMarker: Bool {
+        UserDefaults.standard.bool(forKey: installMarkerKey)
+    }
+
+    static func markInstalled() {
+        UserDefaults.standard.set(true, forKey: installMarkerKey)
+    }
+
+    static func hasLocalInstallData() -> Bool {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: StorageController.appSupportURL,
+            includingPropertiesForKeys: nil
+        ) else {
+            return false
+        }
+        return entries.contains { $0.lastPathComponent != ".DS_Store" }
+    }
+}
+
+extension AuthManager {
+    nonisolated static func shouldDiscardStoredAccountOnLaunch(
+        hasStoredAccount: Bool,
+        hasInstallMarker: Bool,
+        hasLocalInstallData: Bool
+    ) -> Bool {
+        hasStoredAccount && !hasInstallMarker && !hasLocalInstallData
     }
 }
