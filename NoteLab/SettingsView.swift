@@ -1,5 +1,10 @@
 import SwiftUI
 import Combine
+#if os(macOS)
+import AppKit
+#elseif os(iOS)
+import UIKit
+#endif
 
 struct SettingsView: View {
     @EnvironmentObject var auth: AuthManager
@@ -157,13 +162,87 @@ struct SettingsView: View {
                                 SecureField("Agent token", text: $agentAccessToken)
                                     .textFieldStyle(.roundedBorder)
                             }
-                            Text("配置 Cloudflare Tunnel/Worker 时使用同一个 token。留空则只适合本机临时调试。")
+                            Text("配置 Cloudflare Worker/bridge 时使用同一个 token。留空则只适合本机临时调试。")
                                 .font(.system(size: 12, weight: .regular, design: .rounded))
                                 .foregroundStyle(Theme.secondaryInk)
                                 .padding(.leading, 48)
                         }
                         .padding(.vertical, 12)
                         .padding(.horizontal, 16)
+
+                        Divider().padding(.leading, 52)
+
+                        agentInfoRow(
+                            icon: "link",
+                            color: .teal,
+                            title: "本机 API",
+                            value: "http://127.0.0.1:47719"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        agentInfoRow(
+                            icon: "cloud.fill",
+                            color: .blue,
+                            title: "云端 API",
+                            value: "https://notelab.aedc.cc"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        agentInfoRow(
+                            icon: "terminal",
+                            color: .gray,
+                            title: "CLI",
+                            value: "Tools/notelab notes list --limit 5"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        agentInfoRow(
+                            icon: "point.3.connected.trianglepath.dotted",
+                            color: .purple,
+                            title: "MCP",
+                            value: "node /Users/strictly/DEV/NoteLab/Tools/notelab-mcp.js"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: agentWriteEnabled ? "lock.open.fill" : "lock.fill",
+                            iconColor: agentWriteEnabled ? .orange : .gray,
+                            title: "权限",
+                            detail: agentWriteEnabled ? "读写" : "只读"
+                        )
+                    }
+                    #endif
+
+                    #if os(iOS)
+                    SettingsSection(title: "云端 Agent") {
+                        agentInfoRow(
+                            icon: "cloud.fill",
+                            color: .blue,
+                            title: "云端 API",
+                            value: "https://notelab.aedc.cc"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: "lock.fill",
+                            iconColor: .gray,
+                            title: "权限",
+                            detail: "由云端 token 控制"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: "terminal",
+                            iconColor: .gray,
+                            title: "CLI / MCP",
+                            detail: "仅 macOS"
+                        )
                     }
                     #endif
                     
@@ -353,6 +432,44 @@ struct SettingsView: View {
         formatter.dateFormat = "M月d日 HH:mm"
         return "上次成功 \(formatter.string(from: date))"
     }
+
+    #if os(macOS) || os(iOS)
+    private func agentInfoRow(icon: String, color: Color, title: String, value: String) -> some View {
+        HStack(spacing: 16) {
+            SettingsIcon(icon: icon, color: color)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 16, weight: .medium, design: .rounded))
+                    .foregroundStyle(Theme.ink)
+                Text(value)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .foregroundStyle(Theme.secondaryInk)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+            Spacer()
+            Button {
+                copyAgentValue(value)
+            } label: {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+            .buttonStyle(.borderless)
+            .help("复制")
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 16)
+    }
+
+    private func copyAgentValue(_ value: String) {
+        #if os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        #elseif os(iOS)
+        UIPasteboard.general.string = value
+        #endif
+    }
+    #endif
     
     private func sanitizeUserDefaults() {
         let defaults = UserDefaults.standard
