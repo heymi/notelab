@@ -7,9 +7,13 @@ import os
 protocol CloudSyncing: ObservableObject {
     var isSyncing: Bool { get }
     var lastSyncAt: Date? { get }
+    var lastPushAt: Date? { get }
+    var lastPullAt: Date? { get }
     var lastError: String? { get }
     var lastSummary: SyncSummary? { get }
     var pendingItemCount: Int { get }
+    var lastCloudRecordCount: Int? { get }
+    var canClearLocalData: Bool { get }
     func configure(profileId: UUID)
     func resetForSignOut()
     func syncNow() async
@@ -67,9 +71,12 @@ struct SyncSummary: Equatable {
 final class SyncEngine: ObservableObject, CloudSyncing {
     @Published private(set) var isSyncing: Bool = false
     @Published private(set) var lastSyncAt: Date?
+    @Published private(set) var lastPushAt: Date?
+    @Published private(set) var lastPullAt: Date?
     @Published private(set) var lastError: String?
     @Published private(set) var lastSummary: SyncSummary?
     @Published private(set) var pendingItemCount: Int = 0
+    @Published private(set) var lastCloudRecordCount: Int?
 
     private var profileId: UUID?
     private let notebookRepository = NotebookRepository()
@@ -88,13 +95,20 @@ final class SyncEngine: ObservableObject, CloudSyncing {
         refreshPendingCount()
     }
 
+    var canClearLocalData: Bool {
+        pendingItemCount == 0 && lastSyncAt != nil
+    }
+
     func resetForSignOut() {
         profileId = nil
         isSyncing = false
         lastSyncAt = nil
+        lastPushAt = nil
+        lastPullAt = nil
         lastError = nil
         lastSummary = nil
         pendingItemCount = 0
+        lastCloudRecordCount = nil
     }
 
     func syncNow() async {
@@ -106,18 +120,6 @@ final class SyncEngine: ObservableObject, CloudSyncing {
         guard let profileId else {
             let summary = SyncSummary.skipped(reason: reason, message: "当前账号尚未准备好")
             lastSummary = summary
-            return summary
-        }
-
-        let canSync = SubscriptionManager.shared.canUseSync()
-        if !canSync {
-            let message = "云同步为付费功能，请升级订阅"
-            lastError = message
-            let summary = SyncSummary.skipped(reason: reason, message: message)
-            lastSummary = summary
-            if reason.shouldShowPaywall {
-                NotificationCenter.default.post(name: .showPaywall, object: PaywallTrigger.syncAttempt)
-            }
             return summary
         }
 
@@ -143,10 +145,12 @@ final class SyncEngine: ObservableObject, CloudSyncing {
             let iCloudAccountHash = try await transport.iCloudAccountHash()
             try await transport.ensureInfrastructure()
             summary.merge(try await pushOutbox(profileId: profileId))
-            summary.merge(try await pullChanges(profileId: profileId, iCloudAccountHash: iCloudAccountHash))
+            summary.merge(try await pullChanges(profileId: profileId, iCloudAccountHash: iCloudAccountHash, reason: reason))
             refreshPendingCount()
 
             lastSyncAt = Date()
+            if summary.pushed > 0 { lastPushAt = lastSyncAt }
+            if summary.pulled > 0 || summary.deleted > 0 || lastCloudRecordCount != nil { lastPullAt = lastSyncAt }
             lastError = summary.hasFailures ? summary.message ?? "部分内容同步失败，稍后会自动重试" : nil
             lastSummary = summary
             return summary
@@ -216,13 +220,14 @@ final class SyncEngine: ObservableObject, CloudSyncing {
         return summary
     }
 
-    private func pullChanges(profileId: UUID, iCloudAccountHash: String) async throws -> SyncSummary {
+    private func pullChanges(profileId: UUID, iCloudAccountHash: String, reason: SyncReason) async throws -> SyncSummary {
         let tokenData = try syncStateRepository.changeToken(
             profileId: profileId,
             iCloudAccountHash: iCloudAccountHash,
             zoneName: CloudKitSchema.zoneName
         )
-        let previousToken = CloudKitTransport.decodeToken(tokenData)
+        // ponytail: manual sync is a full reconcile; optimize when data volume proves it needs paging UI.
+        let previousToken = reason == .manual ? nil : CloudKitTransport.decodeToken(tokenData)
         let changes: CloudKitChangeBatch
         var summary = SyncSummary(reason: .manual)
         do {
@@ -256,6 +261,7 @@ final class SyncEngine: ObservableObject, CloudSyncing {
             }
             summary.deleted += 1
         }
+        lastCloudRecordCount = changes.notebooks.count + changes.notes.count + changes.attachments.count
         try storage.saveMainContext()
 
         try syncStateRepository.setChangeToken(

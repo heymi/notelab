@@ -413,6 +413,10 @@ struct NoteLabTests {
         #expect(SyncReason.remoteNotification.shouldShowPaywall == false)
     }
 
+    @Test func freeTierKeepsICloudSyncAvailable() async throws {
+        #expect(FeatureFlags(tier: .free).canSync)
+    }
+
     @MainActor @Test func cloudKitDeletedRecordParsesStorageV3RecordName() async throws {
         let profileId = UUID()
         let noteId = UUID()

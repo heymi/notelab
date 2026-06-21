@@ -20,6 +20,7 @@ struct SettingsView: View {
     @State private var cacheCleared = false
     @State private var showAISettings = false
     @State private var showPaywall = false
+    @State private var syncProtectionMessage: String?
     @ObservedObject private var aiSettings = AISettings.shared
     
     private var isPremium: Bool {
@@ -304,6 +305,33 @@ struct SettingsView: View {
                             detail: "\(syncEngine.pendingItemCount) 项"
                         )
 
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: "icloud.and.arrow.up.fill",
+                            iconColor: syncEngine.lastPushAt == nil ? .orange : .green,
+                            title: "上次上传",
+                            detail: formattedSyncDate(syncEngine.lastPushAt)
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: "icloud.and.arrow.down.fill",
+                            iconColor: syncEngine.lastPullAt == nil ? .orange : .green,
+                            title: "上次恢复",
+                            detail: formattedSyncDate(syncEngine.lastPullAt)
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: "externaldrive.connected.to.line.below.fill",
+                            iconColor: syncEngine.lastCloudRecordCount == 0 ? .orange : .blue,
+                            title: "云端记录",
+                            detail: syncEngine.lastCloudRecordCount.map { "\($0) 项" } ?? "未校验"
+                        )
+
                         if let error = syncEngine.lastError {
                             Divider().padding(.leading, 52)
                             SettingsRow(
@@ -344,7 +372,7 @@ struct SettingsView: View {
                     // Data Management
                     SettingsSection(title: "数据") {
                         Button(action: {
-                            showClearCacheConfirm = true
+                            requestClearLocalCache()
                         }) {
                             HStack {
                                 SettingsIcon(icon: "trash.fill", color: .red)
@@ -391,7 +419,15 @@ struct SettingsView: View {
                 clearLocalCache()
             }
         } message: {
-            Text("这将清除所有本地存储的数据。您的云端数据不会受影响，重新登录后会自动同步。")
+            Text("仅在已完成同步且没有待上传项目时清除。本地缓存会被删除，之后从 iCloud 重新恢复。")
+        }
+        .alert("先完成 iCloud 同步", isPresented: Binding(
+            get: { syncProtectionMessage != nil },
+            set: { if !$0 { syncProtectionMessage = nil } }
+        )) {
+            Button("知道了", role: .cancel) {}
+        } message: {
+            Text(syncProtectionMessage ?? "")
         }
         .alert("缓存已清除", isPresented: $cacheCleared) {
             Button("确定", role: .cancel) {
@@ -431,6 +467,13 @@ struct SettingsView: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "M月d日 HH:mm"
         return "上次成功 \(formatter.string(from: date))"
+    }
+
+    private func formattedSyncDate(_ date: Date?) -> String {
+        guard let date else { return "从未完成" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "M月d日 HH:mm"
+        return formatter.string(from: date)
     }
 
     #if os(macOS) || os(iOS)
@@ -494,6 +537,18 @@ struct SettingsView: View {
         } catch {
             print("Failed to clear cache: \(error)")
         }
+    }
+
+    private func requestClearLocalCache() {
+        syncEngine.refreshPendingCount()
+        guard syncEngine.canClearLocalData else {
+            syncProtectionMessage = syncEngine.pendingItemCount > 0
+                ? "还有 \(syncEngine.pendingItemCount) 项未上传。请先点“立即同步”，确认待同步为 0 后再清除。"
+                : "这台设备还没有完成过 iCloud 同步。请先点“立即同步”，确认上次上传/恢复有时间记录后再清除。"
+            Task { await syncEngine.syncNow(reason: .manual) }
+            return
+        }
+        showClearCacheConfirm = true
     }
     
     @ViewBuilder
