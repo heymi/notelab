@@ -703,6 +703,34 @@ final class NotebookRepository {
         }
     }
 
+    func enqueueFullUpload(profileId: UUID) throws -> Int {
+        let profileKey = profileId.uuidString.lowercased()
+        var added = 0
+
+        let notebooksRequest = NotebookEntity.fetchRequest()
+        notebooksRequest.predicate = NSPredicate(format: "profileId == %@ AND deletedAt == nil", profileKey)
+        for notebook in try storage.mainContext.fetch(notebooksRequest) {
+            guard let id = UUID(uuidString: notebook.id),
+                  try !hasPendingOutbox(profileId: profileId, type: .notebook, id: id) else { continue }
+            try enqueue(.notebook, id: id, profileId: profileId, operation: .upsert)
+            added += 1
+        }
+
+        let notesRequest = NoteEntity.fetchRequest()
+        notesRequest.predicate = NSPredicate(format: "profileId == %@ AND deletedAt == nil", profileKey)
+        for note in try storage.mainContext.fetch(notesRequest) {
+            guard let id = UUID(uuidString: note.id),
+                  try !hasPendingOutbox(profileId: profileId, type: .note, id: id) else { continue }
+            try enqueue(.note, id: id, profileId: profileId, operation: .upsert)
+            added += 1
+        }
+
+        if added > 0 {
+            try storage.saveMainContext()
+        }
+        return added
+    }
+
     private func hasPendingOutbox(profileId: UUID, type: SyncEntityType, id: UUID) throws -> Bool {
         let request = SyncOutboxEntity.fetchRequest()
         request.predicate = NSPredicate(
@@ -956,6 +984,35 @@ final class AttachmentRepository {
         request.predicate = NSPredicate(format: "profileId == %@ AND id == %@", profileId.uuidString.lowercased(), id.uuidString.lowercased())
         request.fetchLimit = 1
         return try storage.mainContext.fetch(request).first
+    }
+
+    func enqueueFullUpload(profileId: UUID) throws -> Int {
+        let request = AttachmentEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "profileId == %@ AND deletedAt == nil", profileId.uuidString.lowercased())
+        var added = 0
+        for attachment in try storage.mainContext.fetch(request) {
+            guard let id = UUID(uuidString: attachment.id),
+                  try !hasPendingOutbox(profileId: profileId, id: id) else { continue }
+            try enqueueAttachment(id: id, profileId: profileId, operation: .upsert)
+            added += 1
+        }
+        if added > 0 {
+            try storage.saveMainContext()
+        }
+        return added
+    }
+
+    private func hasPendingOutbox(profileId: UUID, id: UUID) throws -> Bool {
+        let request = SyncOutboxEntity.fetchRequest()
+        request.predicate = NSPredicate(
+            format: "profileId == %@ AND entityType == %@ AND entityId == %@ AND status IN %@",
+            profileId.uuidString.lowercased(),
+            SyncEntityType.attachment.rawValue,
+            id.uuidString.lowercased(),
+            [OutboxStatus.pending.rawValue, OutboxStatus.failed.rawValue]
+        )
+        request.fetchLimit = 1
+        return try storage.mainContext.count(for: request) > 0
     }
 
     private func enqueueAttachment(id: UUID, profileId: UUID, operation: SyncOperation) throws {

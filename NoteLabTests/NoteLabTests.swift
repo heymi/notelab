@@ -417,6 +417,40 @@ struct NoteLabTests {
         #expect(FeatureFlags(tier: .free).canSync)
     }
 
+    @MainActor @Test func fullUploadBackfillEnqueuesLiveDataWithoutDuplicates() async throws {
+        let profileId = UUID()
+        let repository = NotebookRepository()
+        let notebook = try repository.createNotebook(
+            profileId: profileId,
+            title: "Backfill notebook",
+            color: .lime,
+            iconName: "book"
+        )
+        let note = Note(
+            id: UUID(),
+            title: "Backfill note",
+            summary: "",
+            paragraphCount: 0,
+            bulletCount: 0,
+            hasAdditionalContext: false,
+            createdAt: Date(),
+            contentRTF: nil,
+            content: "Needs cloud upload"
+        )
+        _ = try repository.createNote(profileId: profileId, notebookId: notebook.id, note: note)
+
+        for item in try repository.pendingOutbox(profileId: profileId) {
+            try repository.markOutboxDone(item)
+        }
+        #expect(try repository.pendingOutbox(profileId: profileId).isEmpty)
+
+        #expect(try repository.enqueueFullUpload(profileId: profileId) == 2)
+        #expect(try repository.enqueueFullUpload(profileId: profileId) == 0)
+        let pending = try repository.pendingOutbox(profileId: profileId)
+        #expect(pending.filter { $0.entityType == .notebook && $0.entityId == notebook.id }.count == 1)
+        #expect(pending.filter { $0.entityType == .note && $0.entityId == note.id }.count == 1)
+    }
+
     @MainActor @Test func cloudKitDeletedRecordParsesStorageV3RecordName() async throws {
         let profileId = UUID()
         let noteId = UUID()

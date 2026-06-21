@@ -144,6 +144,10 @@ final class SyncEngine: ObservableObject, CloudSyncing {
 
             let iCloudAccountHash = try await transport.iCloudAccountHash()
             try await transport.ensureInfrastructure()
+            if reason == .manual {
+                _ = try notebookRepository.enqueueFullUpload(profileId: profileId)
+                _ = try attachmentRepository.enqueueFullUpload(profileId: profileId)
+            }
             summary.merge(try await pushOutbox(profileId: profileId))
             summary.merge(try await pullChanges(profileId: profileId, iCloudAccountHash: iCloudAccountHash, reason: reason))
             refreshPendingCount()
