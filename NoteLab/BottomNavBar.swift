@@ -42,11 +42,20 @@ struct BottomNavBar: View {
                 if !isVoiceRecording {
                     GlassEffectContainer(spacing: 0) {
                         Button(action: onVoiceTap) {
-                            VoiceNavGlyph()
-                                .opacity(0.78)
-                                .frame(width: 64, height: 64)
-                                .contentShape(Circle())
-                                .glassEffect(.regular, in: Circle())
+                            ZStack {
+                                FlameGlassButtonBackground()
+
+                                VoiceNavGlyph()
+                                    .opacity(0.9)
+                            }
+                            .frame(width: 64, height: 64)
+                            .contentShape(Capsule())
+                            .clipShape(Capsule())
+                            .overlay {
+                                Capsule()
+                                    .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+                            }
+                            .accessibilityLabel("语音输入")
                                 .shadow(color: Theme.softShadow, radius: 14, x: 0, y: 8)
                         }
                         .buttonStyle(.plain)
@@ -104,7 +113,7 @@ private struct VoiceNavGlyph: View {
         HStack(spacing: 3.5) {
             ForEach(0..<5, id: \.self) { index in
                 Capsule()
-                    .fill(Theme.secondaryInk)
+                    .fill(.white.opacity(0.92))
                     .frame(width: 3.5, height: idleHeight(index))
             }
         }
