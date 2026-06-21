@@ -124,9 +124,9 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
         tableView.scrollIndicatorInsets.bottom = bottom
     }
 
-    func updateHeader(title: Binding<String>, linkBlocks: [LinkedNoteBlock], isWhiteboard: Bool, focusBridge: TitleFocusBridge, onOpenNote: @escaping (UUID) -> Void) {
+    func updateHeader(title: Binding<String>, linkBlocks: [LinkedNoteBlock], summary: String, isWhiteboard: Bool, focusBridge: TitleFocusBridge, onOpenNote: @escaping (UUID) -> Void) {
         titleFocusBridge = focusBridge
-        let root = NoteEditorHeaderView(title: title, focusBridge: focusBridge, linkBlocks: linkBlocks, isWhiteboard: isWhiteboard, onOpenNote: onOpenNote)
+        let root = NoteEditorHeaderView(title: title, focusBridge: focusBridge, linkBlocks: linkBlocks, summary: summary, isWhiteboard: isWhiteboard, onOpenNote: onOpenNote)
         if let host = headerHost {
             host.rootView = root
         } else {

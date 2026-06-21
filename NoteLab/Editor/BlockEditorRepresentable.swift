@@ -13,6 +13,7 @@ struct BlockEditorRepresentable: UIViewControllerRepresentable {
     @Binding var title: String
     var titleFocusBridge: TitleFocusBridge
     var linkBlocks: [LinkedNoteBlock]
+    var summary: String
     var sentHighlightBlockIds: Set<UUID>
     var isWhiteboard: Bool
     var topInset: CGFloat
@@ -62,7 +63,7 @@ struct BlockEditorRepresentable: UIViewControllerRepresentable {
         uiViewController.ownerId = ownerId
         uiViewController.noteId = noteId
         uiViewController.updateContentInsets(top: topInset, bottom: bottomInset)
-        uiViewController.updateHeader(title: $title, linkBlocks: linkBlocks, isWhiteboard: isWhiteboard, focusBridge: titleFocusBridge, onOpenNote: onOpenNote)
+        uiViewController.updateHeader(title: $title, linkBlocks: linkBlocks, summary: summary, isWhiteboard: isWhiteboard, focusBridge: titleFocusBridge, onOpenNote: onOpenNote)
 
         if context.coordinator.lastSentHighlightIds != sentHighlightBlockIds {
             context.coordinator.lastSentHighlightIds = sentHighlightBlockIds

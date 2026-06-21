@@ -114,6 +114,7 @@ struct NoteEditorView: View {
             title: $note.title,
             titleFocusBridge: titleFocusBridge,
             linkBlocks: store.linkBlocks(for: note.id),
+            summary: note.summary,
             sentHighlightBlockIds: sentHighlightBlockIds,
             isWhiteboard: isWhiteboard,
             onOpenNote: { noteId in

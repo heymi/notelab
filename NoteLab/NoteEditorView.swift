@@ -233,6 +233,7 @@ struct NoteEditorView: View {
                         title: $note.title,
                         titleFocusBridge: titleFocusBridge,
                         linkBlocks: linkBlocks,
+                        summary: note.summary,
                         sentHighlightBlockIds: sentHighlightBlockIds,
                         isWhiteboard: isWhiteboard,
                         topInset: topInset,

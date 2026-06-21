@@ -14,6 +14,7 @@ struct BlockEditorRepresentableMac: NSViewControllerRepresentable {
     @Binding var title: String
     var titleFocusBridge: TitleFocusBridge
     var linkBlocks: [LinkedNoteBlock]
+    var summary: String
     var sentHighlightBlockIds: Set<UUID>
     var isWhiteboard: Bool
     var onOpenNote: (UUID) -> Void
@@ -66,6 +67,7 @@ struct BlockEditorRepresentableMac: NSViewControllerRepresentable {
         nsViewController.updateHeader(
             title: $title,
             linkBlocks: linkBlocks,
+            summary: summary,
             isWhiteboard: isWhiteboard,
             focusBridge: titleFocusBridge,
             onOpenNote: onOpenNote

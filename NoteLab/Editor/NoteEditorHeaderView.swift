@@ -5,9 +5,18 @@ struct NoteEditorHeaderView: View {
     @Binding var title: String
     @ObservedObject var focusBridge: TitleFocusBridge
     let linkBlocks: [LinkedNoteBlock]
+    let summary: String
     let isWhiteboard: Bool
     let onOpenNote: (UUID) -> Void
     @FocusState private var titleFocused: Bool
+
+    private var trimmedSummary: String {
+        summary.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var hasSummaryPoster: Bool {
+        !trimmedSummary.isEmpty
+    }
 
     var body: some View {
         Group {
@@ -15,11 +24,11 @@ struct NoteEditorHeaderView: View {
                 Color.clear.frame(height: 0)
             } else {
                 VStack(alignment: .leading, spacing: 16) {
-                    TextField("标题", text: $title)
-                        .font(.system(size: 34, weight: .bold, design: .rounded))
-                        .foregroundStyle(Theme.ink)
-                        .textFieldStyle(.plain)
-                        .focused($titleFocused)
+                    if hasSummaryPoster {
+                        summaryPoster
+                    } else {
+                        titleField
+                    }
 
                     if !linkBlocks.isEmpty {
                         linkBlockSection
@@ -38,6 +47,53 @@ struct NoteEditorHeaderView: View {
                 }
             }
         }
+    }
+
+    private var titleField: some View {
+        TextField("标题", text: $title)
+            .font(.system(size: 34, weight: .bold, design: .rounded))
+            .foregroundStyle(Theme.ink)
+            .textFieldStyle(.plain)
+            .focused($titleFocused)
+    }
+
+    private var summaryPoster: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(title.isEmpty ? "未命名笔记" : title)
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(Theme.secondaryInk)
+                .lineLimit(2)
+
+            Text(trimmedSummary)
+                .font(posterFont(for: trimmedSummary))
+                .foregroundStyle(Theme.ink)
+                .lineSpacing(6)
+                .minimumScaleFactor(0.72)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel("AI 摘要，\(trimmedSummary)")
+
+            Text("AI 摘要")
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(Theme.secondaryInk)
+                .textCase(.uppercase)
+        }
+        .padding(.top, 18)
+        .padding(.bottom, 10)
+    }
+
+    private func posterFont(for text: String) -> Font {
+        let size: CGFloat
+        switch text.count {
+        case 0...32:
+            size = 48
+        case 33...64:
+            size = 42
+        case 65...96:
+            size = 36
+        default:
+            size = 32
+        }
+        return .custom("STSongti-SC-Bold", size: size, relativeTo: .largeTitle)
     }
 
     private var linkBlockSection: some View {

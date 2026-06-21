@@ -100,9 +100,9 @@ final class BlockEditorViewControllerMac: NSViewController {
         }
     }
     
-    func updateHeader(title: Binding<String>, linkBlocks: [LinkedNoteBlock], isWhiteboard: Bool, focusBridge: TitleFocusBridge, onOpenNote: @escaping (UUID) -> Void) {
+    func updateHeader(title: Binding<String>, linkBlocks: [LinkedNoteBlock], summary: String, isWhiteboard: Bool, focusBridge: TitleFocusBridge, onOpenNote: @escaping (UUID) -> Void) {
         titleFocusBridge = focusBridge
-        let headerView = NoteEditorHeaderView(title: title, focusBridge: focusBridge, linkBlocks: linkBlocks, isWhiteboard: isWhiteboard, onOpenNote: onOpenNote)
+        let headerView = NoteEditorHeaderView(title: title, focusBridge: focusBridge, linkBlocks: linkBlocks, summary: summary, isWhiteboard: isWhiteboard, onOpenNote: onOpenNote)
         
         if let existing = headerHostingView {
             existing.rootView = headerView
