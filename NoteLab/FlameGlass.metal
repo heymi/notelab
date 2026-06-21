@@ -6,7 +6,7 @@ static float liquidBlob(float2 uv, float2 center, float2 scale) {
     return exp(-dot(d, d));
 }
 
-[[ stitchable ]] half4 flameGlass(float2 position, half4 color, float2 size, float time) {
+[[ stitchable ]] half4 flameGlass(float2 position, half4 color, float2 size, float time, float2 tilt) {
     float2 uv = position / max(size, float2(1.0));
     float aspect = size.x / max(size.y, 1.0);
     float2 centered = float2((uv.x - 0.5) * aspect, uv.y - 0.5);
@@ -19,24 +19,29 @@ static float liquidBlob(float2 uv, float2 center, float2 scale) {
 
     float liquidWindow = smoothstep(0.08, 0.20, uv.y) * (1.0 - smoothstep(0.97, 1.0, uv.y));
     float slow = time * 0.72;
+    float2 flow = clamp(tilt, float2(-1.0), float2(1.0));
+    float surfaceLevel = 0.84 - flow.y * 0.08;
+    float surfaceTilt = flow.x * (uv.x - 0.5) * 0.18;
+    float fillMask = smoothstep(surfaceLevel + surfaceTilt, surfaceLevel + surfaceTilt + 0.13, uv.y);
 
     float2 poolUv = uv;
-    poolUv.x += sin(slow + uv.y * 4.0) * 0.045;
-    poolUv.y += sin(slow * 0.8 + uv.x * 5.0) * 0.025;
+    poolUv.x += sin(slow + uv.y * 4.0) * 0.030 - flow.x * 0.11;
+    poolUv.y += sin(slow * 0.8 + uv.x * 5.0) * 0.018 + flow.y * 0.05;
 
     float bottomPool = liquidBlob(poolUv, float2(0.50, 0.91), float2(0.52, 0.17));
     bottomPool += liquidBlob(poolUv, float2(0.29, 0.84), float2(0.31, 0.13)) * 0.48;
     bottomPool += liquidBlob(poolUv, float2(0.72, 0.85), float2(0.33, 0.13)) * 0.46;
 
-    float2 dropA = float2(0.30 + sin(slow * 0.9) * 0.08, 0.68 + sin(slow * 1.1) * 0.10);
-    float2 dropB = float2(0.52 + sin(slow * 0.7 + 1.4) * 0.07, 0.58 + sin(slow * 0.95 + 0.8) * 0.12);
-    float2 dropC = float2(0.73 + sin(slow * 0.8 + 2.2) * 0.07, 0.70 + sin(slow * 1.0 + 2.6) * 0.10);
+    float2 slosh = float2(flow.x * 0.18, flow.y * -0.10);
+    float2 dropA = float2(0.30 + sin(slow * 0.9) * 0.06, 0.68 + sin(slow * 1.1) * 0.07) + slosh * 0.80;
+    float2 dropB = float2(0.52 + sin(slow * 0.7 + 1.4) * 0.05, 0.58 + sin(slow * 0.95 + 0.8) * 0.08) + slosh;
+    float2 dropC = float2(0.73 + sin(slow * 0.8 + 2.2) * 0.06, 0.70 + sin(slow * 1.0 + 2.6) * 0.07) + slosh * 0.75;
     float risingDrops = liquidBlob(uv, dropA, float2(0.18, 0.13)) * 0.56;
     risingDrops += liquidBlob(uv, dropB, float2(0.20, 0.15)) * 0.64;
     risingDrops += liquidBlob(uv, dropC, float2(0.18, 0.13)) * 0.54;
 
     float bridge = smoothstep(0.48, 0.06, abs(uv.x - 0.50)) * smoothstep(0.92, 0.42, uv.y) * 0.24;
-    float field = (bottomPool * 1.05 + risingDrops * 1.14 + bridge * 0.70) * liquidWindow;
+    float field = (bottomPool * 1.05 + risingDrops * 1.14 + bridge * 0.70) * liquidWindow * fillMask;
     float liquid = smoothstep(0.34, 0.58, field);
     liquid = pow(liquid, 0.72);
 
