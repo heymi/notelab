@@ -308,6 +308,15 @@ struct SettingsView: View {
                         Divider().padding(.leading, 52)
 
                         SettingsRow(
+                            icon: "internaldrive.fill",
+                            iconColor: syncEngine.lastLocalRecordCount == 0 ? .orange : .blue,
+                            title: "本地记录",
+                            detail: syncEngine.lastLocalRecordCount.map { "\($0) 项" } ?? "未校验"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
                             icon: "icloud.and.arrow.up.fill",
                             iconColor: syncEngine.lastPushAt == nil ? .orange : .green,
                             title: "上次上传",

@@ -12,6 +12,7 @@ protocol CloudSyncing: ObservableObject {
     var lastError: String? { get }
     var lastSummary: SyncSummary? { get }
     var pendingItemCount: Int { get }
+    var lastLocalRecordCount: Int? { get }
     var lastCloudRecordCount: Int? { get }
     var canClearLocalData: Bool { get }
     func configure(profileId: UUID)
@@ -76,6 +77,7 @@ final class SyncEngine: ObservableObject, CloudSyncing {
     @Published private(set) var lastError: String?
     @Published private(set) var lastSummary: SyncSummary?
     @Published private(set) var pendingItemCount: Int = 0
+    @Published private(set) var lastLocalRecordCount: Int?
     @Published private(set) var lastCloudRecordCount: Int?
 
     private var profileId: UUID?
@@ -108,6 +110,7 @@ final class SyncEngine: ObservableObject, CloudSyncing {
         lastError = nil
         lastSummary = nil
         pendingItemCount = 0
+        lastLocalRecordCount = nil
         lastCloudRecordCount = nil
     }
 
@@ -144,12 +147,14 @@ final class SyncEngine: ObservableObject, CloudSyncing {
 
             let iCloudAccountHash = try await transport.iCloudAccountHash()
             try await transport.ensureInfrastructure()
+            lastLocalRecordCount = try localRecordCount(profileId: profileId)
             if reason == .manual {
                 _ = try notebookRepository.enqueueFullUpload(profileId: profileId)
                 _ = try attachmentRepository.enqueueFullUpload(profileId: profileId)
             }
             summary.merge(try await pushOutbox(profileId: profileId))
             summary.merge(try await pullChanges(profileId: profileId, iCloudAccountHash: iCloudAccountHash, reason: reason))
+            lastCloudRecordCount = try await transport.cloudRecordCount(profileId: profileId)
             refreshPendingCount()
 
             lastSyncAt = Date()
@@ -172,9 +177,16 @@ final class SyncEngine: ObservableObject, CloudSyncing {
     func refreshPendingCount() {
         guard let profileId else {
             pendingItemCount = 0
+            lastLocalRecordCount = nil
             return
         }
         pendingItemCount = (try? notebookRepository.pendingOutbox(profileId: profileId, limit: 1_000).count) ?? 0
+        lastLocalRecordCount = try? localRecordCount(profileId: profileId)
+    }
+
+    private func localRecordCount(profileId: UUID) throws -> Int {
+        try notebookRepository.liveRecordCount(profileId: profileId)
+            + attachmentRepository.liveRecordCount(profileId: profileId)
     }
 
     private func pushOutbox(profileId: UUID) async throws -> SyncSummary {
@@ -265,7 +277,6 @@ final class SyncEngine: ObservableObject, CloudSyncing {
             }
             summary.deleted += 1
         }
-        lastCloudRecordCount = changes.notebooks.count + changes.notes.count + changes.attachments.count
         try storage.saveMainContext()
 
         try syncStateRepository.setChangeToken(

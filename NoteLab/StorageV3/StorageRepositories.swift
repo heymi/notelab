@@ -731,6 +731,19 @@ final class NotebookRepository {
         return added
     }
 
+    func liveRecordCount(profileId: UUID) throws -> Int {
+        let profileKey = profileId.uuidString.lowercased()
+
+        let notebooksRequest = NotebookEntity.fetchRequest()
+        notebooksRequest.predicate = NSPredicate(format: "profileId == %@ AND deletedAt == nil", profileKey)
+
+        let notesRequest = NoteEntity.fetchRequest()
+        notesRequest.predicate = NSPredicate(format: "profileId == %@ AND deletedAt == nil", profileKey)
+
+        return try storage.mainContext.count(for: notebooksRequest)
+            + storage.mainContext.count(for: notesRequest)
+    }
+
     private func hasPendingOutbox(profileId: UUID, type: SyncEntityType, id: UUID) throws -> Bool {
         let request = SyncOutboxEntity.fetchRequest()
         request.predicate = NSPredicate(
@@ -1000,6 +1013,12 @@ final class AttachmentRepository {
             try storage.saveMainContext()
         }
         return added
+    }
+
+    func liveRecordCount(profileId: UUID) throws -> Int {
+        let request = AttachmentEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "profileId == %@ AND deletedAt == nil", profileId.uuidString.lowercased())
+        return try storage.mainContext.count(for: request)
     }
 
     private func hasPendingOutbox(profileId: UUID, id: UUID) throws -> Bool {

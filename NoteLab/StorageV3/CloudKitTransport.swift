@@ -79,6 +79,7 @@ protocol CloudKitTransporting: AnyObject {
     func pushNote(_ entity: NoteEntity, profileId: UUID) async throws -> String
     func pushAttachment(_ entity: AttachmentEntity, profileId: UUID) async throws -> String
     func fetchChanges(since token: CKServerChangeToken?) async throws -> CloudKitChangeBatch
+    func cloudRecordCount(profileId: UUID) async throws -> Int
 }
 
 final class CloudKitTransport: CloudKitTransporting {
@@ -206,6 +207,17 @@ final class CloudKitTransport: CloudKitTransporting {
         )
     }
 
+    func cloudRecordCount(profileId: UUID) async throws -> Int {
+        let profileHash = Self.hash(profileId.uuidString.lowercased())
+        let records = try await fetchRecords(type: CloudKitSchema.RecordType.notebook)
+            + (try await fetchRecords(type: CloudKitSchema.RecordType.note))
+            + (try await fetchRecords(type: CloudKitSchema.RecordType.attachment))
+        return records.filter {
+            $0[string: CloudKitSchema.Field.profileIdHash] == profileHash
+                && $0[date: CloudKitSchema.Field.deletedAt] == nil
+        }.count
+    }
+
     static func encodeToken(_ token: CKServerChangeToken?) -> Data? {
         guard let token else { return nil }
         return try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true)
@@ -279,6 +291,43 @@ final class CloudKitTransport: CloudKitTransporting {
                     continuation.resume(returning: record)
                 }
             }
+        }
+    }
+
+    private func fetchRecords(type: String) async throws -> [CKRecord] {
+        try await withCheckedThrowingContinuation { continuation in
+            let query = CKQuery(recordType: type, predicate: NSPredicate(value: true))
+            var records: [CKRecord] = []
+            let lock = NSLock()
+
+            func run(_ operation: CKQueryOperation) {
+                operation.zoneID = CloudKitSchema.zoneID
+                operation.recordFetchedBlock = { record in
+                    lock.lock()
+                    records.append(record)
+                    lock.unlock()
+                }
+                operation.queryCompletionBlock = { cursor, error in
+                    if let error = error as? CKError, error.code == .unknownItem {
+                        lock.lock()
+                        let fetched = records
+                        lock.unlock()
+                        continuation.resume(returning: fetched)
+                    } else if let error {
+                        continuation.resume(throwing: error)
+                    } else if let cursor {
+                        run(CKQueryOperation(cursor: cursor))
+                    } else {
+                        lock.lock()
+                        let fetched = records
+                        lock.unlock()
+                        continuation.resume(returning: fetched)
+                    }
+                }
+                database.add(operation)
+            }
+
+            run(CKQueryOperation(query: query))
         }
     }
 
