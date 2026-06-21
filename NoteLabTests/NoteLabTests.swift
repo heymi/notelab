@@ -96,6 +96,31 @@ struct NoteLabTests {
         #expect(AttachmentStorage.mimeType(for: "recording.wav") == "audio/wav")
     }
 
+    @Test func homeTodoSectionsHideCompletedAndSortByNewestVisibleTodo() async throws {
+        let oldNotebookId = UUID()
+        let newNotebookId = UUID()
+        let oldNoteId = UUID()
+        let newNoteId = UUID()
+        let oldDate = Date(timeIntervalSince1970: 100)
+        let newDate = Date(timeIntervalSince1970: 200)
+        let newestDate = Date(timeIntervalSince1970: 300)
+        let notebooks = [
+            Notebook(id: oldNotebookId, title: "Old", color: .lime, iconName: "book", createdAt: oldDate, notes: []),
+            Notebook(id: newNotebookId, title: "New", color: .sky, iconName: "book", createdAt: newDate, notes: [])
+        ]
+        let todos = [
+            todo("old-0", noteId: oldNoteId, notebookId: oldNotebookId, title: "old first", lineIndex: 0, isCompleted: false, sortDate: oldDate),
+            todo("done", noteId: newNoteId, notebookId: newNotebookId, title: "done", lineIndex: 0, isCompleted: true, sortDate: newestDate),
+            todo("new", noteId: newNoteId, notebookId: newNotebookId, title: "new", lineIndex: 1, isCompleted: false, sortDate: newDate),
+            todo("old-1", noteId: oldNoteId, notebookId: oldNotebookId, title: "old second", lineIndex: 1, isCompleted: false, sortDate: oldDate)
+        ]
+
+        let sections = buildSections(from: todos, transient: [:], notebooks: notebooks)
+
+        #expect(sections.map(\.title) == ["New", "Old"])
+        #expect(sections.flatMap(\.items).map(\.id) == ["new", "old-0", "old-1"])
+    }
+
     @MainActor @Test func materialsLibraryExcludesVoiceAudioAttachments() async throws {
         let profileId = UUID()
         let noteId = UUID()
@@ -177,6 +202,29 @@ struct NoteLabTests {
         #expect(NoteTitleDeriver.title(fromAI: "摘要", fallback: "正文标题") == "正文标题")
         #expect(NoteTitleDeriver.title(fromAI: "原生图标资源配置验证流程", fallback: "") == "原生图标资源配置验证")
         #expect(NoteTitleDeriver.title(fromAI: "Native Icon Resource Validation Workflow Details", fallback: "") == "Native Icon Resource Validation Workflow")
+    }
+
+    private func todo(
+        _ id: String,
+        noteId: UUID,
+        notebookId: UUID,
+        title: String,
+        lineIndex: Int,
+        isCompleted: Bool,
+        sortDate: Date
+    ) -> LocalTodoItem {
+        LocalTodoItem(
+            id: id,
+            title: title,
+            noteId: noteId,
+            noteTitle: "Note",
+            notebookId: notebookId,
+            notebookTitle: "Notebook",
+            lineIndex: lineIndex,
+            isWhiteboard: false,
+            isCompleted: isCompleted,
+            sortDate: sortDate
+        )
     }
 
     @Test func aiInsightComposerPersistsAITitleAsFirstMarkdownLine() async throws {

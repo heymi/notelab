@@ -10,4 +10,5 @@ struct LocalTodoItem: Identifiable, Hashable {
     let lineIndex: Int
     let isWhiteboard: Bool
     let isCompleted: Bool
+    let sortDate: Date
 }

@@ -244,6 +244,7 @@ struct RootView: View {
             )
             .presentationDetents([.medium, .large])
         }
+        .background(InteractivePopGestureEnabler())
         .background(WindowTapHapticsInstaller())
     }
 
@@ -273,11 +274,7 @@ struct RootView: View {
         Group {
             switch selection {
             case .library:
-                #if os(macOS)
                 LibraryView(tabSelection: $selection)
-                #else
-                LibraryPagerView(tabSelection: $selection)
-                #endif
             case .list:
                 AllNotesListView()
             case .whiteboard:

@@ -500,7 +500,8 @@ final class NotebookStore: ObservableObject {
                         notebookTitle: notebookTitle,
                         lineIndex: idx,
                         isWhiteboard: isWhiteboard,
-                        isCompleted: item.isChecked
+                        isCompleted: item.isChecked,
+                        sortDate: note.updatedAt
                     )
                 )
             }

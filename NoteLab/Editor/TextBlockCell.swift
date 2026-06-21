@@ -119,10 +119,8 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         contentView.addSubview(quoteBorderView)
         quoteBorderView.translatesAutoresizingMaskIntoConstraints = false
 
-        todoCardBackgroundView.backgroundColor = UIColor.white.withAlphaComponent(0.72)
         todoCardBackgroundView.layer.cornerRadius = 22
         todoCardBackgroundView.layer.cornerCurve = .continuous
-        todoCardBackgroundView.layer.borderColor = UIColor.noteEditorLine.withAlphaComponent(0.2).cgColor
         todoCardBackgroundView.layer.borderWidth = 0.6
         todoCardBackgroundView.layer.shadowColor = UIColor.black.cgColor
         todoCardBackgroundView.layer.shadowOpacity = 0.035
@@ -197,6 +195,26 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
             checkboxButton.widthAnchor.constraint(equalToConstant: 24),
             checkboxButton.heightAnchor.constraint(equalToConstant: 24)
         ])
+
+        applyAdaptiveColors()
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        guard previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle else { return }
+        applyAdaptiveColors()
+        applyStyle()
+    }
+
+    private func applyAdaptiveColors() {
+        sentHighlightBackgroundView.backgroundColor = sentHighlightColor
+        quoteBorderView.backgroundColor = quoteBorderColor
+        todoCardBackgroundView.backgroundColor = UIColor.noteEditorPaper.withAlphaComponent(0.72)
+        todoCardBackgroundView.layer.borderColor = UIColor.noteEditorLine.withAlphaComponent(0.2).cgColor
+        multiSelectBackgroundView.backgroundColor = UIColor.noteEditorSelection
+        prefixLabel.textColor = secondaryInkColor
+        textView.textColor = inkColor
+        textView.tintColor = .noteEditorAccentDeep
     }
 
     func setMultiSelected(_ selected: Bool) {

@@ -42,7 +42,7 @@ struct TasksOverviewView: View {
         let transientSnapshot = transientCompleted
         let notebooksSnapshot = store.notebooks
         refreshTask = Task { @MainActor in
-            let todos = store.collectTodos(includeCompleted: true)
+            let todos = store.collectTodos(includeCompleted: false)
             let sections = buildSections(
                 from: todos,
                 transient: transientSnapshot,
@@ -177,16 +177,25 @@ struct TasksOverviewView: View {
     }
 }
 
-private func buildSections(
+func buildSections(
     from todos: [LocalTodoItem],
     transient: [String: LocalTodoItem],
     notebooks: [Notebook]
 ) -> [TodoSection] {
-    var combined = todos
+    var combined = todos.filter { !$0.isCompleted }
     for item in transient.values {
         if !combined.contains(where: { $0.id == item.id }) {
             combined.append(item)
         }
+    }
+    combined.sort { lhs, rhs in
+        if lhs.sortDate != rhs.sortDate {
+            return lhs.sortDate > rhs.sortDate
+        }
+        if lhs.noteId == rhs.noteId {
+            return lhs.lineIndex < rhs.lineIndex
+        }
+        return lhs.id < rhs.id
     }
     var sections: [TodoSection] = []
 
@@ -224,10 +233,12 @@ private func buildSections(
         }
     }
 
-    return sections
+    return sections.sorted {
+        ($0.items.first?.sortDate ?? .distantPast) > ($1.items.first?.sortDate ?? .distantPast)
+    }
 }
 
-private struct TodoSection: Identifiable {
+struct TodoSection: Identifiable {
     let id: UUID
     let title: String
     let items: [LocalTodoItem]

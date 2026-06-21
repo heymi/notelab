@@ -57,6 +57,7 @@ struct LibraryView: View {
             .scrollEdgeEffectStyle(.hard, for: .top)
         }
         .background(Theme.background)
+        .simultaneousGesture(pageSwipeGesture)
         .fullScreenCover(isPresented: $showNewNotebook) {
             NewNotebookView(isPresented: $showNewNotebook)
                 .environmentObject(store)
@@ -133,8 +134,8 @@ struct LibraryView: View {
                         .background {
                             if mode == item {
                                 Capsule()
-                                    .fill(Color.white)
-                                    .shadow(color: Color.black.opacity(0.05), radius: 4, x: 0, y: 2)
+                                    .fill(Theme.cardBackground)
+                                    .shadow(color: Theme.softShadow, radius: 4, x: 0, y: 2)
                                     .matchedGeometryEffect(id: "picker_tab", in: pickerNamespace)
                             }
                         }
@@ -143,11 +144,32 @@ struct LibraryView: View {
             }
         }
         .padding(4)
-        .background(Color.black.opacity(0.05))
+        .background(Theme.groupedBackground)
         .clipShape(Capsule())
     }
 
     @Namespace private var pickerNamespace
+
+    private var pageSwipeGesture: some Gesture {
+        DragGesture(minimumDistance: 24)
+            .onEnded { value in
+                let dx = value.translation.width
+                let dy = value.translation.height
+                guard abs(dx) > 72, abs(dx) > abs(dy) * 1.35 else { return }
+                moveMode(by: dx < 0 ? 1 : -1)
+            }
+    }
+
+    private func moveMode(by delta: Int) {
+        let modes = LibraryMode.allCases
+        guard let index = modes.firstIndex(of: mode) else { return }
+        let newIndex = min(max(index + delta, modes.startIndex), modes.index(before: modes.endIndex))
+        guard newIndex != index else { return }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) {
+            mode = modes[newIndex]
+        }
+        Haptics.shared.play(.selection)
+    }
 
     @ViewBuilder
     private var content: some View {
