@@ -62,6 +62,23 @@ enum SubscriptionProductID {
             return .free
         }
     }
+
+    static func activeTier(
+        for productId: String,
+        expiration: Date?,
+        revocationDate: Date?,
+        now: Date = Date()
+    ) -> SubscriptionTier {
+        guard revocationDate == nil else {
+            return .free
+        }
+
+        if let expiration, expiration < now {
+            return .free
+        }
+
+        return tier(for: productId)
+    }
     
     static func isYearly(_ productId: String) -> Bool {
         productId.contains("yearly")

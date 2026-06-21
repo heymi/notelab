@@ -110,12 +110,15 @@ final class SubscriptionManager: ObservableObject {
         }
         
         logger.info("Transaction update: \(transaction.productID)")
-        
+
+        let applied = applyEntitlement(from: transaction)
+
         // 完成交易
         await transaction.finish()
-        
-        // 刷新权益状态
-        await refreshEntitlementState()
+
+        if !applied {
+            await refreshEntitlementState()
+        }
         
         // 发送通知
         NotificationCenter.default.post(name: .subscriptionStatusChanged, object: nil)
@@ -174,19 +177,12 @@ final class SubscriptionManager: ObservableObject {
                 continue
             }
 
-            // 检查是否已撤销
-            if transaction.revocationDate != nil {
-                continue
-            }
-
-            // 检查是否已过期
-            if let expirationDate = transaction.expirationDate,
-               expirationDate < Date() {
-                continue
-            }
-
             // 根据产品 ID 确定等级
-            let tier = SubscriptionProductID.tier(for: transaction.productID)
+            let tier = SubscriptionProductID.activeTier(
+                for: transaction.productID,
+                expiration: transaction.expirationDate,
+                revocationDate: transaction.revocationDate
+            )
             if tier > highestTier {
                 highestTier = tier
                 latestExpiration = transaction.expirationDate
@@ -213,6 +209,29 @@ final class SubscriptionManager: ObservableObject {
         
         logger.info("Entitlement refreshed: tier=\(highestTier.displayName), expires=\(latestExpiration?.description ?? "nil")")
     }
+
+    @discardableResult
+    private func applyEntitlement(from transaction: Transaction) -> Bool {
+        let tier = SubscriptionProductID.activeTier(
+            for: transaction.productID,
+            expiration: transaction.expirationDate,
+            revocationDate: transaction.revocationDate
+        )
+
+        guard tier > .free else {
+            return false
+        }
+
+        if tier >= currentTier {
+            currentTier = tier
+            expirationDate = transaction.expirationDate
+            currentProductId = transaction.productID
+            entitlementCache.cacheTier(tier, expiration: transaction.expirationDate)
+        }
+
+        logger.info("Entitlement applied from verified transaction: tier=\(tier.displayName), product=\(transaction.productID)")
+        return true
+    }
     
     // MARK: - Purchase
     
@@ -234,12 +253,15 @@ final class SubscriptionManager: ObservableObject {
                 }
                 
                 logger.info("Purchase successful: \(product.id)")
+
+                let applied = applyEntitlement(from: transaction)
                 
                 // 完成交易
                 await transaction.finish()
-                
-                // 刷新权益状态
-                await refreshEntitlementState()
+
+                if !applied {
+                    await refreshEntitlementState()
+                }
                 
                 // 发送通知
                 NotificationCenter.default.post(name: .subscriptionStatusChanged, object: nil)
@@ -282,6 +304,7 @@ final class SubscriptionManager: ObservableObject {
         do {
             try await AppStore.sync()
             await refreshEntitlementState()
+            NotificationCenter.default.post(name: .subscriptionStatusChanged, object: nil)
             logger.info("Purchases restored successfully")
         } catch {
             logger.error("Failed to sync with App Store: \(error.localizedDescription)")

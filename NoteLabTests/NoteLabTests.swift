@@ -209,6 +209,37 @@ struct NoteLabTests {
         ))
     }
 
+    @Test func subscriptionProductActiveTierRequiresLiveTransaction() async throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let future = Date(timeIntervalSince1970: 2_000)
+        let past = Date(timeIntervalSince1970: 500)
+
+        #expect(SubscriptionProductID.activeTier(
+            for: SubscriptionProductID.proYearly,
+            expiration: future,
+            revocationDate: nil,
+            now: now
+        ) == .pro)
+        #expect(SubscriptionProductID.activeTier(
+            for: SubscriptionProductID.standardMonthly,
+            expiration: nil,
+            revocationDate: nil,
+            now: now
+        ) == .standard)
+        #expect(SubscriptionProductID.activeTier(
+            for: SubscriptionProductID.proMonthly,
+            expiration: past,
+            revocationDate: nil,
+            now: now
+        ) == .free)
+        #expect(SubscriptionProductID.activeTier(
+            for: SubscriptionProductID.standardYearly,
+            expiration: future,
+            revocationDate: now,
+            now: now
+        ) == .free)
+    }
+
     @Test func noteTitleDeriverSkipsGeneratedStructureHeadings() async throws {
         let markdown = """
         ## 摘要
