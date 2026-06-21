@@ -31,6 +31,9 @@ final class SubscriptionManager: ObservableObject {
     
     /// 购买错误信息
     @Published var purchaseError: String?
+
+    /// 产品加载错误信息
+    @Published private(set) var productLoadError: String?
     
     /// 订阅过期时间
     @Published private(set) var expirationDate: Date?
@@ -49,9 +52,6 @@ final class SubscriptionManager: ObservableObject {
     private var updateListenerTask: Task<Void, Never>?
 
     #if DEBUG
-    /// Temporary full-access switch for local device evaluation.
-    /// Keep this DEBUG-only so Release/TestFlight still relies on StoreKit.
-    private static let debugUnlockAllFeatures = true
     private var debugTierOverride: SubscriptionTier?
     #endif
     
@@ -79,12 +79,6 @@ final class SubscriptionManager: ObservableObject {
         self.currentTier = entitlementCache.cachedTier
         self.expirationDate = entitlementCache.cachedExpiration
 
-        #if DEBUG
-        if Self.debugUnlockAllFeatures {
-            applyDebugTierOverride(.pro)
-        }
-        #endif
-        
         // 启动交易监听
         updateListenerTask = listenForTransactionUpdates()
         
@@ -135,6 +129,7 @@ final class SubscriptionManager: ObservableObject {
         defer { isLoading = false }
         
         do {
+            productLoadError = nil
             let storeProducts = try await Product.products(for: SubscriptionProductID.allProductIds)
             
             // 按价格排序（年度在前）
@@ -154,8 +149,13 @@ final class SubscriptionManager: ObservableObject {
                 return p1.price > p2.price
             }
             
+            if products.isEmpty {
+                productLoadError = "未加载到订阅产品。请确认 App Store Connect 产品 ID，或使用 NoteLab Local StoreKit scheme 进行本地沙盒测试。"
+            }
+
             logger.info("Loaded \(storeProducts.count) products")
         } catch {
+            productLoadError = error.localizedDescription
             logger.error("Failed to load products: \(error.localizedDescription)")
         }
     }
@@ -164,14 +164,6 @@ final class SubscriptionManager: ObservableObject {
     
     /// 刷新权益状态
     func refreshEntitlementState() async {
-        #if DEBUG
-        if Self.debugUnlockAllFeatures {
-            applyDebugTierOverride(.pro)
-            logger.info("Entitlement refresh skipped — debug full-access mode active")
-            return
-        }
-        #endif
-
         var highestTier: SubscriptionTier = .free
         var latestExpiration: Date?
         var activeProductId: String?
@@ -286,9 +278,6 @@ final class SubscriptionManager: ObservableObject {
         
         logger.info("Restoring purchases...")
         
-        // StoreKit 2 会自动同步，只需刷新权益
-        await refreshEntitlementState()
-        
         // 同步所有未完成的交易
         do {
             try await AppStore.sync()
@@ -304,33 +293,21 @@ final class SubscriptionManager: ObservableObject {
     
     /// 检查是否可以使用 AI 功能
     func canUseAIFeature(_ feature: AIFeature) -> Bool {
-        #if DEBUG
-        if Self.debugUnlockAllFeatures { return true }
-        #endif
         return usageTracker.canUse(feature, tier: currentTier)
     }
     
     /// 记录 AI 功能使用
     func recordAIUsage(_ feature: AIFeature) {
-        #if DEBUG
-        if Self.debugUnlockAllFeatures { return }
-        #endif
         usageTracker.recordUsage(feature)
     }
     
     /// 检查是否可以创建笔记本
     func canCreateNotebook(currentCount: Int) -> Bool {
-        #if DEBUG
-        if Self.debugUnlockAllFeatures { return true }
-        #endif
         return currentCount < featureFlags.maxNotebooks
     }
     
     /// 检查是否可以使用云同步
     func canUseSync() -> Bool {
-        #if DEBUG
-        if Self.debugUnlockAllFeatures { return true }
-        #endif
         return featureFlags.canSync
     }
     

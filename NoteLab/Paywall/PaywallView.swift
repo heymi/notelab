@@ -75,6 +75,11 @@ struct PaywallView: View {
         .onChange(of: subscriptionManager.purchaseError) { _, newValue in
             showError = newValue != nil
         }
+        .task {
+            if subscriptionManager.products.isEmpty {
+                await subscriptionManager.loadProducts()
+            }
+        }
     }
     
     // MARK: - Header Section
@@ -212,7 +217,7 @@ struct PaywallView: View {
             .pickerStyle(.segmented)
             
             // Price display
-            if let product = subscriptionManager.product(tier: selectedTier, yearly: isYearly) {
+            if let product = selectedProduct {
                 VStack(spacing: 8) {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
                         Text(product.displayPrice)
@@ -240,7 +245,14 @@ struct PaywallView: View {
                             .font(.system(size: 14, weight: .medium))
                             .foregroundStyle(.green)
                     }
+
+                    Text(subscriptionTermsText(for: product))
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.secondaryInk)
+                        .multilineTextAlignment(.center)
                 }
+            } else {
+                productUnavailableView
             }
         }
     }
@@ -258,7 +270,7 @@ struct PaywallView: View {
                     ProgressView()
                         .progressViewStyle(CircularProgressViewStyle(tint: .white))
                 } else {
-                    Text(subscriptionManager.isPremium ? "已订阅" : "立即订阅")
+                    Text(purchaseButtonTitle)
                         .font(.system(size: 18, weight: .bold, design: .rounded))
                 }
             }
@@ -277,7 +289,7 @@ struct PaywallView: View {
             .clipShape(RoundedRectangle(cornerRadius: 16))
             .shadow(color: Color(hex: "FFD700").opacity(0.3), radius: 8, y: 4)
         }
-        .disabled(isPurchasing || subscriptionManager.isLoading || subscriptionManager.isPremium)
+        .disabled(isPurchasing || subscriptionManager.isLoading || subscriptionManager.isPremium || selectedProduct == nil)
     }
     
     // MARK: - Footer Section
@@ -295,9 +307,10 @@ struct PaywallView: View {
             }
             
             VStack(spacing: 8) {
-                Text("订阅将自动续订，可随时在设置中取消")
+                Text("确认购买后将向 Apple ID 扣款。订阅会自动续订，除非在当前周期结束前至少 24 小时关闭自动续订。续订将在周期结束前 24 小时内扣款。")
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.secondaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
                 
                 HStack(spacing: 16) {
                     Link("隐私政策", destination: URL(string: "https://notelab.app/privacy")!)
@@ -314,7 +327,8 @@ struct PaywallView: View {
     // MARK: - Actions
     
     private func purchase() async {
-        guard let product = subscriptionManager.product(tier: selectedTier, yearly: isYearly) else {
+        guard let product = selectedProduct else {
+            subscriptionManager.purchaseError = SubscriptionError.productNotFound.localizedDescription
             return
         }
         
@@ -332,11 +346,60 @@ struct PaywallView: View {
     }
     
     // MARK: - Helpers
+
+    private var selectedProduct: Product? {
+        subscriptionManager.product(tier: selectedTier, yearly: isYearly)
+    }
+
+    private var purchaseButtonTitle: String {
+        if subscriptionManager.isPremium { return "已订阅" }
+        if selectedProduct == nil { return "订阅产品不可用" }
+        return "立即订阅"
+    }
+
+    private var productUnavailableView: some View {
+        VStack(spacing: 10) {
+            Text(subscriptionManager.productLoadError ?? "正在加载订阅产品")
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.secondaryInk)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button("重新加载") {
+                Task {
+                    await subscriptionManager.loadProducts()
+                }
+            }
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(Theme.ink)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(14)
+        .background(Theme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func subscriptionTermsText(for product: Product) -> String {
+        let period = isYearly ? "每年" : "每月"
+        return "\(product.displayName)：\(product.displayPrice) \(period)，自动续订。"
+    }
     
     private func introOfferText(_ offer: Product.SubscriptionOffer) -> String {
         switch offer.paymentMode {
         case .freeTrial:
-            let days = offer.period.value * (offer.period.unit == .day ? 1 : 7)
+            let days: Int
+            switch offer.period.unit {
+            case .day:
+                days = offer.period.value
+            case .week:
+                days = offer.period.value * 7
+            case .month:
+                days = offer.period.value * 30
+            case .year:
+                days = offer.period.value * 365
+            @unknown default:
+                days = offer.period.value
+            }
             return "首次订阅免费试用 \(days) 天"
         case .payUpFront:
             return "首期优惠 \(offer.displayPrice)"
