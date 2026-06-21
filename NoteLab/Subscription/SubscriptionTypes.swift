@@ -178,7 +178,7 @@ struct FeatureFlags {
     
     /// 是否可以使用云同步
     var canSync: Bool {
-        tier >= .standard
+        true
     }
     
     /// 附件云存储限制 (bytes)
