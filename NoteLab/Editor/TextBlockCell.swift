@@ -13,6 +13,77 @@ protocol TextBlockCellDelegate: AnyObject {
     func textBlockCellDidRequestCommand(_ cell: TextBlockCell, command: EditorCommand)
 }
 
+private extension NSAttributedString.Key {
+    static let noteMarkerHighlightColor = NSAttributedString.Key("noteMarkerHighlightColor")
+}
+
+private final class MarkerHighlightLayoutManager: NSLayoutManager {
+    override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: CGPoint) {
+        super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
+
+        guard let textStorage else { return }
+        let characterRange = self.characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
+        textStorage.enumerateAttribute(.noteMarkerHighlightColor, in: characterRange) { value, range, _ in
+            guard let color = value as? UIColor else { return }
+            let glyphRange = self.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            let visibleRange = NSIntersectionRange(glyphRange, glyphsToShow)
+            guard visibleRange.length > 0 else { return }
+
+            self.enumerateLineFragments(forGlyphRange: visibleRange) { _, _, textContainer, lineGlyphRange, _ in
+                let lineRange = NSIntersectionRange(lineGlyphRange, visibleRange)
+                guard lineRange.length > 0 else { return }
+
+                var rect = self.boundingRect(forGlyphRange: lineRange, in: textContainer)
+                guard rect.width > 0, rect.height > 0 else { return }
+
+                rect.origin.x += origin.x - 6
+                rect.origin.y += origin.y + rect.height * 0.26
+                rect.size.width += 12
+                rect.size.height = max(10, rect.height * 0.66)
+
+                self.fillMarkerStroke(rect, color: color, alphaScale: 1.0)
+                self.fillMarkerStroke(rect.offsetBy(dx: 2.0, dy: -1.8), color: color, alphaScale: 0.66)
+            }
+        }
+    }
+
+    private func fillMarkerStroke(_ rect: CGRect, color: UIColor, alphaScale: CGFloat) {
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        let fillColor = color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+            ? UIColor(red: red, green: green, blue: blue, alpha: alpha * alphaScale)
+            : color.withAlphaComponent(0.28 * alphaScale)
+        fillColor.setFill()
+        markerPath(in: rect).fill()
+    }
+
+    private func markerPath(in rect: CGRect) -> UIBezierPath {
+        let path = UIBezierPath()
+        let left = rect.minX - jitter(rect, index: 1, amount: 2.5)
+        let right = rect.maxX + jitter(rect, index: 2, amount: 3)
+        let midX = rect.midX + jitter(rect, index: 3, amount: 5)
+        let top = rect.minY + jitter(rect, index: 4, amount: 1.4)
+        let bottom = rect.maxY + jitter(rect, index: 5, amount: 1.6)
+        let slant = jitter(rect, index: 6, amount: 2.4)
+
+        path.move(to: CGPoint(x: left, y: top + slant))
+        path.addLine(to: CGPoint(x: midX, y: top + jitter(rect, index: 7, amount: 1.1)))
+        path.addLine(to: CGPoint(x: right, y: top - slant * 0.35))
+        path.addLine(to: CGPoint(x: right + jitter(rect, index: 8, amount: 2), y: bottom - slant))
+        path.addLine(to: CGPoint(x: midX + jitter(rect, index: 9, amount: 4), y: bottom + jitter(rect, index: 10, amount: 1.2)))
+        path.addLine(to: CGPoint(x: left + jitter(rect, index: 11, amount: 2), y: bottom + slant * 0.25))
+        path.close()
+        return path
+    }
+
+    private func jitter(_ rect: CGRect, index: Int, amount: CGFloat) -> CGFloat {
+        let seed = Double(rect.minX * 0.17 + rect.minY * 0.31 + CGFloat(index) * 12.9898)
+        return CGFloat(sin(seed) * 0.5 + cos(seed * 1.7) * 0.5) * amount
+    }
+}
+
 final class TextBlockCell: UITableViewCell, UITextViewDelegate {
     static let reuseIdentifier = "TextBlockCell"
 
@@ -20,7 +91,14 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
 
     private let prefixLabel = UILabel()
     private let checkboxButton = UIButton(type: .system)
-    private let textView = UITextView()
+    private let textView: UITextView = {
+        let storage = NSTextStorage()
+        let layoutManager = MarkerHighlightLayoutManager()
+        let textContainer = NSTextContainer(size: .zero)
+        storage.addLayoutManager(layoutManager)
+        layoutManager.addTextContainer(textContainer)
+        return UITextView(frame: .zero, textContainer: textContainer)
+    }()
     private let hStack = UIStackView()
     private let quoteBorderView = UIView()
     private let multiSelectBackgroundView = UIView()
@@ -499,6 +577,8 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         attrString.addAttribute(.foregroundColor, value: todoChecked ? UIColor.secondaryLabel : UIColor.noteEditorBody, range: NSMakeRange(0, attrString.length))
         if kind == .todo && todoChecked {
             attrString.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: NSMakeRange(0, attrString.length))
+        } else if kind != .code {
+            applyHighlightPattern(to: attrString, in: NSRange(location: 0, length: attrString.length))
         }
         setAttributedTextAnimated(attrString, animated: animated)
     }
@@ -545,12 +625,12 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         let matches = regex.matches(in: text as String, options: [], range: range)
         
         let highlightColors: [String: UIColor] = [
-            "yellow": UIColor(red: 1.0, green: 0.91, blue: 0.36, alpha: 0.42),
-            "green": UIColor(red: 0.62, green: 0.88, blue: 0.68, alpha: 0.34),
-            "blue": UIColor(red: 0.62, green: 0.80, blue: 0.95, alpha: 0.32),
-            "pink": UIColor(red: 1.0, green: 0.74, blue: 0.84, alpha: 0.32),
-            "orange": UIColor(red: 1.0, green: 0.78, blue: 0.46, alpha: 0.34),
-            "purple": UIColor(red: 0.78, green: 0.70, blue: 0.94, alpha: 0.32)
+            "yellow": UIColor(red: 1.0, green: 0.88, blue: 0.18, alpha: 0.62),
+            "green": UIColor(red: 0.48, green: 0.88, blue: 0.50, alpha: 0.48),
+            "blue": UIColor(red: 0.45, green: 0.75, blue: 1.0, alpha: 0.46),
+            "pink": UIColor(red: 1.0, green: 0.58, blue: 0.76, alpha: 0.46),
+            "orange": UIColor(red: 1.0, green: 0.65, blue: 0.26, alpha: 0.50),
+            "purple": UIColor(red: 0.68, green: 0.56, blue: 0.96, alpha: 0.46)
         ]
         
         let markerHiddenFont = UIFont.systemFont(ofSize: 0.1)
@@ -564,8 +644,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
             let colorKey = text.substring(with: colorKeyRange)
             let bgColor = highlightColors[colorKey] ?? highlightColors["yellow"]!
             
-            // Apply background color to content
-            attrString.addAttribute(.backgroundColor, value: bgColor, range: contentRange)
+            attrString.addAttribute(.noteMarkerHighlightColor, value: bgColor, range: contentRange)
             
             // Hide the ==color: prefix and == suffix
             let prefixLength = colorKey.count + 3  // == + color + :

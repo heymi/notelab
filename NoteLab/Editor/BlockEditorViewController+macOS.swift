@@ -26,6 +26,9 @@ final class BlockEditorViewControllerMac: NSViewController {
     // Header
     private var headerHostingView: NSHostingView<NoteEditorHeaderView>?
     private var titleFocusBridge: TitleFocusBridge?
+    private var currentTitle: String = ""
+    private var currentAISummary: String = ""
+    private var presentationMode: NoteDetailPresentationMode = .reading
     
     init(document: NoteDocument) {
         self.document = document
@@ -39,6 +42,7 @@ final class BlockEditorViewControllerMac: NSViewController {
     override func loadView() {
         let containerView = NSView()
         containerView.wantsLayer = true
+        containerView.layer?.backgroundColor = NSColor.clear.cgColor
         self.view = containerView
     }
     
@@ -69,38 +73,48 @@ final class BlockEditorViewControllerMac: NSViewController {
     private func setupStackView() {
         stackView.translatesAutoresizingMaskIntoConstraints = false
         stackView.orientation = .vertical
-        stackView.alignment = .leading
+        stackView.alignment = .width
         stackView.spacing = 0
         stackView.distribution = .fill
         
         // Create a flipped document view to have correct top-to-bottom layout
         let documentView = FlippedView()
-        documentView.translatesAutoresizingMaskIntoConstraints = false
+        documentView.translatesAutoresizingMaskIntoConstraints = true
         documentView.addSubview(stackView)
         
         NSLayoutConstraint.activate([
-            stackView.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 16),
-            stackView.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
-            stackView.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
-            stackView.bottomAnchor.constraint(lessThanOrEqualTo: documentView.bottomAnchor, constant: -16)
+            stackView.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 72),
+            stackView.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: 40),
+            stackView.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -40),
+            stackView.bottomAnchor.constraint(lessThanOrEqualTo: documentView.bottomAnchor, constant: -120)
         ])
         
         scrollView.documentView = documentView
-        
-        // Bind document view width to scroll view
-        if let documentView = scrollView.documentView {
-            documentView.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                documentView.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
-                documentView.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
-                documentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor)
-            ])
-        }
+        syncDocumentViewWidth()
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        syncDocumentViewWidth()
+    }
+
+    private func syncDocumentViewWidth() {
+        guard let documentView = scrollView.documentView else { return }
+        let width = scrollView.contentView.bounds.width
+        let height = max(documentView.fittingSize.height, scrollView.contentView.bounds.height)
+        guard width > 0 else { return }
+        let nextSize = NSSize(width: width, height: height)
+        guard abs(documentView.frame.width - nextSize.width) > 0.5 ||
+                abs(documentView.frame.height - nextSize.height) > 0.5 else { return }
+        documentView.setFrameSize(nextSize)
+        documentView.needsLayout = true
     }
     
-    func updateHeader(title: Binding<String>, metadata: NoteEditorHeaderMetadata, linkBlocks: [LinkedNoteBlock], isWhiteboard: Bool, focusBridge: TitleFocusBridge, onOpenNote: @escaping (UUID) -> Void) {
+    func updateHeader(title: Binding<String>, metadata: NoteEditorHeaderMetadata, linkBlocks: [LinkedNoteBlock], presentationMode: NoteDetailPresentationMode, isWhiteboard: Bool, focusBridge: TitleFocusBridge, onOpenNote: @escaping (UUID) -> Void) {
         titleFocusBridge = focusBridge
-        let headerView = NoteEditorHeaderView(title: title, focusBridge: focusBridge, metadata: metadata, linkBlocks: linkBlocks, isWhiteboard: isWhiteboard, onOpenNote: onOpenNote)
+        currentTitle = title.wrappedValue
+        currentAISummary = metadata.preview?.style == .excerpt ? (metadata.preview?.items.first ?? "") : ""
+        let headerView = NoteEditorHeaderView(title: title, focusBridge: focusBridge, metadata: metadata, linkBlocks: linkBlocks, presentationMode: presentationMode, isWhiteboard: isWhiteboard, onOpenNote: onOpenNote)
         
         if let existing = headerHostingView {
             existing.rootView = headerView
@@ -115,6 +129,29 @@ final class BlockEditorViewControllerMac: NSViewController {
                 hostingView.trailingAnchor.constraint(equalTo: stackView.trailingAnchor, constant: -16)
             ])
         }
+    }
+
+    func updatePresentationMode(_ mode: NoteDetailPresentationMode) {
+        guard presentationMode != mode else { return }
+        presentationMode = mode
+        if !mode.isEditing {
+            view.window?.makeFirstResponder(nil)
+        }
+        rebuildBlocks()
+    }
+
+    func focusPreferredTextBlock() {
+        let targetId = activeBlockId.flatMap { id -> UUID? in
+            guard let block = document.blocks.first(where: { $0.id == id }),
+                  block.kind != .table,
+                  block.kind != .attachment else { return nil }
+            return id
+        } ?? firstEditableTextBlockId()
+
+        guard let targetId, let cell = blockViews[targetId] as? TextBlockCellViewMac else { return }
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: max(0, cell.frame.minY - 80)))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        cell.beginEditing(atEnd: true)
     }
     
     func updateDocument(_ newDocument: NoteDocument) {
@@ -206,8 +243,11 @@ final class BlockEditorViewControllerMac: NSViewController {
         }
         blockViews.removeAll()
         
-        // Create new block views
         for (index, block) in document.blocks.enumerated() {
+            if isHiddenReadingBlock(at: index) {
+                continue
+            }
+
             let blockView: BlockCellViewMac
             
             switch block.kind {
@@ -225,10 +265,13 @@ final class BlockEditorViewControllerMac: NSViewController {
                 let textCell = TextBlockCellViewMac()
                 textCell.delegate = self
                 let numberIndex = numberIndexForBlock(at: index)
-                textCell.configure(with: block, numberIndex: numberIndex)
+                textCell.configure(with: block, numberIndex: numberIndex, presentationMode: presentationMode)
+                textCell.setContentInteraction(editable: presentationMode.isEditing, selectable: true)
                 blockView = textCell
             }
             
+            blockView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            blockView.setContentCompressionResistancePriority(.required, for: .horizontal)
             blockView.setSentHighlight(sentHighlightBlockIds.contains(block.id))
             blockViews[block.id] = blockView
             stackView.addArrangedSubview(blockView)
@@ -241,6 +284,59 @@ final class BlockEditorViewControllerMac: NSViewController {
         }
         
         view.needsLayout = true
+    }
+
+    private func firstEditableTextBlockId() -> UUID? {
+        for (index, block) in document.blocks.enumerated() {
+            guard !isHiddenReadingBlock(at: index),
+                  block.kind != .table,
+                  block.kind != .attachment else { continue }
+            return block.id
+        }
+        return nil
+    }
+
+    private func isHiddenReadingBlock(at index: Int) -> Bool {
+        isDuplicateTitleBlock(at: index) || isDuplicateAISummaryBlock(at: index)
+    }
+
+    private func isDuplicateTitleBlock(at index: Int) -> Bool {
+        guard presentationMode == .reading else { return false }
+        guard index == 0, index < document.blocks.count else { return false }
+        let block = document.blocks[index]
+        guard block.kind != .attachment, block.kind != .table else { return false }
+        let title = currentTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let blockTitle = NoteTitleDeriver.cleanedTitleLine(block.text)
+        return !title.isEmpty && title == blockTitle
+    }
+
+    private func isDuplicateAISummaryBlock(at index: Int) -> Bool {
+        guard presentationMode == .reading, index < document.blocks.count else { return false }
+        let summary = currentAISummary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !summary.isEmpty else { return false }
+        let block = document.blocks[index]
+        guard block.kind != .attachment, block.kind != .table else { return false }
+        let blockTitle = NoteTitleDeriver.cleanedTitleLine(block.text)
+        if block.kind == .heading && blockTitle == "摘要" {
+            return index <= 1 && nextTextBlockMatchesSummary(after: index, summary: summary)
+        }
+        return index <= 2 &&
+            previousTextBlockIsSummaryHeading(before: index) &&
+            block.text.trimmingCharacters(in: .whitespacesAndNewlines) == summary
+    }
+
+    private func nextTextBlockMatchesSummary(after index: Int, summary: String) -> Bool {
+        guard index + 1 < document.blocks.count else { return false }
+        let next = document.blocks[index + 1]
+        guard next.kind != .attachment, next.kind != .table else { return false }
+        return next.text.trimmingCharacters(in: .whitespacesAndNewlines) == summary
+    }
+
+    private func previousTextBlockIsSummaryHeading(before index: Int) -> Bool {
+        guard index > 0 else { return false }
+        let previous = document.blocks[index - 1]
+        guard previous.kind == .heading else { return false }
+        return NoteTitleDeriver.cleanedTitleLine(previous.text) == "摘要"
     }
     
     private func numberIndexForBlock(at index: Int) -> Int {
