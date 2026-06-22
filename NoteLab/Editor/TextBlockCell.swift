@@ -1373,24 +1373,55 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
 
         card.addArrangedSubview(header)
         if let snapshot = TweetPreviewLoader.cachedSnapshot(for: url) {
+            let mediaView = UIView()
+            mediaView.translatesAutoresizingMaskIntoConstraints = false
+            mediaView.clipsToBounds = true
+            mediaView.layer.cornerRadius = 10
+
             let imageView = UIImageView(image: snapshot)
             imageView.translatesAutoresizingMaskIntoConstraints = false
             imageView.contentMode = .scaleAspectFill
             imageView.clipsToBounds = true
-            imageView.layer.cornerRadius = 10
-            card.addArrangedSubview(imageView)
-            imageView.heightAnchor.constraint(equalToConstant: 360).isActive = true
+            mediaView.addSubview(imageView)
+
+            let openMediaButton = UIButton(type: .system)
+            openMediaButton.translatesAutoresizingMaskIntoConstraints = false
+            openMediaButton.setImage(UIImage(systemName: "play.circle.fill"), for: .normal)
+            openMediaButton.tintColor = UIColor.white.withAlphaComponent(0.92)
+            openMediaButton.backgroundColor = UIColor.black.withAlphaComponent(0.18)
+            openMediaButton.addAction(UIAction { [weak self, weak mediaView] _ in
+                guard let self, let mediaView, let html = payload?.html else {
+                    UIApplication.shared.open(url)
+                    return
+                }
+                mediaView.subviews.forEach { $0.removeFromSuperview() }
+                let webView = self.makeTweetWebView(html: html, url: url, cachesSnapshot: false)
+                mediaView.addSubview(webView)
+                NSLayoutConstraint.activate([
+                    webView.topAnchor.constraint(equalTo: mediaView.topAnchor),
+                    webView.bottomAnchor.constraint(equalTo: mediaView.bottomAnchor),
+                    webView.leadingAnchor.constraint(equalTo: mediaView.leadingAnchor),
+                    webView.trailingAnchor.constraint(equalTo: mediaView.trailingAnchor)
+                ])
+            }, for: .touchUpInside)
+            openMediaButton.accessibilityLabel = "打开推文媒体"
+            mediaView.addSubview(openMediaButton)
+
+            card.addArrangedSubview(mediaView)
+            mediaView.heightAnchor.constraint(equalToConstant: 360).isActive = true
+            NSLayoutConstraint.activate([
+                imageView.topAnchor.constraint(equalTo: mediaView.topAnchor),
+                imageView.bottomAnchor.constraint(equalTo: mediaView.bottomAnchor),
+                imageView.leadingAnchor.constraint(equalTo: mediaView.leadingAnchor),
+                imageView.trailingAnchor.constraint(equalTo: mediaView.trailingAnchor),
+                openMediaButton.topAnchor.constraint(equalTo: mediaView.topAnchor),
+                openMediaButton.bottomAnchor.constraint(equalTo: mediaView.bottomAnchor),
+                openMediaButton.leadingAnchor.constraint(equalTo: mediaView.leadingAnchor),
+                openMediaButton.trailingAnchor.constraint(equalTo: mediaView.trailingAnchor)
+            ])
         } else if let html = payload?.html {
             let loadingView = makeTweetLoadingView()
-            let webView = WKWebView(frame: .zero)
-            webView.translatesAutoresizingMaskIntoConstraints = false
-            webView.navigationDelegate = self
-            webView.isOpaque = false
-            webView.backgroundColor = .clear
-            webView.scrollView.backgroundColor = .clear
-            webView.scrollView.isScrollEnabled = false
-            tweetPreviewWebViews[ObjectIdentifier(webView)] = url
-            webView.loadHTMLString(wrappedTweetHTML(html), baseURL: URL(string: "https://x.com"))
+            let webView = makeTweetWebView(html: html, url: url, cachesSnapshot: true)
             loadingView.insertSubview(webView, at: 0)
             NSLayoutConstraint.activate([
                 webView.topAnchor.constraint(equalTo: loadingView.topAnchor),
@@ -1407,6 +1438,25 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
         }
 
         return card
+    }
+
+    private func makeTweetWebView(html: String, url: URL, cachesSnapshot: Bool) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.allowsInlineMediaPlayback = true
+        config.mediaTypesRequiringUserActionForPlayback = []
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        webView.navigationDelegate = self
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.backgroundColor = .clear
+        webView.scrollView.isScrollEnabled = false
+        if cachesSnapshot {
+            tweetPreviewWebViews[ObjectIdentifier(webView)] = url
+        }
+        webView.loadHTMLString(wrappedTweetHTML(html), baseURL: URL(string: "https://x.com"))
+        return webView
     }
 
     private func makePreviewHeader(title: String, url: URL) -> UIView {
