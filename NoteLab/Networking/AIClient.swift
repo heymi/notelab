@@ -78,7 +78,8 @@ final class AIClient: ObservableObject {
     }
 
     func noteInsight(text: String, title: String, notebookContext: String? = nil, protectedAttachmentTokens: [String] = []) async throws -> (formattedMarkdown: String, report: AINoteInsightReport?, tasks: [AITaskSuggestion]) {
-        let prompt = buildNoteInsightPrompt(text: text, title: title, notebookContext: notebookContext, protectedAttachmentTokens: protectedAttachmentTokens)
+        let linkPreviewContext = await LinkPreviewAIContext.block(for: text)
+        let prompt = buildNoteInsightPrompt(text: text, title: title, notebookContext: notebookContext, protectedAttachmentTokens: protectedAttachmentTokens, linkPreviewContext: linkPreviewContext)
         let response = try await sendPrompt(prompt, feature: .organize)
         let parsed = try decodeNoteInsight(from: response)
         if parsed.report != nil {
@@ -142,12 +143,14 @@ final class AIClient: ObservableObject {
         mode: AIRewriteMode,
         protectedAttachmentTokens: [String] = []
     ) async throws -> (title: String?, markdown: String) {
+        let linkPreviewContext = await LinkPreviewAIContext.block(for: text)
         let prompt = buildRewritePrompt(
             text: text,
             title: title,
             notebookContext: notebookContext,
             mode: mode,
-            protectedAttachmentTokens: protectedAttachmentTokens
+            protectedAttachmentTokens: protectedAttachmentTokens,
+            linkPreviewContext: linkPreviewContext
         )
         let response = try await sendPrompt(prompt, feature: .rewrite)
         let cleaned = cleanJSONResponse(response)
@@ -521,7 +524,7 @@ private func buildConnectionPrompt(digests: [NoteDigest], limit: Int) -> String 
     return lines.joined(separator: "\n")
 }
 
-private func buildNoteInsightPrompt(text: String, title: String, notebookContext: String? = nil, protectedAttachmentTokens: [String] = []) -> String {
+private func buildNoteInsightPrompt(text: String, title: String, notebookContext: String? = nil, protectedAttachmentTokens: [String] = [], linkPreviewContext: String? = nil) -> String {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     let charCount = trimmed.count
     let isVeryShort = charCount < 40
@@ -604,6 +607,11 @@ private func buildNoteInsightPrompt(text: String, title: String, notebookContext
     lines.append("原文字数：\(charCount)")
     lines.append("原文如下：")
     lines.append(trimmed.isEmpty ? "<empty>" : trimmed)
+    if let linkPreviewContext, !linkPreviewContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        lines.append("")
+        lines.append("链接预览上下文（只用于理解链接指向的内容，不要原样写入 formattedMarkdown）：")
+        lines.append(linkPreviewContext)
+    }
 
     return lines.joined(separator: "\n")
 }
@@ -639,7 +647,8 @@ private func buildRewritePrompt(
     title: String,
     notebookContext: String? = nil,
     mode: AIRewriteMode,
-    protectedAttachmentTokens: [String] = []
+    protectedAttachmentTokens: [String] = [],
+    linkPreviewContext: String? = nil
 ) -> String {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     let charCount = trimmed.count
@@ -746,6 +755,11 @@ private func buildRewritePrompt(
     lines.append("【原文标题】\(title)")
     lines.append("【原文内容】")
     lines.append(trimmed.isEmpty ? "<empty>" : trimmed)
+    if let linkPreviewContext, !linkPreviewContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        lines.append("")
+        lines.append("【链接预览上下文】只用于理解链接指向的内容，不要原样写入 markdown。")
+        lines.append(linkPreviewContext)
+    }
     
     return lines.joined(separator: "\n")
 }

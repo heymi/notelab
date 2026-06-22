@@ -373,7 +373,7 @@ final class BlockEditorViewControllerMac: NSViewController {
     private func handleSelectedFile(_ url: URL) {
         guard let data = try? Data(contentsOf: url) else { return }
         let fileName = url.lastPathComponent
-        let type: AttachmentType = url.pathExtension.lowercased() == "pdf" ? .pdf : .image
+        let type = AttachmentType.from(fileName: url.lastPathComponent)
         insertAttachment(data: data, type: type, fileName: fileName)
     }
     

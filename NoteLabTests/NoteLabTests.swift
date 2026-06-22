@@ -96,6 +96,14 @@ struct NoteLabTests {
         #expect(AttachmentStorage.mimeType(for: "recording.wav") == "audio/wav")
     }
 
+    @Test func attachmentTypeDetectsPlayableMediaFiles() async throws {
+        #expect(AttachmentType.from(fileName: "clip.mov") == .video)
+        #expect(AttachmentType.from(fileName: "clip.mp4") == .video)
+        #expect(AttachmentType.from(fileName: "loop.gif") == .image)
+        #expect(AttachmentStorage.mimeType(for: "clip.mp4") == "video/mp4")
+        #expect(AttachmentStorage.attachmentType(from: "video/quicktime") == .video)
+    }
+
     @Test func homeTodoSectionsHideCompletedAndSortByNewestVisibleTodo() async throws {
         let oldNotebookId = UUID()
         let newNotebookId = UUID()

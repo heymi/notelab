@@ -408,7 +408,7 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     }
     
     private func presentDocumentPicker() {
-        let types: [UTType] = [.pdf, .image]
+        let types: [UTType] = [.pdf, .image, .movie, .mpeg4Movie, .quickTimeMovie]
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
         picker.delegate = self
         picker.allowsMultipleSelection = false
@@ -1145,7 +1145,7 @@ extension BlockEditorViewController: UIDocumentPickerDelegate {
         do {
             let data = try Data(contentsOf: url)
             let fileName = url.lastPathComponent
-            let type: AttachmentType = url.pathExtension.lowercased() == "pdf" ? .pdf : .image
+            let type = AttachmentType.from(fileName: fileName)
             insertAttachment(data: data, type: type, fileName: fileName)
         } catch {
             print("Failed to read document data: \(error)")

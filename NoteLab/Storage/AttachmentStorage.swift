@@ -359,8 +359,12 @@ extension AttachmentStorage {
             return "image/heic"
         case "pdf":
             return "application/pdf"
-        case "m4a", "mp4":
+        case "m4a":
             return "audio/mp4"
+        case "mp4", "m4v":
+            return "video/mp4"
+        case "mov":
+            return "video/quicktime"
         case "wav":
             return "audio/wav"
         case "mp3":
@@ -371,12 +375,7 @@ extension AttachmentStorage {
     }
 
     static func attachmentType(from mimeType: String) -> AttachmentType {
-        if mimeType.hasPrefix("image/") {
-            return .image
-        } else if mimeType == "application/pdf" {
-            return .pdf
-        }
-        return .image
+        AttachmentType.from(mimeType: mimeType)
     }
 }
 

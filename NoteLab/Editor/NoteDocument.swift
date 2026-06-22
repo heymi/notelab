@@ -93,7 +93,7 @@ struct NoteDocument: Codable, Equatable {
 
             if let attachment = parseAttachment(trimmedLine) {
                 flushParagraph()
-                let type: AttachmentType = attachment.fileName.lowercased().hasSuffix(".pdf") ? .pdf : .image
+                let type = AttachmentType.from(fileName: attachment.fileName)
                 blocks.append(.attachment(type: type, fileName: attachment.fileName, storagePath: attachment.storagePath, attachmentId: attachment.attachmentId))
                 index += 1
                 continue
@@ -192,6 +192,31 @@ struct AttachmentModel: Codable, Equatable {
 enum AttachmentType: String, Codable {
     case image
     case pdf
+    case video
+
+    nonisolated static func from(fileName: String) -> AttachmentType {
+        switch (fileName as NSString).pathExtension.lowercased() {
+        case "pdf":
+            return .pdf
+        case "mov", "mp4", "m4v":
+            return .video
+        default:
+            return .image
+        }
+    }
+
+    nonisolated static func from(mimeType: String) -> AttachmentType {
+        if mimeType.hasPrefix("image/") {
+            return .image
+        }
+        if mimeType == "application/pdf" {
+            return .pdf
+        }
+        if mimeType.hasPrefix("video/") {
+            return .video
+        }
+        return .image
+    }
 }
 
 struct Block: Codable, Equatable, Identifiable {

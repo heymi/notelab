@@ -387,7 +387,7 @@ final class AttachmentBlockCell: UITableViewCell {
     
     private func displayThumbnail(data: Data, type: AttachmentType) {
         if type == .image {
-            if let image = UIImage(data: data) {
+            if let image = AttachmentImage.image(data: data, fileName: fileName ?? "") {
                 thumbnailImageView.image = image
                 thumbnailImageView.contentMode = .scaleAspectFill
                 
@@ -417,6 +417,11 @@ final class AttachmentBlockCell: UITableViewCell {
                 thumbnailImageView.image = UIImage(systemName: "doc.text.fill")
                 thumbnailImageView.contentMode = .scaleAspectFit
             }
+        } else if type == .video {
+            thumbnailImageView.image = UIImage(systemName: "play.rectangle.fill")
+            thumbnailImageView.contentMode = .scaleAspectFit
+            thumbnailImageView.tintColor = .noteEditorSecondaryInk
+            thumbnailImageView.backgroundColor = .noteEditorPaper
         }
     }
 

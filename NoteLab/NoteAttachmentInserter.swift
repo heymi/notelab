@@ -30,7 +30,7 @@ enum NoteAttachmentInserter {
         }
         let attachmentId = UUID()
         let fileName = url.lastPathComponent
-        let type: AttachmentType = fileName.lowercased().hasSuffix(".pdf") ? .pdf : .image
+        let type = AttachmentType.from(fileName: fileName)
         return NoteAttachmentPayload(data: data, attachmentId: attachmentId, fileName: fileName, type: type)
     }
 

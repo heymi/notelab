@@ -1,6 +1,9 @@
 import Foundation
+import Synchronization
 #if canImport(UIKit)
 import UIKit
+import LinkPresentation
+import WebKit
 
 protocol TextBlockCellDelegate: AnyObject {
     func textBlockCellDidChange(_ cell: TextBlockCell, text: String)
@@ -84,7 +87,241 @@ private final class MarkerHighlightLayoutManager: NSLayoutManager {
     }
 }
 
-final class TextBlockCell: UITableViewCell, UITextViewDelegate {
+private final class PasteAwareTextView: UITextView {
+    var onPasteAttachment: ((Data, AttachmentType, String) -> Void)?
+    var onPasteLoadingChange: ((Bool) -> Void)?
+
+    override func paste(_ sender: Any?) {
+        let pasteboard = UIPasteboard.general
+        if let image = pasteboard.image, let data = image.pngData() {
+            onPasteAttachment?(data, .image, "pasted-\(Int(Date().timeIntervalSince1970)).png")
+            return
+        }
+
+        guard let url = pasteURL(from: pasteboard), Self.isSupportedMediaURL(url) else {
+            super.paste(sender)
+            return
+        }
+
+        if url.isFileURL {
+            guard let data = try? Data(contentsOf: url),
+                  let type = Self.mediaType(fileName: url.lastPathComponent, mimeType: nil) else {
+                super.paste(sender)
+                return
+            }
+            onPasteAttachment?(data, type, url.lastPathComponent)
+            return
+        }
+
+        onPasteLoadingChange?(true)
+        Task { [weak self] in
+            do {
+                let payload = try await Self.downloadMedia(from: url)
+                await MainActor.run {
+                    self?.onPasteLoadingChange?(false)
+                    self?.onPasteAttachment?(payload.data, payload.type, payload.fileName)
+                }
+            } catch {
+                await MainActor.run {
+                    self?.onPasteLoadingChange?(false)
+                    self?.insertText(url.absoluteString)
+                }
+            }
+        }
+    }
+
+    private func pasteURL(from pasteboard: UIPasteboard) -> URL? {
+        if let url = pasteboard.url {
+            return url
+        }
+        guard let raw = pasteboard.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let url = URL(string: raw) else {
+            return nil
+        }
+        return url
+    }
+
+    nonisolated private static func isSupportedMediaURL(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        return ["jpg", "jpeg", "png", "gif", "webp", "heic", "mov", "mp4", "m4v"].contains(ext)
+    }
+
+    nonisolated private static func mediaType(fileName: String, mimeType: String?) -> AttachmentType? {
+        if let mimeType {
+            if mimeType.hasPrefix("image/") {
+                return .image
+            }
+            if mimeType.hasPrefix("video/") {
+                return .video
+            }
+            guard mimeType == "application/octet-stream" else { return nil }
+        }
+        guard isSupportedMediaURL(URL(fileURLWithPath: fileName)) else { return nil }
+        return AttachmentType.from(fileName: fileName)
+    }
+
+    nonisolated private static func fileName(from url: URL, response: URLResponse) -> String {
+        let suggested = response.suggestedFilename ?? ""
+        if !suggested.isEmpty, !URL(fileURLWithPath: suggested).pathExtension.isEmpty {
+            return suggested
+        }
+        let lastPath = url.lastPathComponent
+        return lastPath.isEmpty ? "pasted-\(Int(Date().timeIntervalSince1970))" : lastPath
+    }
+
+    nonisolated private static func downloadMedia(from url: URL) async throws -> (data: Data, type: AttachmentType, fileName: String) {
+        let (data, response) = try await URLSession.shared.data(from: url)
+        let fileName = fileName(from: url, response: response)
+        guard let type = mediaType(fileName: fileName, mimeType: response.mimeType) else {
+            throw URLError(.unsupportedURL)
+        }
+        return (data, type, fileName)
+    }
+}
+
+private enum TweetLinkPreviewDetector {
+    nonisolated static func firstTweetURL(in text: String) -> URL? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"https?://[^\s<>\]\)"']+"#,
+            options: [.caseInsensitive]
+        ) else {
+            return nil
+        }
+        let nsText = text as NSString
+        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+        for match in matches {
+            let rawURL = nsText.substring(with: match.range)
+                .trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?)]}\"'"))
+            guard let url = URL(string: rawURL), isTweetURL(url) else { continue }
+            return url
+        }
+        return nil
+    }
+
+    nonisolated private static func isTweetURL(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        switch host {
+        case "x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com":
+            break
+        default:
+            return false
+        }
+        let components = url.pathComponents.map { $0.lowercased() }
+        return components.contains("status") || components.contains("statuses")
+    }
+}
+
+private struct TweetPreviewPayload: Decodable {
+    let url: String?
+    let author_name: String?
+    let author_url: String?
+    let html: String?
+}
+
+private enum GitHubLinkPreviewDetector {
+    nonisolated static func firstGitHubURL(in text: String) -> URL? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"https?://[^\s<>\]\)"']+"#,
+            options: [.caseInsensitive]
+        ) else {
+            return nil
+        }
+        let nsText = text as NSString
+        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+        for match in matches {
+            let rawURL = nsText.substring(with: match.range)
+                .trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?)]}\"'"))
+            guard let url = URL(string: rawURL), isGitHubURL(url) else { continue }
+            return url
+        }
+        return nil
+    }
+
+    nonisolated private static func isGitHubURL(_ url: URL) -> Bool {
+        url.host?.lowercased() == "github.com" || url.host?.lowercased() == "www.github.com"
+    }
+}
+
+private enum GitHubPreviewLoader {
+    // ponytail: LP metadata cache only; disk cache if relaunch latency matters.
+    private static let cache = Mutex<[URL: LPLinkMetadata]>([:])
+
+    static func cachedMetadata(for url: URL) -> LPLinkMetadata? {
+        cache.withLock { $0[url] }
+    }
+
+    static func load(from url: URL) async throws -> LPLinkMetadata {
+        if let cached = cachedMetadata(for: url) {
+            return cached
+        }
+        let provider = LPMetadataProvider()
+        let metadata = try await withCheckedThrowingContinuation { continuation in
+            provider.startFetchingMetadata(for: url) { metadata, error in
+                if let metadata {
+                    continuation.resume(returning: metadata)
+                } else {
+                    continuation.resume(throwing: error ?? URLError(.cannotLoadFromNetwork))
+                }
+            }
+        }
+        cache.withLock { $0[url] = metadata }
+        return metadata
+    }
+}
+
+private enum TweetPreviewLoader {
+    // ponytail: in-memory cache; add disk TTL only if cold starts become a real problem.
+    private static let cache = Mutex<[URL: TweetPreviewPayload]>([:])
+    private static let snapshots = Mutex<[URL: UIImage]>([:])
+
+    static func cachedPayload(for tweetURL: URL) -> TweetPreviewPayload? {
+        cache.withLock { $0[tweetURL] }
+    }
+
+    static func cachedSnapshot(for tweetURL: URL) -> UIImage? {
+        snapshots.withLock { $0[tweetURL] }
+    }
+
+    static func load(from tweetURL: URL) async throws -> TweetPreviewPayload {
+        if let cached = cachedPayload(for: tweetURL) {
+            return cached
+        }
+        var components = URLComponents(string: "https://publish.twitter.com/oembed")!
+        components.queryItems = [
+            URLQueryItem(name: "omit_script", value: "false"),
+            URLQueryItem(name: "url", value: tweetURL.absoluteString)
+        ]
+        let (data, _) = try await URLSession.shared.data(from: components.url!)
+        let payload = try JSONDecoder().decode(TweetPreviewPayload.self, from: data)
+        store(payload, for: tweetURL)
+        return payload
+    }
+
+    private static func store(_ payload: TweetPreviewPayload, for tweetURL: URL) {
+        cache.withLock { $0[tweetURL] = payload }
+    }
+
+    static func storeSnapshot(_ image: UIImage, for tweetURL: URL) {
+        snapshots.withLock { $0[tweetURL] = image }
+    }
+
+    static func plainText(from html: String) -> String {
+        guard let data = html.data(using: .utf8),
+              let attributed = try? NSAttributedString(
+                data: data,
+                options: [.documentType: NSAttributedString.DocumentType.html],
+                documentAttributes: nil
+              ) else {
+            return html
+        }
+        return attributed.string
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+}
+
+final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDelegate {
     static let reuseIdentifier = "TextBlockCell"
 
     weak var delegate: TextBlockCellDelegate?
@@ -97,13 +334,19 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         let textContainer = NSTextContainer(size: .zero)
         storage.addLayoutManager(layoutManager)
         layoutManager.addTextContainer(textContainer)
-        return UITextView(frame: .zero, textContainer: textContainer)
+        return PasteAwareTextView(frame: .zero, textContainer: textContainer)
     }()
     private let hStack = UIStackView()
+    private let textColumnStack = UIStackView()
+    private let pasteLoadingIndicator = UIActivityIndicatorView(style: .medium)
+    private let tweetPreviewContainer = UIView()
     private let quoteBorderView = UIView()
     private let multiSelectBackgroundView = UIView()
     private let sentHighlightBackgroundView = UIView()
     private let todoCardBackgroundView = UIView()
+    private var tweetPreviewTask: Task<Void, Never>?
+    private var tweetPreviewURL: URL?
+    private var tweetPreviewWebViews: [ObjectIdentifier: URL] = [:]
 
     private var kind: BlockKind = .paragraph
     private var blockId: UUID = UUID()
@@ -117,6 +360,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
     private var lastRenderedText: String = ""
     private var isApplyingStyle: Bool = false
     private var fontSizeOffset: CGFloat = 0
+    private var pasteLoadingCount: Int = 0
     
     
 
@@ -153,6 +397,10 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        tweetPreviewTask?.cancel()
     }
 
     private var sentHighlightColor: UIColor {
@@ -259,15 +507,41 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         textView.backgroundColor = .clear
         textView.isScrollEnabled = false
         textView.delegate = self
+        (textView as? PasteAwareTextView)?.onPasteAttachment = { [weak self] data, type, fileName in
+            guard let self else { return }
+            delegate?.textBlockCellDidRequestCommand(self, command: .insertAttachment(data: data, type: type, fileName: fileName))
+        }
+        (textView as? PasteAwareTextView)?.onPasteLoadingChange = { [weak self] isLoading in
+            self?.setPasteLoading(isLoading)
+        }
         textView.textContainerInset = UIEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
         textView.textContainer.lineFragmentPadding = 0
         // Must use high priority to ensure textView expands properly when content changes (e.g., paste)
         textView.setContentCompressionResistancePriority(.required, for: .vertical)
         textView.setContentHuggingPriority(.defaultHigh, for: .vertical)
+        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        textColumnStack.axis = .vertical
+        textColumnStack.alignment = .fill
+        textColumnStack.spacing = 6
+        textColumnStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textColumnStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        pasteLoadingIndicator.hidesWhenStopped = true
+        pasteLoadingIndicator.color = .noteEditorAccentDeep
+        pasteLoadingIndicator.stopAnimating()
+
+        tweetPreviewContainer.isHidden = true
+        tweetPreviewContainer.clipsToBounds = true
+        tweetPreviewContainer.layer.cornerRadius = 14
+        tweetPreviewContainer.setContentCompressionResistancePriority(.required, for: .vertical)
 
         hStack.addArrangedSubview(prefixLabel)
         hStack.addArrangedSubview(checkboxButton)
-        hStack.addArrangedSubview(textView)
+        textColumnStack.addArrangedSubview(textView)
+        textColumnStack.addArrangedSubview(pasteLoadingIndicator)
+        textColumnStack.addArrangedSubview(tweetPreviewContainer)
+        hStack.addArrangedSubview(textColumnStack)
 
         NSLayoutConstraint.activate([
             checkboxButton.widthAnchor.constraint(equalToConstant: 24),
@@ -324,6 +598,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         isVisuallyCollapsed = collapsed
         contentView.isHidden = collapsed
         isUserInteractionEnabled = !collapsed
+        textColumnStack.isHidden = collapsed
         textView.isHidden = collapsed
         prefixLabel.isHidden = collapsed || prefixLabel.isHidden
         checkboxButton.isHidden = collapsed || checkboxButton.isHidden
@@ -346,6 +621,15 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
         self.fontSizeOffset = block.fontSizeOffset ?? 0
         textView.text = block.text
         applyStyle()
+        updateLinkPreview(for: block.text)
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        clearTweetPreview()
+        pasteLoadingCount = 0
+        pasteLoadingIndicator.stopAnimating()
+        delegate = nil
     }
 
     func blockIdentifier() -> UUID {
@@ -810,6 +1094,325 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate {
                 lastRenderedText = currentText
             }
         }
+        updateLinkPreview(for: currentText)
+    }
+
+    private func setPasteLoading(_ isLoading: Bool) {
+        pasteLoadingCount = max(0, pasteLoadingCount + (isLoading ? 1 : -1))
+        if pasteLoadingCount > 0 {
+            pasteLoadingIndicator.startAnimating()
+        } else {
+            pasteLoadingIndicator.stopAnimating()
+        }
+        delegate?.textBlockCellDidRequestLayoutUpdate(self)
+    }
+
+    private func updateLinkPreview(for text: String) {
+        guard kind != .code else {
+            clearTweetPreview()
+            return
+        }
+        if let url = TweetLinkPreviewDetector.firstTweetURL(in: text) {
+            updateTweetPreview(url: url)
+            return
+        }
+        if let url = GitHubLinkPreviewDetector.firstGitHubURL(in: text) {
+            updateGitHubPreview(url: url)
+            return
+        }
+        clearTweetPreview()
+    }
+
+    private func updateTweetPreview(url: URL) {
+        guard tweetPreviewURL != url else { return }
+
+        tweetPreviewTask?.cancel()
+        tweetPreviewURL = url
+        if let cachedPayload = TweetPreviewLoader.cachedPayload(for: url) {
+            renderTweetPreview(url: url, payload: cachedPayload)
+            return
+        }
+        renderTweetPreview(url: url, payload: nil)
+
+        tweetPreviewTask = Task { [weak self] in
+            do {
+                let payload = try await TweetPreviewLoader.load(from: url)
+                await MainActor.run {
+                    guard let self, self.tweetPreviewURL == url else { return }
+                    self.renderTweetPreview(url: url, payload: payload)
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self, self.tweetPreviewURL == url else { return }
+                    self.tweetPreviewTask = nil
+                }
+            }
+        }
+    }
+
+    private func updateGitHubPreview(url: URL) {
+        guard tweetPreviewURL != url else { return }
+
+        tweetPreviewTask?.cancel()
+        tweetPreviewURL = url
+        if let cachedMetadata = GitHubPreviewLoader.cachedMetadata(for: url) {
+            renderGitHubPreview(url: url, metadata: cachedMetadata)
+            return
+        }
+        renderGitHubPreview(url: url, metadata: nil)
+
+        tweetPreviewTask = Task { [weak self] in
+            do {
+                let metadata = try await GitHubPreviewLoader.load(from: url)
+                await MainActor.run {
+                    guard let self, self.tweetPreviewURL == url else { return }
+                    self.renderGitHubPreview(url: url, metadata: metadata)
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self, self.tweetPreviewURL == url else { return }
+                    self.tweetPreviewTask = nil
+                }
+            }
+        }
+    }
+
+    private func renderTweetPreview(url: URL, payload: TweetPreviewPayload?) {
+        removeTweetPreviewSubviews()
+        let card = makeTweetPreviewCard(url: url, payload: payload)
+        tweetPreviewContainer.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.topAnchor.constraint(equalTo: tweetPreviewContainer.topAnchor),
+            card.bottomAnchor.constraint(equalTo: tweetPreviewContainer.bottomAnchor),
+            card.leadingAnchor.constraint(equalTo: tweetPreviewContainer.leadingAnchor),
+            card.trailingAnchor.constraint(equalTo: tweetPreviewContainer.trailingAnchor)
+        ])
+        tweetPreviewContainer.isHidden = false
+        delegate?.textBlockCellDidRequestLayoutUpdate(self)
+    }
+
+    private func renderGitHubPreview(url: URL, metadata: LPLinkMetadata?) {
+        removeTweetPreviewSubviews()
+        let card = makeGitHubPreviewCard(url: url, metadata: metadata)
+        tweetPreviewContainer.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.topAnchor.constraint(equalTo: tweetPreviewContainer.topAnchor),
+            card.bottomAnchor.constraint(equalTo: tweetPreviewContainer.bottomAnchor),
+            card.leadingAnchor.constraint(equalTo: tweetPreviewContainer.leadingAnchor),
+            card.trailingAnchor.constraint(equalTo: tweetPreviewContainer.trailingAnchor)
+        ])
+        tweetPreviewContainer.isHidden = false
+        delegate?.textBlockCellDidRequestLayoutUpdate(self)
+    }
+
+    private func makeGitHubPreviewCard(url: URL, metadata: LPLinkMetadata?) -> UIView {
+        let card = UIStackView()
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.axis = .vertical
+        card.spacing = 10
+        card.layoutMargins = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        card.isLayoutMarginsRelativeArrangement = true
+        card.backgroundColor = .secondarySystemBackground
+        card.layer.cornerRadius = 14
+        card.layer.borderWidth = 0.7
+        card.layer.borderColor = UIColor.separator.withAlphaComponent(0.35).cgColor
+
+        let header = makePreviewHeader(title: "GitHub", url: url)
+        card.addArrangedSubview(header)
+
+        let previewHeight: CGFloat = 180
+        if let metadata {
+            let linkView = LPLinkView(metadata: metadata)
+            linkView.translatesAutoresizingMaskIntoConstraints = false
+            card.addArrangedSubview(linkView)
+            linkView.heightAnchor.constraint(equalToConstant: previewHeight).isActive = true
+        } else {
+            let loadingView = makeTweetLoadingView()
+            card.addArrangedSubview(loadingView)
+            loadingView.heightAnchor.constraint(equalToConstant: previewHeight).isActive = true
+        }
+        return card
+    }
+
+    private func makeTweetPreviewCard(url: URL, payload: TweetPreviewPayload?) -> UIView {
+        let card = UIStackView()
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.axis = .vertical
+        card.spacing = 8
+        card.layoutMargins = UIEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
+        card.isLayoutMarginsRelativeArrangement = true
+        card.backgroundColor = .secondarySystemBackground
+        card.layer.cornerRadius = 14
+        card.layer.borderWidth = 0.7
+        card.layer.borderColor = UIColor.separator.withAlphaComponent(0.35).cgColor
+
+        let author = payload?.author_name ?? url.pathComponents.dropFirst().first.map { "@\($0)" } ?? "X"
+        let header = makePreviewHeader(title: "X · \(author)", url: url)
+
+        card.addArrangedSubview(header)
+        if let snapshot = TweetPreviewLoader.cachedSnapshot(for: url) {
+            let imageView = UIImageView(image: snapshot)
+            imageView.translatesAutoresizingMaskIntoConstraints = false
+            imageView.contentMode = .scaleAspectFill
+            imageView.clipsToBounds = true
+            imageView.layer.cornerRadius = 10
+            card.addArrangedSubview(imageView)
+            imageView.heightAnchor.constraint(equalToConstant: 360).isActive = true
+        } else if let html = payload?.html {
+            let loadingView = makeTweetLoadingView()
+            let webView = WKWebView(frame: .zero)
+            webView.translatesAutoresizingMaskIntoConstraints = false
+            webView.navigationDelegate = self
+            webView.isOpaque = false
+            webView.backgroundColor = .clear
+            webView.scrollView.backgroundColor = .clear
+            webView.scrollView.isScrollEnabled = false
+            tweetPreviewWebViews[ObjectIdentifier(webView)] = url
+            webView.loadHTMLString(wrappedTweetHTML(html), baseURL: URL(string: "https://x.com"))
+            loadingView.insertSubview(webView, at: 0)
+            NSLayoutConstraint.activate([
+                webView.topAnchor.constraint(equalTo: loadingView.topAnchor),
+                webView.bottomAnchor.constraint(equalTo: loadingView.bottomAnchor),
+                webView.leadingAnchor.constraint(equalTo: loadingView.leadingAnchor),
+                webView.trailingAnchor.constraint(equalTo: loadingView.trailingAnchor)
+            ])
+            card.addArrangedSubview(loadingView)
+            loadingView.heightAnchor.constraint(equalToConstant: 360).isActive = true
+        } else {
+            let loadingView = makeTweetLoadingView()
+            card.addArrangedSubview(loadingView)
+            loadingView.heightAnchor.constraint(equalToConstant: 360).isActive = true
+        }
+
+        return card
+    }
+
+    private func makePreviewHeader(title: String, url: URL) -> UIView {
+        let header = UIStackView()
+        header.axis = .horizontal
+        header.alignment = .center
+        header.spacing = 8
+
+        let titleLabel = UILabel()
+        titleLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.textColor = .label
+        titleLabel.text = title
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let openButton = UIButton(type: .system)
+        openButton.setImage(UIImage(systemName: "arrow.up.right"), for: .normal)
+        openButton.tintColor = .secondaryLabel
+        openButton.addAction(UIAction { _ in
+            UIApplication.shared.open(url)
+        }, for: .touchUpInside)
+        openButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        header.addArrangedSubview(titleLabel)
+        header.addArrangedSubview(openButton)
+        return header
+    }
+
+    private func makeTweetLoadingView() -> UIView {
+        let container = UIView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.36)
+        container.layer.cornerRadius = 10
+        container.clipsToBounds = true
+
+        let cover = UIView()
+        cover.translatesAutoresizingMaskIntoConstraints = false
+        cover.backgroundColor = .secondarySystemBackground
+        container.addSubview(cover)
+
+        let topLine = makeTweetLoadingLine(alpha: 0.68)
+        let midLine = makeTweetLoadingLine(alpha: 0.42)
+        let lowLine = makeTweetLoadingLine(alpha: 0.32)
+        [topLine, midLine, lowLine].forEach { cover.addSubview($0) }
+
+        NSLayoutConstraint.activate([
+            cover.topAnchor.constraint(equalTo: container.topAnchor),
+            cover.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            cover.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            cover.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            topLine.leadingAnchor.constraint(equalTo: cover.leadingAnchor, constant: 18),
+            topLine.topAnchor.constraint(equalTo: cover.topAnchor, constant: 24),
+            topLine.widthAnchor.constraint(equalTo: cover.widthAnchor, multiplier: 0.58),
+            topLine.heightAnchor.constraint(equalToConstant: 10),
+            midLine.leadingAnchor.constraint(equalTo: topLine.leadingAnchor),
+            midLine.topAnchor.constraint(equalTo: topLine.bottomAnchor, constant: 14),
+            midLine.widthAnchor.constraint(equalTo: cover.widthAnchor, multiplier: 0.78),
+            midLine.heightAnchor.constraint(equalToConstant: 10),
+            lowLine.leadingAnchor.constraint(equalTo: topLine.leadingAnchor),
+            lowLine.topAnchor.constraint(equalTo: midLine.bottomAnchor, constant: 14),
+            lowLine.widthAnchor.constraint(equalTo: cover.widthAnchor, multiplier: 0.46),
+            lowLine.heightAnchor.constraint(equalToConstant: 10)
+        ])
+
+        UIView.animate(withDuration: 1.1, delay: 0, options: [.autoreverse, .repeat, .allowUserInteraction]) {
+            [topLine, midLine, lowLine].forEach { $0.alpha *= 0.45 }
+        }
+        return container
+    }
+
+    private func makeTweetLoadingLine(alpha: CGFloat) -> UIView {
+        let line = UIView()
+        line.translatesAutoresizingMaskIntoConstraints = false
+        line.backgroundColor = UIColor.separator.withAlphaComponent(0.55)
+        line.layer.cornerRadius = 5
+        line.alpha = alpha
+        return line
+    }
+
+    private func wrappedTweetHTML(_ html: String) -> String {
+        """
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            body { margin: 0; background: transparent; }
+            .twitter-tweet { margin: 0 !important; }
+          </style>
+        </head>
+        <body>\(html)</body>
+        </html>
+        """
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
+            UIApplication.shared.open(url)
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard let url = tweetPreviewWebViews[ObjectIdentifier(webView)] else { return }
+        Task { @MainActor [weak self, weak webView] in
+            // ponytail: X embed media settles late; disk cache only if restart speed matters.
+            try? await Task.sleep(nanoseconds: 6_500_000_000)
+            guard let webView else { return }
+            webView.takeSnapshot(with: nil) { image, _ in
+                guard let image else { return }
+                TweetPreviewLoader.storeSnapshot(image, for: url)
+                guard let self, self.tweetPreviewURL == url else { return }
+                self.renderTweetPreview(url: url, payload: nil)
+            }
+        }
+    }
+
+    private func clearTweetPreview() {
+        tweetPreviewTask?.cancel()
+        tweetPreviewTask = nil
+        tweetPreviewURL = nil
+        tweetPreviewWebViews.removeAll()
+        tweetPreviewContainer.isHidden = true
+        removeTweetPreviewSubviews()
+    }
+
+    private func removeTweetPreviewSubviews() {
+        tweetPreviewContainer.subviews.forEach { $0.removeFromSuperview() }
     }
     
     private func containsInlineMarkdown(_ text: String) -> Bool {
