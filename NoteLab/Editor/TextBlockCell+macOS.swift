@@ -371,8 +371,9 @@ final class TextBlockCellViewMac: NSView, BlockCellViewMac, NSTextViewDelegate {
             .paragraphStyle: paragraphStyle
         ], range: range)
         
-        // Apply inline markdown formatting
-        applyInlineMarkdown(to: textStorage)
+        if !presentationMode.isEditing {
+            applyInlineMarkdown(to: textStorage)
+        }
         
         textStorage.endEditing()
         updateMeasuredHeight()
@@ -388,6 +389,7 @@ final class TextBlockCellViewMac: NSView, BlockCellViewMac, NSTextViewDelegate {
             for match in matches.reversed() {
                 if match.numberOfRanges >= 2 {
                     let fullRange = match.range
+                    guard !containsInlineMarker((text as NSString).substring(with: match.range(at: 1))) else { continue }
                     textStorage.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: textView.font?.pointSize ?? 16), range: fullRange)
                 }
             }
@@ -400,6 +402,7 @@ final class TextBlockCellViewMac: NSView, BlockCellViewMac, NSTextViewDelegate {
             for match in matches.reversed() {
                 if match.numberOfRanges >= 2 {
                     let fullRange = match.range
+                    guard !containsInlineMarker((text as NSString).substring(with: match.range(at: 1))) else { continue }
                     if let currentFont = textStorage.attribute(.font, at: fullRange.location, effectiveRange: nil) as? NSFont {
                         let italicFont = NSFontManager.shared.convert(currentFont, toHaveTrait: .italicFontMask)
                         textStorage.addAttribute(.font, value: italicFont, range: fullRange)
@@ -413,11 +416,17 @@ final class TextBlockCellViewMac: NSView, BlockCellViewMac, NSTextViewDelegate {
         if let regex = try? NSRegularExpression(pattern: codePattern) {
             let matches = regex.matches(in: text, range: NSRange(location: 0, length: text.utf16.count))
             for match in matches.reversed() {
+                guard match.numberOfRanges >= 2,
+                      !containsInlineMarker((text as NSString).substring(with: match.range(at: 1))) else { continue }
                 let fullRange = match.range
                 textStorage.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: textView.font?.pointSize ?? 14, weight: .regular), range: fullRange)
                 textStorage.addAttribute(.backgroundColor, value: codeBackgroundColor, range: fullRange)
             }
         }
+    }
+
+    private func containsInlineMarker(_ text: String) -> Bool {
+        text.contains("**") || text.contains("*") || text.contains("`") || text.contains("==")
     }
     
     // MARK: - Public Methods
@@ -427,12 +436,13 @@ final class TextBlockCellViewMac: NSView, BlockCellViewMac, NSTextViewDelegate {
     }
     
     func beginEditing(atEnd: Bool = false) {
+        beginEditing(atUTF16Location: atEnd ? textView.string.utf16.count : 0)
+    }
+
+    func beginEditing(atUTF16Location location: Int) {
         window?.makeFirstResponder(textView)
-        if atEnd {
-            textView.setSelectedRange(NSRange(location: textView.string.count, length: 0))
-        } else {
-            textView.setSelectedRange(NSRange(location: 0, length: 0))
-        }
+        let clamped = min(max(0, location), textView.string.utf16.count)
+        textView.setSelectedRange(NSRange(location: clamped, length: 0))
     }
     
     func insertInlineFormat(prefix: String, suffix: String, selectedRange: NSRange?) {

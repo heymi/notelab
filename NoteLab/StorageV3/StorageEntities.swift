@@ -19,6 +19,7 @@ final class NotebookEntity: NSManagedObject {
     @NSManaged var title: String
     @NSManaged var colorRaw: String
     @NSManaged var iconName: String
+    @NSManaged var backgroundId: String
     @NSManaged var notebookDescription: String
     @NSManaged var createdAt: Date
     @NSManaged var updatedAt: Date

@@ -34,6 +34,7 @@ enum StorageModelFactory {
             attr("title", .stringAttributeType, optional: false),
             attr("colorRaw", .stringAttributeType, optional: false),
             attr("iconName", .stringAttributeType, optional: false),
+            attr("backgroundId", .stringAttributeType, optional: false, defaultValue: NotebookBackground.default.id),
             attr("notebookDescription", .stringAttributeType, optional: false, defaultValue: ""),
             attr("isPinned", .booleanAttributeType, optional: false, defaultValue: false)
         ], uniqueness: [["profileId", "id"]])

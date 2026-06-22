@@ -260,7 +260,7 @@ final class NotebookStore: ObservableObject {
 
     /// 检查是否可以创建新笔记本（返回 nil 表示已达限制）
     /// 如果达到限制，会发送通知触发付费墙
-    func addNotebook(title: String, color: NotebookColor, iconName: String) -> UUID? {
+    func addNotebook(title: String, color: NotebookColor, iconName: String, backgroundId: String = NotebookBackground.default.id) -> UUID? {
         guard let profileId else { return nil }
         
         // 检查笔记本数量限制
@@ -275,7 +275,7 @@ final class NotebookStore: ObservableObject {
         }
         
         do {
-            let notebook = try repository.createNotebook(profileId: profileId, title: title, color: color, iconName: iconName)
+            let notebook = try repository.createNotebook(profileId: profileId, title: title, color: color, iconName: iconName, backgroundId: backgroundId)
             notebooks.insert(notebook, at: 0)
             return notebook.id
         } catch {
@@ -284,10 +284,19 @@ final class NotebookStore: ObservableObject {
         }
     }
 
-    func updateNotebook(id: UUID, title: String? = nil, color: NotebookColor? = nil, description: String? = nil) {
-        guard let index = notebooks.firstIndex(where: { $0.id == id }) else { return }
-        
-        // 更新内存中的数据
+    @discardableResult
+    func updateNotebook(id: UUID, title: String? = nil, color: NotebookColor? = nil, description: String? = nil, backgroundId: String? = nil) -> Bool {
+        guard let index = notebooks.firstIndex(where: { $0.id == id }) else { return false }
+        guard let profileId else { return false }
+
+        let normalizedBackgroundId = backgroundId.map { NotebookBackground.normalized($0).id }
+        do {
+            try repository.updateNotebook(profileId: profileId, id: id, title: title, color: color, description: description, backgroundId: normalizedBackgroundId)
+        } catch {
+            logger.error("update notebook failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+
         if let title = title {
             notebooks[index].title = title
         }
@@ -297,14 +306,10 @@ final class NotebookStore: ObservableObject {
         if let description = description {
             notebooks[index].notebookDescription = description
         }
-        
-        // 更新本地存储
-        guard let profileId else { return }
-        do {
-            try repository.updateNotebook(profileId: profileId, id: id, title: title, color: color, description: description)
-        } catch {
-            logger.error("update notebook failed: \(error.localizedDescription, privacy: .public)")
+        if let normalizedBackgroundId {
+            notebooks[index].backgroundId = normalizedBackgroundId
         }
+        return true
     }
 
     func deleteNotebook(id: UUID) {
@@ -328,6 +333,14 @@ final class NotebookStore: ObservableObject {
             }
         }
         return nil
+    }
+
+    func notebookBackground(for noteId: UUID) -> NotebookBackground {
+        guard let notebookId = notebookId(for: noteId),
+              let notebook = notebooks.first(where: { $0.id == notebookId }) else {
+            return .default
+        }
+        return NotebookBackground.normalized(notebook.backgroundId)
     }
 
     func moveNote(noteId: UUID, to targetNotebookId: UUID) {

@@ -1,6 +1,7 @@
 import Foundation
 #if os(macOS)
 import AppKit
+import QuartzCore
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -18,6 +19,7 @@ final class BlockEditorViewControllerMac: NSViewController {
     
     private let scrollView = NSScrollView()
     private let stackView = NSStackView()
+    private let notebookBackgroundView = ScrollingNotebookBackgroundViewMac()
     private var blockViews: [UUID: BlockCellViewMac] = [:]
     private var activeBlockId: UUID?
     private var activeTextSelectionRange: NSRange?
@@ -80,9 +82,14 @@ final class BlockEditorViewControllerMac: NSViewController {
         // Create a flipped document view to have correct top-to-bottom layout
         let documentView = FlippedView()
         documentView.translatesAutoresizingMaskIntoConstraints = true
+        documentView.addSubview(notebookBackgroundView)
         documentView.addSubview(stackView)
         
         NSLayoutConstraint.activate([
+            notebookBackgroundView.topAnchor.constraint(equalTo: documentView.topAnchor),
+            notebookBackgroundView.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+            notebookBackgroundView.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
+            notebookBackgroundView.bottomAnchor.constraint(equalTo: documentView.bottomAnchor),
             stackView.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 72),
             stackView.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: 40),
             stackView.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -40),
@@ -108,6 +115,10 @@ final class BlockEditorViewControllerMac: NSViewController {
                 abs(documentView.frame.height - nextSize.height) > 0.5 else { return }
         documentView.setFrameSize(nextSize)
         documentView.needsLayout = true
+    }
+
+    func updateNotebookBackground(_ background: NotebookBackground) {
+        notebookBackgroundView.background = background
     }
     
     func updateHeader(title: Binding<String>, metadata: NoteEditorHeaderMetadata, linkBlocks: [LinkedNoteBlock], presentationMode: NoteDetailPresentationMode, isWhiteboard: Bool, focusBridge: TitleFocusBridge, onOpenNote: @escaping (UUID) -> Void) {
@@ -425,6 +436,112 @@ final class BlockEditorViewControllerMac: NSViewController {
     }
 }
 
+private final class ScrollingNotebookBackgroundViewMac: NSView {
+    private let gradientLayer = CAGradientLayer()
+    private let patternLayer = CAShapeLayer()
+
+    var background: NotebookBackground = .default {
+        didSet {
+            isHidden = background.generatedStyle == nil
+            updateLayers()
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        isHidden = true
+        wantsLayer = true
+        layer?.addSublayer(gradientLayer)
+        layer?.addSublayer(patternLayer)
+        patternLayer.fillColor = NSColor.clear.cgColor
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        updateLayers()
+    }
+
+    private func updateLayers() {
+        guard let style = background.generatedStyle else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        gradientLayer.frame = bounds
+        gradientLayer.colors = [
+            NSColor.notebookBackground(hex: style.washHex).cgColor,
+            NSColor.notebookBackground(hex: style.baseHex).cgColor
+        ]
+        gradientLayer.startPoint = CGPoint(x: 0, y: 0)
+        gradientLayer.endPoint = CGPoint(x: 1, y: 1)
+
+        patternLayer.frame = bounds
+        patternLayer.strokeColor = NSColor.notebookBackground(hex: style.markHex).withAlphaComponent(style.opacity).cgColor
+        patternLayer.fillColor = style.pattern == .dots
+            ? NSColor.notebookBackground(hex: style.markHex).withAlphaComponent(style.opacity).cgColor
+            : NSColor.clear.cgColor
+        patternLayer.lineWidth = style.pattern == .softGrid ? 0.7 : 1
+        patternLayer.path = patternPath(style: style).cgPath
+
+        CATransaction.commit()
+    }
+
+    private func patternPath(style: NotebookBackgroundStyle) -> CGPath {
+        let path = CGMutablePath()
+        let spacing = max(24, style.spacing)
+        switch style.pattern {
+        case .ruled:
+            var y: CGFloat = 0
+            while y < bounds.height {
+                path.move(to: CGPoint(x: 0, y: y))
+                path.addLine(to: CGPoint(x: bounds.width, y: y))
+                y += spacing
+            }
+        case .grid, .softGrid:
+            var x: CGFloat = 0
+            while x < bounds.width {
+                path.move(to: CGPoint(x: x, y: 0))
+                path.addLine(to: CGPoint(x: x, y: bounds.height))
+                x += spacing
+            }
+            var y: CGFloat = 0
+            while y < bounds.height {
+                path.move(to: CGPoint(x: 0, y: y))
+                path.addLine(to: CGPoint(x: bounds.width, y: y))
+                y += spacing
+            }
+        case .dots:
+            let radius: CGFloat = 1.15
+            var y: CGFloat = 0
+            while y < bounds.height {
+                var x: CGFloat = spacing * 0.5
+                while x < bounds.width {
+                    path.addEllipse(in: CGRect(x: x, y: y, width: radius * 2, height: radius * 2))
+                    x += spacing
+                }
+                y += spacing
+            }
+        }
+        return path
+    }
+}
+
+private extension NSColor {
+    static func notebookBackground(hex: String) -> NSColor {
+        let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&int)
+        let r = CGFloat((int >> 16) & 0xFF) / 255
+        let g = CGFloat((int >> 8) & 0xFF) / 255
+        let b = CGFloat(int & 0xFF) / 255
+        return NSColor(calibratedRed: r, green: g, blue: b, alpha: 1)
+    }
+}
+
 // MARK: - Flipped View for proper top-to-bottom layout
 
 private class FlippedView: NSView {
@@ -461,12 +578,9 @@ extension BlockEditorViewControllerMac: TextBlockCellViewMacDelegate {
             }
         }
         
-        let fullText = current.text
-        let safeLocation = min(max(0, location), fullText.count)
-        let prefix = String(fullText.prefix(safeLocation))
-        let suffix = String(fullText.dropFirst(safeLocation))
+        let split = current.text.splitAtUTF16Offset(location)
         
-        document.blocks[index].text = prefix
+        document.blocks[index].text = split.prefix
         
         let newKind: BlockKind
         if current.kind == .heading {
@@ -475,7 +589,7 @@ extension BlockEditorViewControllerMac: TextBlockCellViewMacDelegate {
             newKind = (current.kind == .bullet || current.kind == .numbered || current.kind == .todo || current.kind == .quote) ? current.kind : .paragraph
         }
         
-        let newBlock = Block(id: UUID(), kind: newKind, text: suffix, level: nil, isChecked: false, table: nil, attachment: nil, fontSizeOffset: current.fontSizeOffset)
+        let newBlock = Block(id: UUID(), kind: newKind, text: split.suffix, level: nil, isChecked: false, table: nil, attachment: nil, fontSizeOffset: current.fontSizeOffset)
         document.blocks.insert(newBlock, at: index + 1)
         onDocumentChange?(document)
         rebuildBlocks()
@@ -511,6 +625,7 @@ extension BlockEditorViewControllerMac: TextBlockCellViewMacDelegate {
         let previousIndex = index - 1
         let currentText = document.blocks[index].text
         let previousText = document.blocks[previousIndex].text
+        let mergedCursorLocation = previousText.utf16.count
         document.blocks[previousIndex].text = previousText + currentText
         document.blocks.remove(at: index)
         onDocumentChange?(document)
@@ -519,7 +634,7 @@ extension BlockEditorViewControllerMac: TextBlockCellViewMacDelegate {
         DispatchQueue.main.async {
             let prevBlock = self.document.blocks[previousIndex]
             if let prevCell = self.blockViews[prevBlock.id] as? TextBlockCellViewMac {
-                prevCell.beginEditing(atEnd: true)
+                prevCell.beginEditing(atUTF16Location: mergedCursorLocation)
             }
         }
     }

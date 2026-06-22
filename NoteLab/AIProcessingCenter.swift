@@ -3,6 +3,8 @@ import Combine
 
 @MainActor
 final class AIProcessingCenter: ObservableObject {
+    private static let pureImageUnsupportedMessage = "暂不支持纯图片笔记的 AI 分析，请先添加文字说明。"
+
     enum AIMode {
         case autoOrganize
         case extractTodos
@@ -89,6 +91,7 @@ final class AIProcessingCenter: ObservableObject {
         aiClient: AIClient,
         store: NotebookStore
     ) {
+        guard canAnalyze(content: content, noteId: noteId, mode: .autoOrganize) else { return }
         // 检查配额
         guard checkQuota(for: .organize) else { return }
         
@@ -149,6 +152,7 @@ final class AIProcessingCenter: ObservableObject {
         aiClient: AIClient,
         store: NotebookStore
     ) {
+        guard canAnalyze(content: content, noteId: noteId, mode: .extractTodos) else { return }
         // 检查配额
         guard checkQuota(for: .extractTasks) else { return }
         
@@ -183,9 +187,6 @@ final class AIProcessingCenter: ObservableObject {
         aiClient: AIClient,
         store: NotebookStore
     ) {
-        // 检查配额
-        guard checkQuota(for: .rewrite) else { return }
-        
         let mappedMode: AIMode
         switch mode {
         case .optimize:
@@ -195,6 +196,9 @@ final class AIProcessingCenter: ObservableObject {
         case .expand:
             mappedMode = .expand
         }
+        guard canAnalyze(content: content, noteId: noteId, mode: mappedMode) else { return }
+        // 检查配额
+        guard checkQuota(for: .rewrite) else { return }
         resetForNewRun(noteId: noteId, mode: mappedMode)
         startProgressFlow()
         aiTask?.cancel()
@@ -268,6 +272,24 @@ final class AIProcessingCenter: ObservableObject {
         lastTaskCount = 0
         activeNoteId = noteId
         self.mode = mode
+    }
+
+    private func canAnalyze(content: String, noteId: UUID, mode: AIMode) -> Bool {
+        guard NoteDocument.fromMarkdown(content).isPureImageOnly else { return true }
+        aiTask?.cancel()
+        progressTask?.cancel()
+        dismissTask?.cancel()
+        activeNoteId = noteId
+        self.mode = mode
+        error = Self.pureImageUnsupportedMessage
+        isLoading = false
+        isCompleted = false
+        isVisible = true
+        stageIndex = 0
+        lastTaskCount = 0
+        Haptics.shared.play(.error)
+        scheduleDismiss(after: 8.0)
+        return false
     }
 
     private func startProgressFlow() {

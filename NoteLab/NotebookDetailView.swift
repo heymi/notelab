@@ -438,7 +438,9 @@ struct NotebookSettingsView: View {
     
     @State private var title: String = ""
     @State private var selectedColor: NotebookColor = .lime
+    @State private var selectedBackground: NotebookBackground = .default
     @State private var notebookDescription: String = ""
+    @State private var showSaveError = false
     @FocusState private var isDescriptionFocused: Bool
     
     private var notebook: Notebook? {
@@ -480,6 +482,17 @@ struct NotebookSettingsView: View {
                     }
                     
                     // 背景介绍
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("编辑背景")
+                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Theme.secondaryInk)
+
+                        NotebookBackgroundPicker(selection: $selectedBackground)
+                            .padding(12)
+                            .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .shadow(color: Theme.softShadow, radius: 8, x: 0, y: 4)
+                    }
+
                     VStack(alignment: .leading, spacing: 10) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("背景介绍")
@@ -530,9 +543,12 @@ struct NotebookSettingsView: View {
                 
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
-                        saveChanges()
-                        Haptics.shared.play(.selection)
-                        dismiss()
+                        if saveChanges() {
+                            Haptics.shared.play(.selection)
+                            dismiss()
+                        } else {
+                            showSaveError = true
+                        }
                     }
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
                     .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -545,6 +561,11 @@ struct NotebookSettingsView: View {
         #endif
         .onAppear {
             loadCurrentValues()
+        }
+        .alert("保存失败", isPresented: $showSaveError) {
+            Button("好", role: .cancel) { }
+        } message: {
+            Text("笔记本设置没有保存成功，已保留原值。")
         }
     }
     
@@ -582,18 +603,20 @@ struct NotebookSettingsView: View {
         guard let notebook = notebook else { return }
         title = notebook.title
         selectedColor = notebook.color
+        selectedBackground = NotebookBackground.normalized(notebook.backgroundId)
         notebookDescription = notebook.notebookDescription
     }
     
-    private func saveChanges() {
+    private func saveChanges() -> Bool {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedTitle.isEmpty else { return }
+        guard !trimmedTitle.isEmpty else { return false }
         
-        store.updateNotebook(
+        return store.updateNotebook(
             id: notebookId,
             title: trimmedTitle,
             color: selectedColor,
-            description: notebookDescription
+            description: notebookDescription,
+            backgroundId: selectedBackground.id
         )
     }
 }

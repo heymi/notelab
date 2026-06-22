@@ -122,17 +122,20 @@ struct NoteEditorView: View {
     private var editorDetailBackground: some View {
         ZStack(alignment: .top) {
             Theme.editorBackground
-            LinearGradient(
-                colors: [
-                    Theme.editorTopWash.opacity(0.65),
-                    Theme.editorTopWash.opacity(0.22),
-                    Theme.editorBackground.opacity(0)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 230)
-            .ignoresSafeArea()
+
+            if currentNotebookBackground == .default {
+                LinearGradient(
+                    colors: [
+                        Theme.editorTopWash.opacity(0.65),
+                        Theme.editorTopWash.opacity(0.22),
+                        Theme.editorBackground.opacity(0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 230)
+                .ignoresSafeArea()
+            }
         }
         .ignoresSafeArea()
     }
@@ -156,6 +159,7 @@ struct NoteEditorView: View {
             presentationMode: detailPresentationMode,
             sentHighlightBlockIds: sentHighlightBlockIds,
             isWhiteboard: isWhiteboard,
+            background: isWhiteboard ? .default : currentNotebookBackground,
             onOpenNote: { noteId in
                 router.path.append(AppRoute.note(noteId))
             },
@@ -461,6 +465,10 @@ struct NoteEditorView: View {
     private var currentNotebookId: UUID? {
         store.notebookId(for: note.id)
     }
+
+    private var currentNotebookBackground: NotebookBackground {
+        isWhiteboard ? .default : store.notebookBackground(for: note.id)
+    }
     
     private var sentHighlightBlockIds: Set<UUID> {
         Set(store.linkBlocks(for: note.id).compactMap { $0.sourceBlockIds }.flatMap { $0 })
@@ -524,9 +532,13 @@ struct NoteEditorView: View {
     
     private func runFormat() {
         aiMode = .format
-        aiLoading = true
+        aiLoading = !document.isPureImageOnly
         aiError = nil
         showAISheet = true
+        guard !document.isPureImageOnly else {
+            aiError = "暂不支持纯图片笔记的 AI 分析，请先添加文字说明。"
+            return
+        }
         
         Task {
             do {
@@ -548,9 +560,13 @@ struct NoteEditorView: View {
     
     private func runExtractTasks() {
         aiMode = .tasks
-        aiLoading = true
+        aiLoading = !document.isPureImageOnly
         aiError = nil
         showAISheet = true
+        guard !document.isPureImageOnly else {
+            aiError = "暂不支持纯图片笔记的 AI 分析，请先添加文字说明。"
+            return
+        }
         
         Task {
             do {

@@ -18,6 +18,7 @@ struct BlockEditorRepresentableMac: NSViewControllerRepresentable {
     var presentationMode: NoteDetailPresentationMode
     var sentHighlightBlockIds: Set<UUID>
     var isWhiteboard: Bool
+    var background: NotebookBackground
     var onOpenNote: (UUID) -> Void
     var onDocumentChange: (NoteDocument) -> Void
     
@@ -59,6 +60,7 @@ struct BlockEditorRepresentableMac: NSViewControllerRepresentable {
         
         nsViewController.ownerId = ownerId
         nsViewController.noteId = noteId
+        nsViewController.updateNotebookBackground(background)
         
         // Update header
         nsViewController.updateHeader(

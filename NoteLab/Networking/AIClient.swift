@@ -78,16 +78,32 @@ final class AIClient: ObservableObject {
     }
 
     func noteInsight(text: String, title: String, notebookContext: String? = nil, protectedAttachmentTokens: [String] = []) async throws -> (formattedMarkdown: String, report: AINoteInsightReport?, tasks: [AITaskSuggestion]) {
+        let linkTokens = LinkPreviewAIContext.extractTokens(from: text)
+        let tokenizedText = LinkPreviewAIContext.tokenize(text: text, tokens: linkTokens)
         let linkPreviewContext = await LinkPreviewAIContext.block(for: text)
-        let prompt = buildNoteInsightPrompt(text: text, title: title, notebookContext: notebookContext, protectedAttachmentTokens: protectedAttachmentTokens, linkPreviewContext: linkPreviewContext)
+        let prompt = buildNoteInsightPrompt(
+            text: tokenizedText,
+            title: title,
+            notebookContext: notebookContext,
+            protectedAttachmentTokens: protectedAttachmentTokens,
+            protectedLinkTokens: linkTokens.map(\.token),
+            linkPreviewContext: linkPreviewContext
+        )
         let response = try await sendPrompt(prompt, feature: .organize)
         let parsed = try decodeNoteInsight(from: response)
         if parsed.report != nil {
-            return parsed
+            return restoreLinks(in: parsed, tokens: linkTokens)
         }
         logger.info("AI noteInsight missing report, retrying once")
         let retryResponse = try await sendPrompt(prompt, feature: .organize)
-        return try decodeNoteInsight(from: retryResponse)
+        return restoreLinks(in: try decodeNoteInsight(from: retryResponse), tokens: linkTokens)
+    }
+
+    private func restoreLinks(
+        in result: (formattedMarkdown: String, report: AINoteInsightReport?, tasks: [AITaskSuggestion]),
+        tokens: [LinkToken]
+    ) -> (formattedMarkdown: String, report: AINoteInsightReport?, tasks: [AITaskSuggestion]) {
+        (LinkPreviewAIContext.restoreAndEnsure(markdown: result.formattedMarkdown, tokens: tokens), result.report, result.tasks)
     }
 
     private func decodeNoteInsight(from response: String) throws -> (formattedMarkdown: String, report: AINoteInsightReport?, tasks: [AITaskSuggestion]) {
@@ -143,13 +159,16 @@ final class AIClient: ObservableObject {
         mode: AIRewriteMode,
         protectedAttachmentTokens: [String] = []
     ) async throws -> (title: String?, markdown: String) {
+        let linkTokens = LinkPreviewAIContext.extractTokens(from: text)
+        let tokenizedText = LinkPreviewAIContext.tokenize(text: text, tokens: linkTokens)
         let linkPreviewContext = await LinkPreviewAIContext.block(for: text)
         let prompt = buildRewritePrompt(
-            text: text,
+            text: tokenizedText,
             title: title,
             notebookContext: notebookContext,
             mode: mode,
             protectedAttachmentTokens: protectedAttachmentTokens,
+            protectedLinkTokens: linkTokens.map(\.token),
             linkPreviewContext: linkPreviewContext
         )
         let response = try await sendPrompt(prompt, feature: .rewrite)
@@ -163,7 +182,7 @@ final class AIClient: ObservableObject {
         if markdown.isEmpty {
             throw AIClientError.emptyResponse
         }
-        return (result.title, markdown)
+        return (result.title, LinkPreviewAIContext.restoreAndEnsure(markdown: markdown, tokens: linkTokens))
     }
 
     func organizeVoiceTranscript(
@@ -524,7 +543,7 @@ private func buildConnectionPrompt(digests: [NoteDigest], limit: Int) -> String 
     return lines.joined(separator: "\n")
 }
 
-private func buildNoteInsightPrompt(text: String, title: String, notebookContext: String? = nil, protectedAttachmentTokens: [String] = [], linkPreviewContext: String? = nil) -> String {
+private func buildNoteInsightPrompt(text: String, title: String, notebookContext: String? = nil, protectedAttachmentTokens: [String] = [], protectedLinkTokens: [String] = [], linkPreviewContext: String? = nil) -> String {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     let charCount = trimmed.count
     let isVeryShort = charCount < 40
@@ -575,6 +594,10 @@ private func buildNoteInsightPrompt(text: String, title: String, notebookContext
         lines.append("17) 文中包含附件占位符 token，代表原笔记中的图片或附件。必须原样保留，不得删除/改写/放入代码块。")
         lines.append("18) 尽量保持这些 token 在原有相对位置。")
         lines.append("附件占位符：\(protectedAttachmentTokens.joined(separator: ", "))")
+    }
+    if !protectedLinkTokens.isEmpty {
+        lines.append("19) 文中包含链接占位符 token，代表原笔记 URL。必须原样保留，不得删除/改写/放入代码块。")
+        lines.append("链接占位符：\(protectedLinkTokens.joined(separator: ", "))")
     }
     lines.append("")
     lines.append("JSON 示例（仅示意格式）：")
@@ -648,6 +671,7 @@ private func buildRewritePrompt(
     notebookContext: String? = nil,
     mode: AIRewriteMode,
     protectedAttachmentTokens: [String] = [],
+    protectedLinkTokens: [String] = [],
     linkPreviewContext: String? = nil
 ) -> String {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -742,6 +766,11 @@ private func buildRewritePrompt(
         lines.append("")
         lines.append("【附件保护】文中包含附件占位符 token，必须原样保留：")
         lines.append(protectedAttachmentTokens.joined(separator: ", "))
+    }
+    if !protectedLinkTokens.isEmpty {
+        lines.append("")
+        lines.append("【链接保护】文中包含链接占位符 token，必须原样保留：")
+        lines.append(protectedLinkTokens.joined(separator: ", "))
     }
     
     // 只在非 expand 模式下添加笔记本背景（expand 模式已在上面添加）

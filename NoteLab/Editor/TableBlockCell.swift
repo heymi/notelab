@@ -11,6 +11,7 @@ protocol TableBlockCellDelegate: AnyObject {
     func tableBlockCellDidRequestDeleteTable(_ cell: TableBlockCell)
     func tableBlockCellDidBeginEditing(_ cell: TableBlockCell)
     func tableBlockCellDidEndEditing(_ cell: TableBlockCell)
+    func tableBlockCellDidRequestLayoutUpdate(_ cell: TableBlockCell)
 }
 
 final class TableBlockCell: UITableViewCell, UITextViewDelegate {
@@ -210,13 +211,17 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
     }
 
     private func makeCellView(row: Int, col: Int) -> UITextView {
-        let textView = UITextView()
+        let textView = TableCellTextView()
         textView.textContainerInset = UIEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
         textView.textContainer.lineFragmentPadding = 0
         textView.isScrollEnabled = false
         textView.delegate = self
         textView.tag = row * 1000 + col
         textView.text = tableModel.cells[safe: row]?[safe: col] ?? ""
+        textView.onTab = { [weak self, weak textView] shift in
+            guard let self, let textView else { return }
+            self.moveFocus(from: textView, backwards: shift)
+        }
         
         if row == 0 {
             textView.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
@@ -231,6 +236,27 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
         textView.layer.cornerRadius = 0 // No corner radius for joined cells
         
         return textView
+    }
+
+    private func moveFocus(from textView: UITextView, backwards: Bool) {
+        textViewDidChange(textView)
+        let row = textView.tag / 1000
+        let col = textView.tag % 1000
+        let nextIndex = row * tableModel.cols + col + (backwards ? -1 : 1)
+        if backwards, nextIndex < 0 {
+            return
+        }
+        if nextIndex >= tableModel.rows * tableModel.cols {
+            tableModel.addRow()
+            rebuildGrid()
+            delegate?.tableBlockCellDidChange(self, table: tableModel)
+            delegate?.tableBlockCellDidRequestLayoutUpdate(self)
+            DispatchQueue.main.async {
+                self.focusCell(row: self.tableModel.rows - 1, col: 0)
+            }
+            return
+        }
+        focusCell(row: nextIndex / tableModel.cols, col: nextIndex % tableModel.cols)
     }
 
     func setControlsVisible(_ visible: Bool) {
@@ -290,6 +316,14 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
         }
     }
 
+    func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
+        if text == "\t" {
+            moveFocus(from: textView, backwards: false)
+            return false
+        }
+        return true
+    }
+
     func textViewDidBeginEditing(_ textView: UITextView) {
         currentEditingTag = textView.tag
         delegate?.tableBlockCellDidBeginEditing(self)
@@ -328,6 +362,25 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
     @objc private func deleteTableTapped() {
         Haptics.shared.play(.warning)
         delegate?.tableBlockCellDidRequestDeleteTable(self)
+    }
+}
+
+private final class TableCellTextView: UITextView {
+    var onTab: ((Bool) -> Void)?
+
+    override var keyCommands: [UIKeyCommand]? {
+        [
+            UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(handleTab)),
+            UIKeyCommand(input: "\t", modifierFlags: .shift, action: #selector(handleShiftTab))
+        ]
+    }
+
+    @objc private func handleTab() {
+        onTab?(false)
+    }
+
+    @objc private func handleShiftTab() {
+        onTab?(true)
     }
 }
 

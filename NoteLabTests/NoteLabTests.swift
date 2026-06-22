@@ -32,6 +32,18 @@ struct NoteLabTests {
 
         let loaded = try repository.loadNotebooks(profileId: profileId)
         #expect(loaded.contains(where: { $0.id == notebook.id && $0.title == "Storage v3 smoke" }))
+        #expect(loaded.first(where: { $0.id == notebook.id })?.backgroundId == NotebookBackground.default.id)
+
+        try repository.updateNotebook(
+            profileId: profileId,
+            id: notebook.id,
+            title: nil,
+            color: nil,
+            description: nil,
+            backgroundId: NotebookBackground.freshAir.id
+        )
+        let reloaded = try repository.loadNotebooks(profileId: profileId)
+        #expect(reloaded.first(where: { $0.id == notebook.id })?.backgroundId == NotebookBackground.freshAir.id)
 
         let pending = try repository.pendingOutbox(profileId: profileId)
         #expect(pending.contains(where: { $0.entityType == .notebook && $0.entityId == notebook.id }))
@@ -102,6 +114,74 @@ struct NoteLabTests {
         #expect(AttachmentType.from(fileName: "loop.gif") == .image)
         #expect(AttachmentStorage.mimeType(for: "clip.mp4") == "video/mp4")
         #expect(AttachmentStorage.attachmentType(from: "video/quicktime") == .video)
+    }
+
+    @Test func pureImageOnlyNotesAreDetectedForAIGuard() async throws {
+        let imageOnly = NoteDocument(version: 1, blocks: [
+            .attachment(type: .image, fileName: "image.png", storagePath: "attachments/image.png", attachmentId: UUID())
+        ])
+        let imageWithText = NoteDocument(version: 1, blocks: [
+            .attachment(type: .image, fileName: "image.png", storagePath: "attachments/image.png", attachmentId: UUID()),
+            .paragraph("caption")
+        ])
+
+        #expect(imageOnly.isPureImageOnly)
+        #expect(!imageWithText.isPureImageOnly)
+    }
+
+    @Test func editorTextSplitsAtUITextViewUTF16CursorOffsets() async throws {
+        let text = "前😀后"
+        let split = text.splitAtUTF16Offset("前😀".utf16.count)
+
+        #expect(split.prefix == "前😀")
+        #expect(split.suffix == "后")
+
+        let combining = "Cafe\u{301} time"
+        let combiningSplit = combining.splitAtUTF16Offset("Cafe\u{301}".utf16.count)
+        #expect(combiningSplit.prefix == "Cafe\u{301}")
+        #expect(combiningSplit.suffix == " time")
+
+        let midSurrogate = text.splitAtUTF16Offset("前".utf16.count + 1)
+        #expect(midSurrogate.prefix == "前")
+        #expect(midSurrogate.suffix == "😀后")
+    }
+
+    @MainActor @Test func notebookBackgroundStylesCarryReadableTextTokens() async throws {
+        let dark = try #require(NotebookBackground.moonGlass.generatedStyle)
+        let light = try #require(NotebookBackground.softStudio.generatedStyle)
+
+        #expect(dark.usesLightForeground)
+        #expect(dark.inkHex == "F4F7FB")
+        #expect(!light.usesLightForeground)
+        #expect(light.inkHex == "25211F")
+        #expect(!light.secondaryInkHex.isEmpty)
+    }
+
+    @MainActor @Test func notebookUpdateWithoutProfileDoesNotMutateMemory() async throws {
+        let notebook = Notebook(
+            id: UUID(),
+            title: "Original",
+            color: .lime,
+            iconName: "book",
+            createdAt: Date(),
+            notes: [],
+            backgroundId: NotebookBackground.default.id
+        )
+        let store = NotebookStore(notebooks: [notebook])
+
+        let updated = store.updateNotebook(
+            id: notebook.id,
+            title: "Changed",
+            color: .sky,
+            description: "changed",
+            backgroundId: NotebookBackground.moonGlass.id
+        )
+
+        #expect(!updated)
+        #expect(store.notebooks[0].title == "Original")
+        #expect(store.notebooks[0].color == .lime)
+        #expect(store.notebooks[0].notebookDescription.isEmpty)
+        #expect(store.notebooks[0].backgroundId == NotebookBackground.default.id)
     }
 
     @Test func homeTodoSectionsHideCompletedAndSortByNewestVisibleTodo() async throws {

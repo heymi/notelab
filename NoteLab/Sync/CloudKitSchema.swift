@@ -32,6 +32,7 @@ enum CloudKitSchema {
         static let title = "title"
         static let color = "color"
         static let iconName = "iconName"
+        static let backgroundId = "backgroundId"
         static let notebookDescription = "notebookDescription"
         static let summary = "summary"
         static let content = "content"

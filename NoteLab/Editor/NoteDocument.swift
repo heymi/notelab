@@ -149,6 +149,40 @@ struct NoteDocument: Codable, Equatable {
     func flattenMarkdown() -> String {
         blocks.map { $0.markdownText }.joined(separator: "\n\n")
     }
+
+    var isPureImageOnly: Bool {
+        var hasImage = false
+        for block in blocks {
+            switch block.kind {
+            case .attachment where block.attachment?.type == .image:
+                hasImage = true
+            case .paragraph, .heading, .bullet, .numbered, .todo, .quote, .code:
+                if !block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return false
+                }
+            case .table:
+                if !(block.table?.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) {
+                    return false
+                }
+            default:
+                return false
+            }
+        }
+        return hasImage
+    }
+}
+
+extension String {
+    nonisolated func splitAtUTF16Offset(_ offset: Int) -> (prefix: String, suffix: String) {
+        var location = min(max(0, offset), utf16.count)
+        while location >= 0 {
+            if let range = Range(NSRange(location: location, length: 0), in: self) {
+                return (String(self[..<range.lowerBound]), String(self[range.lowerBound...]))
+            }
+            location -= 1
+        }
+        return ("", self)
+    }
 }
 
 enum BlockKind: String, Codable {

@@ -18,6 +18,7 @@ struct NoteEditorView: View {
     @EnvironmentObject private var store: NotebookStore
     @EnvironmentObject private var router: AppRouter
     @EnvironmentObject private var auth: AuthManager
+    @Environment(\.colorScheme) private var colorScheme
 
     private let logger = Logger(subsystem: "NoteLab", category: "NoteEditor")
 
@@ -221,18 +222,26 @@ struct NoteEditorView: View {
 
     private var editorDetailBackground: some View {
         ZStack(alignment: .top) {
-            Theme.editorBackground
-            LinearGradient(
-                colors: [
-                    Theme.editorTopWash.opacity(0.65),
-                    Theme.editorTopWash.opacity(0.22),
-                    Theme.editorBackground.opacity(0)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 230)
-            .ignoresSafeArea()
+            if let style = currentNotebookBackground.generatedStyle(for: colorScheme) {
+                LinearGradient(
+                    colors: [Color(hex: style.washHex), Color(hex: style.baseHex)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            } else {
+                Theme.editorBackground
+                LinearGradient(
+                    colors: [
+                        Theme.editorTopWash.opacity(0.65),
+                        Theme.editorTopWash.opacity(0.22),
+                        Theme.editorBackground.opacity(0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 230)
+                .ignoresSafeArea()
+            }
         }
         .ignoresSafeArea()
     }
@@ -243,7 +252,7 @@ struct NoteEditorView: View {
             let contentTopInset = max(0, safeTop - 44)
             let topInset = contentTopInset + 58
             let toolbarTopInset = max(0, safeTop - 56)
-            let bottomInset: CGFloat = detailPresentationMode == .reading ? 130 : 28
+            let bottomInset: CGFloat = 130
 
             Group {
                 if AppConfig.useWebEditor {
@@ -279,6 +288,7 @@ struct NoteEditorView: View {
                         presentationMode: detailPresentationMode,
                         sentHighlightBlockIds: sentHighlightBlockIds,
                         isWhiteboard: isWhiteboard,
+                        background: isWhiteboard ? .default : currentNotebookBackground,
                         topInset: topInset,
                         bottomInset: bottomInset,
                         onOpenNote: { router.push(.note($0)) },
@@ -295,6 +305,7 @@ struct NoteEditorView: View {
                     )
                 }
             }
+            .frame(width: proxy.size.width, height: proxy.size.height)
             .background(editorDetailBackground)
             .background(InteractivePopGestureEnabler())
             .overlay(alignment: .top) {
@@ -312,11 +323,23 @@ struct NoteEditorView: View {
                     whiteboardLinkFloater(topInset: toolbarTopInset)
                 }
             }
+            .overlay(alignment: .bottom) {
+                if !detailPresentationMode.isEditing {
+                    editorBottomBar
+                        .padding(.horizontal, 18)
+                        .padding(.top, 4)
+                        .padding(.bottom, max(proxy.safeAreaInsets.bottom, 8))
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                editorBottomBar
-                    .padding(.horizontal, 18)
-                    .padding(.top, 4)
-                    .padding(.bottom, 8)
+                if detailPresentationMode.isEditing {
+                    editorBottomBar
+                        .padding(.horizontal, 18)
+                        .padding(.top, 4)
+                        .padding(.bottom, 0)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
             }
         }
         .navigationBarBackButtonHidden(true)
@@ -650,6 +673,14 @@ struct NoteEditorView: View {
                 handleClose()
             }
             Spacer(minLength: 0)
+            toolbarButton(systemName: "textformat") {
+                enterEditingMode(focusBody: false)
+                showFormatMenu = true
+            }
+            toolbarButton(systemName: "paperclip") {
+                enterEditingMode(focusBody: false)
+                showAttachmentPicker = true
+            }
             toolbarButton(systemName: "sparkles") {
                 showAIAction = true
             }
@@ -660,87 +691,29 @@ struct NoteEditorView: View {
                 showMoreMenu = true
             }
         }
-        .foregroundStyle(Theme.ink)
+        .foregroundStyle(editorInk)
     }
 
     private var editorBottomBar: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 0) {
-                Button {
-                    hideKeyboard()
-                } label: {
-                    Text("阅读")
-                        .font(.system(size: 15, weight: .black, design: .rounded))
-                        .foregroundStyle(detailPresentationMode.isEditing ? Theme.secondaryInk : Theme.ink)
-                        .frame(width: 58, height: 50)
-                        .background(detailPresentationMode.isEditing ? Color.clear : Theme.editorPaper, in: Capsule())
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    enterEditingMode()
-                } label: {
-                    Text("编辑")
-                        .font(.system(size: 15, weight: detailPresentationMode.isEditing ? .black : .bold, design: .rounded))
-                        .foregroundStyle(detailPresentationMode.isEditing ? Theme.ink : Theme.secondaryInk)
-                        .frame(width: 58, height: 50)
-                        .background(detailPresentationMode.isEditing ? Theme.editorPaper : Color.clear, in: Capsule())
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(5)
-            .background(Theme.editorPaperSoft.opacity(0.54), in: Capsule())
-
-            Spacer(minLength: 0)
-
-            bottomToolButton(title: "Aa") {
-                enterEditingMode(focusBody: false)
-                showFormatMenu = true
-            }
-            bottomToolButton(systemName: "paperclip") {
-                enterEditingMode(focusBody: false)
-                showAttachmentPicker = true
-            }
-            bottomToolButton(systemName: "checkmark") {
-                enterEditingMode()
-                sendFormatCommand(.todo, tipTap: .taskList)
-            }
-            Button {
-                showAIAction = true
-            } label: {
-                Text("NL")
-                    .font(.system(size: 18, weight: .black, design: .rounded))
-                    .foregroundStyle(Theme.editorAccentDeep)
-                    .frame(width: 52, height: 52)
-                    .background(Theme.editorAccent.opacity(0.14), in: Circle())
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 36, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 36, style: .continuous)
-                .stroke(Theme.editorLine.opacity(0.32), lineWidth: 0.7)
-        )
-        .shadow(color: Theme.softShadow.opacity(0.75), radius: 24, x: 0, y: 12)
+        editorBottomBarContent
     }
 
-    private func bottomToolButton(systemName: String? = nil, title: String? = nil, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Group {
-                if let systemName {
-                    Image(systemName: systemName)
-                        .font(.system(size: 18, weight: .bold, design: .rounded))
-                } else if let title {
-                    Text(title)
-                        .font(.system(size: 18, weight: .black, design: .rounded))
-                }
+    private var presentationModeBinding: Binding<NoteDetailPresentationMode> {
+        Binding(
+            get: { detailPresentationMode },
+            set: { mode in
+                mode.isEditing ? enterEditingMode() : hideKeyboard()
             }
-            .foregroundStyle(Theme.secondaryInk)
-            .frame(width: 34, height: 50)
+        )
+    }
+
+    @ViewBuilder
+    private var editorBottomBarContent: some View {
+        Picker("", selection: presentationModeBinding) {
+            Text("阅读").tag(NoteDetailPresentationMode.reading)
+            Text("编辑").tag(NoteDetailPresentationMode.editing)
         }
-        .buttonStyle(.plain)
+        .pickerStyle(.segmented)
     }
 
     private var linkBlocks: [LinkedNoteBlock] {
@@ -800,6 +773,22 @@ struct NoteEditorView: View {
 
     private var currentNotebookId: UUID? {
         store.notebookId(for: note.id)
+    }
+
+    private var currentNotebookBackground: NotebookBackground {
+        isWhiteboard ? .default : store.notebookBackground(for: note.id)
+    }
+
+    private var editorUsesLightForeground: Bool {
+        currentNotebookBackground.usesLightForeground(isDarkMode: colorScheme == .dark)
+    }
+
+    private var editorInk: Color {
+        currentNotebookBackground.generatedStyle(for: colorScheme) == nil ? Theme.ink : currentNotebookBackground.swiftUIInk(for: colorScheme).opacity(0.92)
+    }
+
+    private var editorSecondaryInk: Color {
+        currentNotebookBackground.generatedStyle(for: colorScheme) == nil ? Theme.secondaryInk : currentNotebookBackground.swiftUISecondaryInk(for: colorScheme).opacity(0.88)
     }
 
     private func currentNotebookContext() -> String? {

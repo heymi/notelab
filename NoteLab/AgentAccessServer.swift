@@ -361,6 +361,7 @@ private final class AgentAccessReader {
                     title: $0.title,
                     color: $0.colorRaw,
                     iconName: $0.iconName,
+                    backgroundId: NotebookBackground.normalized($0.backgroundId).id,
                     description: $0.notebookDescription,
                     createdAt: iso($0.createdAt),
                     updatedAt: iso($0.updatedAt),
@@ -643,11 +644,13 @@ private final class AgentAccessWriter {
             }
             let color = NotebookColor(rawValue: payload.color ?? "") ?? .lime
             let iconName = payload.iconName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let backgroundId = NotebookBackground.normalized(payload.backgroundId).id
             let notebook = try repository.createNotebook(
                 profileId: profileId,
                 title: title,
                 color: color,
-                iconName: iconName?.isEmpty == false ? iconName! : "book"
+                iconName: iconName?.isEmpty == false ? iconName! : "book",
+                backgroundId: backgroundId
             )
             return AgentNotebookDTO(
                 id: notebook.id.uuidString.lowercased(),
@@ -655,6 +658,7 @@ private final class AgentAccessWriter {
                 title: notebook.title,
                 color: notebook.color.rawValue,
                 iconName: notebook.iconName,
+                backgroundId: NotebookBackground.normalized(notebook.backgroundId).id,
                 description: notebook.notebookDescription,
                 createdAt: iso(notebook.createdAt),
                 updatedAt: iso(notebook.createdAt),
@@ -682,7 +686,8 @@ private final class AgentAccessWriter {
                 title: title?.isEmpty == false ? title : nil,
                 color: color,
                 description: payload.description,
-                iconName: payload.iconName
+                iconName: payload.iconName,
+                backgroundId: payload.backgroundId
             )
 
             guard let refreshed = try findNotebook(id: id, profileId: entity.profileId) else {
@@ -962,6 +967,7 @@ private final class AgentAccessWriter {
             title: notebook.title,
             color: notebook.colorRaw,
             iconName: notebook.iconName,
+            backgroundId: NotebookBackground.normalized(notebook.backgroundId).id,
             description: notebook.notebookDescription,
             createdAt: iso(notebook.createdAt),
             updatedAt: iso(notebook.updatedAt),
@@ -1048,6 +1054,7 @@ private struct AgentNotebookDTO: Codable {
     let title: String
     let color: String
     let iconName: String
+    let backgroundId: String
     let description: String
     let createdAt: String
     let updatedAt: String
@@ -1125,6 +1132,7 @@ private struct AgentCreateNotebookRequest: Decodable {
     let title: String
     let color: String?
     let iconName: String?
+    let backgroundId: String?
 }
 
 private struct AgentUpdateNotebookRequest: Decodable {
@@ -1132,6 +1140,7 @@ private struct AgentUpdateNotebookRequest: Decodable {
     let title: String?
     let color: String?
     let iconName: String?
+    let backgroundId: String?
     let description: String?
 }
 

@@ -8,6 +8,7 @@ struct NotebookRemoteRecord {
     let title: String
     let colorRaw: String
     let iconName: String
+    let backgroundId: String
     let notebookDescription: String
     let createdAt: Date
     let updatedAt: Date
@@ -111,6 +112,7 @@ final class CloudKitTransport: CloudKitTransporting {
         record[string: CloudKitSchema.Field.title] = entity.title
         record[string: CloudKitSchema.Field.color] = entity.colorRaw
         record[string: CloudKitSchema.Field.iconName] = entity.iconName
+        record[string: CloudKitSchema.Field.backgroundId] = NotebookBackground.normalized(entity.backgroundId).id
         record[string: CloudKitSchema.Field.notebookDescription] = entity.notebookDescription
         record[bool: CloudKitSchema.Field.isPinned] = entity.isPinned
         record[date: CloudKitSchema.Field.createdAt] = entity.createdAt
@@ -416,6 +418,7 @@ final class CloudKitTransport: CloudKitTransporting {
             title: record[string: CloudKitSchema.Field.title] ?? "未命名笔记本",
             colorRaw: record[string: CloudKitSchema.Field.color] ?? NotebookColor.lime.rawValue,
             iconName: record[string: CloudKitSchema.Field.iconName] ?? "book",
+            backgroundId: NotebookBackground.normalized(record[string: CloudKitSchema.Field.backgroundId]).id,
             notebookDescription: record[string: CloudKitSchema.Field.notebookDescription] ?? "",
             createdAt: createdAt,
             updatedAt: record[date: CloudKitSchema.Field.updatedAt] ?? createdAt,

@@ -59,12 +59,12 @@ private final class FlameGlassMotion: ObservableObject {
         #if os(iOS)
         guard manager.isDeviceMotionAvailable, manager.isDeviceMotionActive == false else { return }
 
-        manager.deviceMotionUpdateInterval = 1.0 / 30.0
+        manager.deviceMotionUpdateInterval = 1.0 / 60.0
         manager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
             guard let gravity = motion?.gravity else { return }
             self?.tilt = SIMD2(
-                Float(max(-1.0, min(1.0, gravity.x))),
-                Float(max(-1.0, min(1.0, gravity.z)))
+                Float(max(-1.0, min(1.0, gravity.x * 2.4))),
+                Float(max(-1.0, min(1.0, gravity.z * 2.0)))
             )
         }
         #endif

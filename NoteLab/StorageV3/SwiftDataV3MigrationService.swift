@@ -71,6 +71,7 @@ enum SwiftDataV3MigrationService {
             entity.title = legacy.title
             entity.colorRaw = legacy.colorRaw
             entity.iconName = legacy.iconName
+            entity.backgroundId = NotebookBackground.default.id
             entity.notebookDescription = legacy.notebookDescription
             entity.createdAt = legacy.createdAt
             entity.updatedAt = legacy.remoteUpdatedAt

@@ -10,6 +10,7 @@ struct Notebook: Identifiable, Hashable {
     var createdAt: Date
     var notes: [Note]
     var isPinned: Bool = false
+    var backgroundId: String = NotebookBackground.default.id
     /// 笔记本背景介绍，用于AI分析时提供上下文
     var notebookDescription: String = ""
 }

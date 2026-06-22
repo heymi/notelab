@@ -17,6 +17,7 @@ struct BlockEditorRepresentable: UIViewControllerRepresentable {
     var presentationMode: NoteDetailPresentationMode
     var sentHighlightBlockIds: Set<UUID>
     var isWhiteboard: Bool
+    var background: NotebookBackground
     var topInset: CGFloat
     var bottomInset: CGFloat
     var onOpenNote: (UUID) -> Void
@@ -61,6 +62,7 @@ struct BlockEditorRepresentable: UIViewControllerRepresentable {
         uiViewController.noteId = noteId
         uiViewController.updatePresentationMode(presentationMode)
         uiViewController.updateContentInsets(top: topInset, bottom: bottomInset)
+        uiViewController.updateNotebookBackground(background)
         uiViewController.updateHeader(title: $title, metadata: headerMetadata, linkBlocks: linkBlocks, presentationMode: presentationMode, isWhiteboard: isWhiteboard, focusBridge: titleFocusBridge, onOpenNote: onOpenNote)
 
         if context.coordinator.lastBodyFocusToken != bodyFocusToken {

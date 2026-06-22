@@ -1,5 +1,10 @@
 import Foundation
 
+struct LinkToken: Hashable {
+    let token: String
+    let url: String
+}
+
 enum LinkPreviewAIContext {
     static func block(for text: String) async -> String? {
         var chunks: [String] = []
@@ -12,6 +17,32 @@ enum LinkPreviewAIContext {
         }
         guard !chunks.isEmpty else { return nil }
         return chunks.joined(separator: "\n\n")
+    }
+
+    static func extractTokens(from text: String) -> [LinkToken] {
+        urls(in: text).enumerated().map { index, url in
+            LinkToken(token: "[[LINK:\(index)]]", url: url.absoluteString)
+        }
+    }
+
+    static func tokenize(text: String, tokens: [LinkToken]) -> String {
+        var output = text
+        for token in tokens {
+            output = output.replacingOccurrences(of: token.url, with: token.token)
+        }
+        return output
+    }
+
+    static func restoreAndEnsure(markdown: String, tokens: [LinkToken]) -> String {
+        guard !tokens.isEmpty else { return markdown }
+        var output = markdown
+        for token in tokens {
+            output = output.replacingOccurrences(of: token.token, with: token.url)
+        }
+        let missing = tokens.map(\.url).filter { !output.contains($0) }
+        guard !missing.isEmpty else { return output }
+        let suffix = "## 链接\n" + missing.joined(separator: "\n")
+        return output.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + suffix
     }
 
     private static func urls(in text: String) -> [URL] {

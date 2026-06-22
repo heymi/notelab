@@ -357,6 +357,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
     private var isSentHighlighted: Bool = false
     private var isVisuallyCollapsed: Bool = false
     private var presentationMode: NoteDetailPresentationMode = .reading
+    private var background: NotebookBackground = .default
     private var lastRenderedText: String = ""
     private var isApplyingStyle: Bool = false
     private var fontSizeOffset: CGFloat = 0
@@ -365,27 +366,75 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
     
 
     private var inkColor: UIColor {
-        .noteEditorInk
+        generatedStyle.map { notebookTextColor(hex: $0.inkHex, alpha: 0.92) } ?? .noteEditorInk
     }
     
+    private var bodyColor: UIColor {
+        generatedStyle.map { notebookTextColor(hex: $0.inkHex, alpha: 0.82) } ?? .noteEditorBody
+    }
+
     private var secondaryInkColor: UIColor {
-        .noteEditorSecondaryInk
+        generatedStyle.map { notebookTextColor(hex: $0.secondaryInkHex, alpha: 0.82) } ?? .noteEditorSecondaryInk
+    }
+
+    private var checkedTextColor: UIColor {
+        generatedStyle.map { notebookTextColor(hex: $0.secondaryInkHex, alpha: 0.62) } ?? .secondaryLabel
+    }
+
+    private var accentColor: UIColor {
+        usesLightForeground ? UIColor(red: 0.58, green: 0.92, blue: 0.86, alpha: 1) : .noteEditorAccent
+    }
+
+    private var accentDeepColor: UIColor {
+        usesLightForeground ? UIColor(red: 0.76, green: 0.98, blue: 0.94, alpha: 1) : .noteEditorAccentDeep
     }
 
     private var codeBackgroundColor: UIColor {
-        .noteEditorPaperSoft
+        usesLightForeground ? UIColor(white: 1, alpha: 0.10) : .noteEditorPaperSoft
     }
 
     private var codeBorderColor: UIColor {
-        .noteEditorLine
+        usesLightForeground ? UIColor(white: 1, alpha: 0.18) : .noteEditorLine
     }
 
     private var quoteBackgroundColor: UIColor {
-        .noteEditorPaperSoft
+        usesLightForeground ? UIColor(white: 1, alpha: 0.08) : .noteEditorPaperSoft
     }
     
     private var quoteBorderColor: UIColor {
-        .noteEditorAccent
+        accentColor
+    }
+
+    private var cardBackgroundColor: UIColor {
+        usesLightForeground ? UIColor(white: 1, alpha: 0.10) : UIColor.noteEditorPaper.withAlphaComponent(0.72)
+    }
+
+    private var cardBorderColor: UIColor {
+        usesLightForeground ? UIColor(white: 1, alpha: 0.16) : UIColor.noteEditorLine.withAlphaComponent(0.2)
+    }
+
+    private var selectionColor: UIColor {
+        usesLightForeground ? UIColor(red: 0.72, green: 0.95, blue: 0.90, alpha: 0.18) : .noteEditorSelection
+    }
+
+    private var usesLightForeground: Bool {
+        generatedStyle?.usesLightForeground ?? false
+    }
+
+    private var generatedStyle: NotebookBackgroundStyle? {
+        background.generatedStyle(isDarkMode: traitCollection.userInterfaceStyle == .dark)
+    }
+
+    private func notebookTextColor(hex: String, alpha: CGFloat) -> UIColor {
+        let clean = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: clean).scanHexInt64(&int)
+        return UIColor(
+            red: CGFloat((int >> 16) & 0xFF) / 255,
+            green: CGFloat((int >> 8) & 0xFF) / 255,
+            blue: CGFloat(int & 0xFF) / 255,
+            alpha: alpha
+        )
     }
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -404,7 +453,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
     }
 
     private var sentHighlightColor: UIColor {
-        .noteEditorSelection
+        selectionColor
     }
 
     private func displayFont(size: CGFloat, weight: UIFont.Weight = .semibold) -> UIFont {
@@ -456,7 +505,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
         contentView.addSubview(todoCardBackgroundView)
         todoCardBackgroundView.translatesAutoresizingMaskIntoConstraints = false
 
-        multiSelectBackgroundView.backgroundColor = UIColor.noteEditorSelection
+        multiSelectBackgroundView.backgroundColor = selectionColor
         multiSelectBackgroundView.layer.cornerRadius = 12
         multiSelectBackgroundView.isHidden = true
         contentView.addSubview(multiSelectBackgroundView)
@@ -503,7 +552,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
 
         textView.font = bodyFont(size: 17)
         textView.textColor = inkColor
-        textView.tintColor = .noteEditorAccentDeep
+        textView.tintColor = accentDeepColor
         textView.backgroundColor = .clear
         textView.isScrollEnabled = false
         textView.delegate = self
@@ -528,7 +577,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
         textColumnStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         pasteLoadingIndicator.hidesWhenStopped = true
-        pasteLoadingIndicator.color = .noteEditorAccentDeep
+        pasteLoadingIndicator.color = accentDeepColor
         pasteLoadingIndicator.stopAnimating()
 
         tweetPreviewContainer.isHidden = true
@@ -561,12 +610,12 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
     private func applyAdaptiveColors() {
         sentHighlightBackgroundView.backgroundColor = sentHighlightColor
         quoteBorderView.backgroundColor = quoteBorderColor
-        todoCardBackgroundView.backgroundColor = UIColor.noteEditorPaper.withAlphaComponent(0.72)
-        todoCardBackgroundView.layer.borderColor = UIColor.noteEditorLine.withAlphaComponent(0.2).cgColor
-        multiSelectBackgroundView.backgroundColor = UIColor.noteEditorSelection
+        todoCardBackgroundView.backgroundColor = cardBackgroundColor
+        todoCardBackgroundView.layer.borderColor = cardBorderColor.cgColor
+        multiSelectBackgroundView.backgroundColor = selectionColor
         prefixLabel.textColor = secondaryInkColor
         textView.textColor = inkColor
-        textView.tintColor = .noteEditorAccentDeep
+        textView.tintColor = accentDeepColor
     }
 
     func setMultiSelected(_ selected: Bool) {
@@ -607,11 +656,12 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
         sentHighlightBackgroundView.isHidden = true
     }
 
-    func configure(with block: Block, numberIndex: Int, presentationMode: NoteDetailPresentationMode = .reading) {
+    func configure(with block: Block, numberIndex: Int, presentationMode: NoteDetailPresentationMode = .reading, background: NotebookBackground = .default) {
         isVisuallyCollapsed = false
         contentView.isHidden = false
         isUserInteractionEnabled = true
         self.presentationMode = presentationMode
+        self.background = background
         textView.isHidden = false
         self.kind = block.kind
         self.blockId = block.id
@@ -620,6 +670,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
         self.todoChecked = block.isChecked ?? false
         self.fontSizeOffset = block.fontSizeOffset ?? 0
         textView.text = block.text
+        applyAdaptiveColors()
         applyStyle()
         updateLinkPreview(for: block.text)
     }
@@ -709,7 +760,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
             attrString.addAttribute(.paragraphStyle, value: quoteParagraphStyle, range: NSMakeRange(0, attrString.length))
             let quoteFont = readingBodyFont(size: size, weight: .regular)
             attrString.addAttribute(.font, value: quoteFont, range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.foregroundColor, value: UIColor.noteEditorAccentDeep, range: NSMakeRange(0, attrString.length))
+            attrString.addAttribute(.foregroundColor, value: accentDeepColor, range: NSMakeRange(0, attrString.length))
             applyInlineMarkdownStyles(to: attrString, baseFont: quoteFont)
             setAttributedTextAnimated(attrString, animated: animated)
             hStack.layoutMargins = UIEdgeInsets(top: 6, left: 2, bottom: 8, right: 2)
@@ -721,13 +772,13 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
             prefixLabel.text = "•"
             let size = 16.5 + fontSizeOffset
             prefixLabel.font = UIFont.systemFont(ofSize: 15 + fontSizeOffset, weight: .bold)
-            prefixLabel.textColor = .noteEditorAccent
+            prefixLabel.textColor = accentColor
             let attrString = NSMutableAttributedString(string: currentText)
             let listParagraphStyle = readingParagraphStyle(size: size, lineHeightMultiple: 1.42, lineSpacing: 2.5, paragraphSpacing: 5)
             attrString.addAttribute(.paragraphStyle, value: listParagraphStyle, range: NSMakeRange(0, attrString.length))
             let font = readingBodyFont(size: size)
             attrString.addAttribute(.font, value: font, range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.foregroundColor, value: UIColor.noteEditorBody, range: NSMakeRange(0, attrString.length))
+            attrString.addAttribute(.foregroundColor, value: bodyColor, range: NSMakeRange(0, attrString.length))
             applyInlineMarkdownStyles(to: attrString, baseFont: font)
             setAttributedTextAnimated(attrString, animated: animated)
             hStack.alignment = .firstBaseline
@@ -738,13 +789,13 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
             prefixLabel.text = "\(numberIndex)."
             let size = 16.5 + fontSizeOffset
             prefixLabel.font = UIFont.monospacedDigitSystemFont(ofSize: size, weight: .medium)
-            prefixLabel.textColor = .noteEditorAccentDeep
+            prefixLabel.textColor = accentDeepColor
             let attrString = NSMutableAttributedString(string: currentText)
             let listParagraphStyle = readingParagraphStyle(size: size, lineHeightMultiple: 1.42, lineSpacing: 2.5, paragraphSpacing: 5)
             attrString.addAttribute(.paragraphStyle, value: listParagraphStyle, range: NSMakeRange(0, attrString.length))
             let font = readingBodyFont(size: size)
             attrString.addAttribute(.font, value: font, range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.foregroundColor, value: UIColor.noteEditorBody, range: NSMakeRange(0, attrString.length))
+            attrString.addAttribute(.foregroundColor, value: bodyColor, range: NSMakeRange(0, attrString.length))
             applyInlineMarkdownStyles(to: attrString, baseFont: font)
             setAttributedTextAnimated(attrString, animated: animated)
             hStack.alignment = .firstBaseline
@@ -761,7 +812,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
             let config = UIImage.SymbolConfiguration(pointSize: 21, weight: .regular)
             let name = todoChecked ? "checkmark.circle.fill" : "circle"
             checkboxButton.setImage(UIImage(systemName: name, withConfiguration: config), for: .normal)
-            checkboxButton.tintColor = todoChecked ? .noteEditorAccentDeep : .noteEditorSecondaryInk
+            checkboxButton.tintColor = todoChecked ? accentDeepColor : secondaryInkColor
             checkboxButton.imageView?.contentMode = .scaleAspectFit // Prevent distortion
             
             // Adjust text inset to align visually with checkbox
@@ -775,9 +826,9 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
             
             if todoChecked {
                 attrString.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: NSMakeRange(0, attrString.length))
-                attrString.addAttribute(.foregroundColor, value: UIColor.secondaryLabel, range: NSMakeRange(0, attrString.length))
+                attrString.addAttribute(.foregroundColor, value: checkedTextColor, range: NSMakeRange(0, attrString.length))
             } else {
-                attrString.addAttribute(.foregroundColor, value: UIColor.noteEditorBody, range: NSMakeRange(0, attrString.length))
+                attrString.addAttribute(.foregroundColor, value: bodyColor, range: NSMakeRange(0, attrString.length))
                 applyInlineMarkdownStyles(to: attrString, baseFont: font)
             }
             setAttributedTextAnimated(attrString, animated: animated)
@@ -792,7 +843,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
             let attrString = NSMutableAttributedString(string: currentText)
             attrString.addAttribute(.paragraphStyle, value: codeParagraphStyle, range: NSMakeRange(0, attrString.length))
             attrString.addAttribute(.font, value: UIFont.monospacedSystemFont(ofSize: size, weight: .regular), range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.foregroundColor, value: UIColor.noteEditorInk, range: NSMakeRange(0, attrString.length))
+            attrString.addAttribute(.foregroundColor, value: inkColor, range: NSMakeRange(0, attrString.length))
             // Don't apply inline markdown to code blocks
             setAttributedTextAnimated(attrString, animated: animated)
             textView.backgroundColor = codeBackgroundColor
@@ -809,7 +860,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
             attrString.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSMakeRange(0, attrString.length))
             let font = readingBodyFont(size: size)
             attrString.addAttribute(.font, value: font, range: NSMakeRange(0, attrString.length))
-            attrString.addAttribute(.foregroundColor, value: UIColor.noteEditorBody, range: NSMakeRange(0, attrString.length))
+            attrString.addAttribute(.foregroundColor, value: bodyColor, range: NSMakeRange(0, attrString.length))
             applyInlineMarkdownStyles(to: attrString, baseFont: font)
             setAttributedTextAnimated(attrString, animated: animated)
             textView.textContainerInset = UIEdgeInsets(top: 6, left: 0, bottom: 10, right: 0)
@@ -827,14 +878,14 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
             prefixLabel.isHidden = false
             prefixLabel.text = "•"
             prefixLabel.font = UIFont.systemFont(ofSize: 18 + fontSizeOffset, weight: .bold)
-            prefixLabel.textColor = .noteEditorAccent
+            prefixLabel.textColor = accentColor
             hStack.alignment = .firstBaseline
             textView.textContainerInset = UIEdgeInsets(top: 4, left: 0, bottom: 5, right: 0)
         case .numbered:
             prefixLabel.isHidden = false
             prefixLabel.text = "\(numberIndex)."
             prefixLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 17 + fontSizeOffset, weight: .semibold)
-            prefixLabel.textColor = .noteEditorAccentDeep
+            prefixLabel.textColor = accentDeepColor
             hStack.alignment = .firstBaseline
             textView.textContainerInset = UIEdgeInsets(top: 4, left: 0, bottom: 5, right: 0)
         case .todo:
@@ -843,7 +894,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
             let config = UIImage.SymbolConfiguration(pointSize: 17 + fontSizeOffset, weight: .regular)
             let name = todoChecked ? "checkmark.circle.fill" : "circle"
             checkboxButton.setImage(UIImage(systemName: name, withConfiguration: config), for: .normal)
-            checkboxButton.tintColor = todoChecked ? .noteEditorAccentDeep : .noteEditorSecondaryInk
+            checkboxButton.tintColor = todoChecked ? accentDeepColor : secondaryInkColor
             textView.textContainerInset = UIEdgeInsets(top: 2, left: 0, bottom: 4, right: 0)
         case .code:
             textView.textContainerInset = UIEdgeInsets(top: 7, left: 0, bottom: 7, right: 0)
@@ -858,11 +909,9 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
         let attrString = NSMutableAttributedString(string: currentText)
         attrString.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSMakeRange(0, attrString.length))
         attrString.addAttribute(.font, value: font, range: NSMakeRange(0, attrString.length))
-        attrString.addAttribute(.foregroundColor, value: todoChecked ? UIColor.secondaryLabel : UIColor.noteEditorBody, range: NSMakeRange(0, attrString.length))
+        attrString.addAttribute(.foregroundColor, value: todoChecked ? checkedTextColor : bodyColor, range: NSMakeRange(0, attrString.length))
         if kind == .todo && todoChecked {
             attrString.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: NSMakeRange(0, attrString.length))
-        } else if kind != .code {
-            applyHighlightPattern(to: attrString, in: NSRange(location: 0, length: attrString.length))
         }
         setAttributedTextAnimated(attrString, animated: animated)
     }
@@ -926,6 +975,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
             let contentRange = match.range(at: 2)
             
             let colorKey = text.substring(with: colorKeyRange)
+            guard !containsInlineMarker(text.substring(with: contentRange)) else { continue }
             let bgColor = highlightColors[colorKey] ?? highlightColors["yellow"]!
             
             attrString.addAttribute(.noteMarkerHighlightColor, value: bgColor, range: contentRange)
@@ -954,12 +1004,13 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
         let matches = regex.matches(in: text as String, options: [], range: range)
         
         let markerHiddenFont = UIFont.systemFont(ofSize: 0.1)
-        let codeBg = UIColor.noteEditorPaperSoft
+        let codeBg = codeBackgroundColor
         
         for match in matches.reversed() {
             guard match.numberOfRanges >= 2 else { continue }
             let fullRange = match.range(at: 0)
             let innerRange = match.range(at: 1)
+            guard !containsInlineMarker(text.substring(with: innerRange)) else { continue }
             
             // Apply style to inner content
             switch style {
@@ -989,7 +1040,7 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
                 let codeFont = UIFont.monospacedSystemFont(ofSize: baseFont.pointSize * 0.9, weight: .regular)
                 attrString.addAttribute(.font, value: codeFont, range: innerRange)
                 attrString.addAttribute(.backgroundColor, value: codeBg, range: innerRange)
-                attrString.addAttribute(.foregroundColor, value: UIColor.noteEditorAccentDeep, range: innerRange)
+                attrString.addAttribute(.foregroundColor, value: accentDeepColor, range: innerRange)
                 // Hide the ` markers
                 let prefixRange = NSRange(location: fullRange.location, length: 1)
                 let suffixRange = NSRange(location: fullRange.location + fullRange.length - 1, length: 1)
@@ -999,6 +1050,10 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
                 attrString.addAttribute(.font, value: markerHiddenFont, range: suffixRange)
             }
         }
+    }
+
+    private func containsInlineMarker(_ text: String) -> Bool {
+        text.contains("**") || text.contains("*") || text.contains("`") || text.contains("==")
     }
     
     private func setAttributedTextAnimated(_ attrString: NSAttributedString, animated: Bool) {
@@ -1595,9 +1650,13 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
     }
 
     func beginEditing(atEnd: Bool = false) {
+        beginEditing(atUTF16Location: atEnd ? textView.text.utf16.count : 0)
+    }
+
+    func beginEditing(atUTF16Location location: Int) {
         textView.becomeFirstResponder()
-        let location = atEnd ? textView.text.utf16.count : 0
-        textView.selectedRange = NSRange(location: location, length: 0)
+        let clamped = min(max(0, location), textView.text.utf16.count)
+        textView.selectedRange = NSRange(location: clamped, length: 0)
     }
 }
 

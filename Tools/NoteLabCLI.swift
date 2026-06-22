@@ -23,12 +23,18 @@ private struct GlobalOptions {
     var mimeType: String?
     var color: String?
     var iconName: String?
+    var backgroundId: String?
     var notebookDescription: String?
     var agentToken: String?
     var limit: Int = 50
     var includeDeleted = false
     var write = false
     var appendMarkdown = true
+}
+
+private func normalizedNotebookBackgroundId(_ rawValue: String) -> String {
+    let allowed = Set(["default", "softStudio", "quietLilac", "freshAir", "calmMinimal", "peachMilk", "paperGarden", "moonGlass", "bareNote"])
+    return allowed.contains(rawValue) ? rawValue : "default"
 }
 
 private struct CommandLineParser {
@@ -69,6 +75,8 @@ private struct CommandLineParser {
                 options.color = try Self.value(after: arg, arguments: arguments, index: &index)
             case "--icon":
                 options.iconName = try Self.value(after: arg, arguments: arguments, index: &index)
+            case "--background":
+                options.backgroundId = normalizedNotebookBackgroundId(try Self.value(after: arg, arguments: arguments, index: &index))
             case "--description":
                 options.notebookDescription = try Self.value(after: arg, arguments: arguments, index: &index)
             case "--agent-token":
@@ -107,6 +115,7 @@ private struct CommandLineParser {
         index = nextIndex
         return arguments[nextIndex]
     }
+
 }
 
 private struct ProfileDTO: Codable {
@@ -124,6 +133,7 @@ private struct NotebookDTO: Codable {
     let title: String
     let color: String
     let iconName: String
+    let backgroundId: String
     let description: String
     let createdAt: String
     let updatedAt: String
@@ -201,6 +211,7 @@ private struct CreateNotebookRequest: Encodable {
     let title: String
     let color: String?
     let iconName: String?
+    let backgroundId: String?
 }
 
 private struct UpdateNotebookRequest: Encodable {
@@ -208,6 +219,7 @@ private struct UpdateNotebookRequest: Encodable {
     let title: String?
     let color: String?
     let iconName: String?
+    let backgroundId: String?
     let description: String?
 }
 
@@ -271,7 +283,8 @@ private final class AgentServiceClient {
                     profileId: options.profileId,
                     title: title,
                     color: options.color,
-                    iconName: options.iconName
+                    iconName: options.iconName,
+                    backgroundId: options.backgroundId
                 )
             )
         case let command where command.count == 3 && command[0] == "notebooks" && command[1] == "read":
@@ -286,6 +299,7 @@ private final class AgentServiceClient {
                     title: options.title,
                     color: options.color,
                     iconName: options.iconName,
+                    backgroundId: options.backgroundId,
                     description: options.notebookDescription
                 )
             )
@@ -630,6 +644,7 @@ private final class NoteLabStore {
             attr("title", .stringAttributeType, optional: false),
             attr("colorRaw", .stringAttributeType, optional: false),
             attr("iconName", .stringAttributeType, optional: false),
+            attr("backgroundId", .stringAttributeType, optional: false, defaultValue: "default"),
             attr("notebookDescription", .stringAttributeType, optional: false, defaultValue: ""),
             attr("isPinned", .booleanAttributeType, optional: false, defaultValue: false)
         ], uniqueness: [["profileId", "id"]])
@@ -801,6 +816,7 @@ private final class NoteLabReader {
                 title: string(object, "title"),
                 color: string(object, "colorRaw"),
                 iconName: string(object, "iconName"),
+                backgroundId: normalizedNotebookBackgroundId(string(object, "backgroundId")),
                 description: string(object, "notebookDescription"),
                 createdAt: isoDate(object, "createdAt"),
                 updatedAt: isoDate(object, "updatedAt"),
@@ -1090,6 +1106,7 @@ private func printHelp() {
       --mime-type TYPE                           Optional MIME type for attachments add.
       --color COLOR                              Optional notebook color.
       --icon ICON                                Optional notebook icon name.
+      --background BACKGROUND                    Optional notebook editor background id.
       --description TEXT                         Optional notebook description.
       --write                                    Required for write commands.
       --no-append-markdown                       Do not add attachment markdown to note content.

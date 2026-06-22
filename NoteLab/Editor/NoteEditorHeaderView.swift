@@ -49,7 +49,9 @@ struct NoteEditorHeaderView: View {
     let linkBlocks: [LinkedNoteBlock]
     let presentationMode: NoteDetailPresentationMode
     let isWhiteboard: Bool
+    let background: NotebookBackground
     let onOpenNote: (UUID) -> Void
+    @Environment(\.colorScheme) private var colorScheme
 
     init(
         title: Binding<String>,
@@ -58,6 +60,7 @@ struct NoteEditorHeaderView: View {
         linkBlocks: [LinkedNoteBlock],
         presentationMode: NoteDetailPresentationMode = .reading,
         isWhiteboard: Bool,
+        background: NotebookBackground = .default,
         onOpenNote: @escaping (UUID) -> Void
     ) {
         self._title = title
@@ -66,6 +69,7 @@ struct NoteEditorHeaderView: View {
         self.linkBlocks = linkBlocks
         self.presentationMode = presentationMode
         self.isWhiteboard = isWhiteboard
+        self.background = background
         self.onOpenNote = onOpenNote
     }
 
@@ -76,6 +80,50 @@ struct NoteEditorHeaderView: View {
     private var displayTitle: String {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "无标题" : trimmed
+    }
+
+    private var usesLightForeground: Bool {
+        currentStyle?.usesLightForeground ?? false
+    }
+
+    private var currentStyle: NotebookBackgroundStyle? {
+        background.generatedStyle(for: colorScheme)
+    }
+
+    private var ink: Color {
+        currentStyle.map { Color(hex: $0.inkHex).opacity(0.92) } ?? Theme.ink
+    }
+
+    private var bodyInk: Color {
+        currentStyle.map { Color(hex: $0.inkHex).opacity(0.78) } ?? Theme.ink.opacity(0.84)
+    }
+
+    private var secondaryInk: Color {
+        currentStyle.map { Color(hex: $0.secondaryInkHex).opacity(0.88) } ?? Theme.secondaryInk
+    }
+
+    private var quietInk: Color {
+        currentStyle.map { Color(hex: $0.secondaryInkHex).opacity(0.68) } ?? Theme.editorQuiet
+    }
+
+    private var accent: Color {
+        usesLightForeground ? Color(red: 0.58, green: 0.92, blue: 0.86) : Theme.editorAccent
+    }
+
+    private var accentDeep: Color {
+        usesLightForeground ? Color(red: 0.76, green: 0.98, blue: 0.94) : Theme.editorAccentDeep
+    }
+
+    private var paper: Color {
+        usesLightForeground ? Color.white.opacity(0.14) : Theme.editorPaper
+    }
+
+    private var paperSoft: Color {
+        usesLightForeground ? Color.white.opacity(0.10) : Theme.editorPaperSoft
+    }
+
+    private var line: Color {
+        usesLightForeground ? Color.white.opacity(0.18) : Theme.editorLine
     }
 
     private var aiPosterText: String? {
@@ -95,15 +143,15 @@ struct NoteEditorHeaderView: View {
                         HStack(spacing: 8) {
                             ZStack {
                                 Circle()
-                                    .fill(Theme.editorAccent.opacity(0.12))
+                                    .fill(accent.opacity(0.12))
                                     .frame(width: 20, height: 20)
                                 Circle()
-                                    .fill(Theme.editorAccent.opacity(0.75))
+                                    .fill(accent.opacity(0.75))
                                     .frame(width: 10, height: 10)
                             }
                             Text("\(metadata.notebookLabel) · 已同步")
                                 .font(.system(size: 14, weight: .bold, design: .rounded))
-                                .foregroundStyle(Theme.secondaryInk)
+                                .foregroundStyle(secondaryInk)
                         }
                     }
 
@@ -112,7 +160,7 @@ struct NoteEditorHeaderView: View {
                     } else {
                         Text(displayTitle)
                             .font(.custom("STSongti-SC-Black", size: 52))
-                            .foregroundStyle(Theme.ink)
+                            .foregroundStyle(ink)
                             .lineSpacing(3)
                             .lineLimit(nil)
                             .multilineTextAlignment(.leading)
@@ -129,7 +177,7 @@ struct NoteEditorHeaderView: View {
                             Text(metadata.lede)
                                 .font(.system(size: 18, weight: .regular))
                                 .lineSpacing(8)
-                                .foregroundStyle(Theme.ink.opacity(0.84))
+                                .foregroundStyle(bodyInk)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -163,13 +211,13 @@ struct NoteEditorHeaderView: View {
         VStack(alignment: .leading, spacing: 18) {
             Text(displayTitle)
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(Theme.secondaryInk)
+                .foregroundStyle(secondaryInk)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
 
             Text(verbatim: text)
                 .font(.custom("STSongti-SC-Bold", size: posterFontSize(for: text), relativeTo: .largeTitle))
-                .foregroundStyle(Theme.ink)
+                .foregroundStyle(ink)
                 .lineSpacing(6)
                 .lineLimit(nil)
                 .minimumScaleFactor(0.84)
@@ -179,7 +227,7 @@ struct NoteEditorHeaderView: View {
 
             Text("AI 摘要")
                 .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(Theme.secondaryInk.opacity(0.58))
+                .foregroundStyle(secondaryInk.opacity(0.58))
                 .tracking(1.2)
         }
         .padding(.top, 10)
@@ -200,12 +248,12 @@ struct NoteEditorHeaderView: View {
     private func metadataChip(_ text: String) -> some View {
         Text(text)
             .font(.system(size: 13, weight: .bold, design: .rounded))
-            .foregroundStyle(Theme.ink.opacity(0.82))
+            .foregroundStyle(usesLightForeground ? Color.white.opacity(0.84) : Theme.ink.opacity(0.82))
             .lineLimit(1)
             .minimumScaleFactor(0.85)
             .padding(.horizontal, 13)
             .frame(height: 34)
-            .background(Theme.editorPaper.opacity(0.72), in: Capsule())
+            .background(paper.opacity(usesLightForeground ? 1 : 0.72), in: Capsule())
     }
 
     private func contentPreviewCard(_ preview: NoteEditorHeaderMetadata.Preview) -> some View {
@@ -213,24 +261,24 @@ struct NoteEditorHeaderView: View {
             HStack(spacing: 12) {
                 Text("NL")
                     .font(.system(size: 15, weight: .bold, design: .rounded))
-                    .foregroundStyle(Theme.editorAccentDeep)
+                    .foregroundStyle(accentDeep)
                     .frame(width: 34, height: 34)
-                    .background(Theme.editorAccent.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
                 Text(preview.title)
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Theme.editorAccentDeep)
+                    .foregroundStyle(accentDeep)
 
                 Spacer()
 
                 Text(preview.detail)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Theme.editorAccentDeep)
+                    .foregroundStyle(accentDeep)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .padding(.horizontal, 12)
                     .frame(height: 32)
-                    .background(Theme.editorPaperSoft.opacity(0.68), in: Capsule())
+                    .background(paperSoft.opacity(usesLightForeground ? 1 : 0.68), in: Capsule())
             }
 
             VStack(alignment: .leading, spacing: preview.style == .list ? 11 : 16) {
@@ -246,7 +294,7 @@ struct NoteEditorHeaderView: View {
         .padding(.bottom, 22)
         .background(
             LinearGradient(
-                colors: [Theme.editorPaperSoft.opacity(0.88), Theme.editorPaperSoft.opacity(0.72)],
+                colors: [paperSoft.opacity(usesLightForeground ? 1 : 0.88), paperSoft.opacity(usesLightForeground ? 0.82 : 0.72)],
                 startPoint: .top,
                 endPoint: .bottom
             ),
@@ -254,7 +302,7 @@ struct NoteEditorHeaderView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(Theme.editorLine.opacity(0.28), lineWidth: 0.8)
+                .stroke(line.opacity(usesLightForeground ? 1 : 0.28), lineWidth: 0.8)
         )
     }
 
@@ -263,17 +311,17 @@ struct NoteEditorHeaderView: View {
             switch style {
             case .list:
                 Circle()
-                    .fill(Theme.editorAccent)
+                    .fill(accent)
                     .frame(width: 6, height: 6)
             case .outline:
                 Text("\(index + 1)")
                     .font(.system(size: 11, weight: .black, design: .rounded))
-                    .foregroundStyle(Theme.editorAccentDeep)
+                    .foregroundStyle(accentDeep)
                     .frame(width: 20, height: 20)
-                    .background(Theme.editorAccent.opacity(0.14), in: Circle())
+                    .background(accent.opacity(0.14), in: Circle())
             case .excerpt:
                 Rectangle()
-                    .fill(Theme.editorAccent.opacity(0.58))
+                    .fill(accent.opacity(0.58))
                     .frame(width: 3, height: 24)
                     .clipShape(Capsule())
                     .padding(.top, 4)
@@ -281,7 +329,7 @@ struct NoteEditorHeaderView: View {
 
             Text(verbatim: item)
                 .font(.system(size: style == .excerpt ? 16 : (style == .outline ? 15 : 16), weight: style == .outline ? .medium : .regular))
-                .foregroundStyle(Theme.ink.opacity(style == .excerpt ? 0.78 : 0.84))
+                .foregroundStyle(usesLightForeground ? Color.white.opacity(style == .excerpt ? 0.74 : 0.80) : Theme.ink.opacity(style == .excerpt ? 0.78 : 0.84))
                 .lineSpacing(style == .excerpt ? 8 : 2)
                 .lineLimit(style == .excerpt ? nil : 1)
                 .fixedSize(horizontal: false, vertical: true)
@@ -292,28 +340,28 @@ struct NoteEditorHeaderView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("引用")
                 .font(.system(size: 13, weight: .bold, design: .rounded))
-                .foregroundStyle(Theme.editorAccentDeep)
+                .foregroundStyle(accentDeep)
 
             ForEach(linkBlocks) { block in
                 Button(action: { onOpenNote(block.noteId) }) {
                     HStack(spacing: 10) {
                         Image(systemName: "doc.on.doc")
                             .font(.system(size: 14, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Theme.editorAccentDeep)
+                            .foregroundStyle(accentDeep)
                             .frame(width: 34, height: 34)
-                            .background(Theme.editorPaper, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .background(paper, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         VStack(alignment: .leading, spacing: 4) {
                             Text(block.title)
                                 .font(.system(size: 15, weight: .semibold, design: .rounded))
-                                .foregroundStyle(Theme.ink)
+                                .foregroundStyle(ink)
                             Text("点击查看笔记")
                                 .font(.system(size: 12, weight: .regular, design: .rounded))
-                                .foregroundStyle(Theme.secondaryInk)
+                                .foregroundStyle(secondaryInk)
                         }
                         Spacer()
                         Image(systemName: "chevron.right")
                             .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Theme.editorQuiet)
+                            .foregroundStyle(quietInk)
                     }
                     .padding(.horizontal, 6)
                     .padding(.vertical, 8)
@@ -323,10 +371,10 @@ struct NoteEditorHeaderView: View {
             }
         }
         .padding(14)
-        .background(Theme.editorPaperSoft.opacity(0.78), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .background(paperSoft.opacity(usesLightForeground ? 1 : 0.78), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(Theme.editorLine.opacity(0.52), lineWidth: 0.7)
+                .stroke(line.opacity(usesLightForeground ? 1 : 0.52), lineWidth: 0.7)
         )
     }
 }

@@ -297,6 +297,7 @@ final class ProfileRepository {
         target.title = source.title
         target.colorRaw = source.colorRaw
         target.iconName = source.iconName
+        target.backgroundId = NotebookBackground.normalized(source.backgroundId).id
         target.notebookDescription = source.notebookDescription
         target.createdAt = source.createdAt
         target.updatedAt = source.updatedAt
@@ -465,21 +466,24 @@ final class NotebookRepository {
                 createdAt: notebook.createdAt,
                 notes: notes,
                 isPinned: notebook.isPinned,
+                backgroundId: NotebookBackground.normalized(notebook.backgroundId).id,
                 notebookDescription: notebook.notebookDescription
             )
         }
     }
 
     @discardableResult
-    func createNotebook(profileId: UUID, title: String, color: NotebookColor, iconName: String) throws -> Notebook {
+    func createNotebook(profileId: UUID, title: String, color: NotebookColor, iconName: String, backgroundId: String = NotebookBackground.default.id) throws -> Notebook {
         let now = Date()
         let id = UUID()
+        let background = NotebookBackground.normalized(backgroundId)
         let entity = NotebookEntity(context: storage.mainContext)
         entity.id = id.uuidString.lowercased()
         entity.profileId = profileId.uuidString.lowercased()
         entity.title = title
         entity.colorRaw = color.rawValue
         entity.iconName = iconName
+        entity.backgroundId = background.id
         entity.notebookDescription = ""
         entity.createdAt = now
         entity.updatedAt = now
@@ -490,15 +494,16 @@ final class NotebookRepository {
         entity.deviceId = DeviceIdentity.getOrCreateDeviceId()
         try enqueue(.notebook, id: id, profileId: profileId, operation: .upsert)
         try storage.saveMainContext()
-        return Notebook(id: id, title: title, color: color, iconName: iconName, createdAt: now, notes: [])
+        return Notebook(id: id, title: title, color: color, iconName: iconName, createdAt: now, notes: [], backgroundId: background.id)
     }
 
-    func updateNotebook(profileId: UUID, id: UUID, title: String?, color: NotebookColor?, description: String?, iconName: String? = nil) throws {
+    func updateNotebook(profileId: UUID, id: UUID, title: String?, color: NotebookColor?, description: String?, iconName: String? = nil, backgroundId: String? = nil) throws {
         guard let entity = try fetchNotebook(profileId: profileId, id: id) else { return }
         if let title { entity.title = title }
         if let color { entity.colorRaw = color.rawValue }
         if let description { entity.notebookDescription = description }
         if let iconName { entity.iconName = iconName }
+        if let backgroundId { entity.backgroundId = NotebookBackground.normalized(backgroundId).id }
         markChanged(entity)
         try enqueue(.notebook, id: id, profileId: profileId, operation: .upsert)
         try storage.saveMainContext()
@@ -586,6 +591,7 @@ final class NotebookRepository {
         entity.title = record.title
         entity.colorRaw = record.colorRaw
         entity.iconName = record.iconName
+        entity.backgroundId = NotebookBackground.normalized(record.backgroundId).id
         entity.notebookDescription = record.notebookDescription
         entity.createdAt = record.createdAt
         entity.updatedAt = record.updatedAt
