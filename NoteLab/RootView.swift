@@ -65,6 +65,10 @@ struct RootView: View {
             .onReceive(NotificationCenter.default.publisher(for: .cloudKitRemoteNotification)) { _ in
                 startSync(reason: .remoteNotification)
             }
+            .onReceive(NotificationCenter.default.publisher(for: .localSyncRequested)) { _ in
+                // ponytail: app-level debounce; use a per-profile scheduler only if CloudKit load proves it needs one.
+                startSync(reason: .backgroundRefresh, delayNanoseconds: 5_000_000_000)
+            }
     }
 
     @ViewBuilder
@@ -291,12 +295,12 @@ struct RootView: View {
     }
 
     // Note binding now comes from `NotebookStore.noteBinding(noteId:)`.
-    private func startSync(reason: SyncReason) {
+    private func startSync(reason: SyncReason, delayNanoseconds: UInt64 = 1_500_000_000) {
         syncTask?.cancel()
         syncTask = Task(priority: .background) {
             let startMark = DispatchTime.now()
             // Allow first frame render before any network sync work.
-            try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5s
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
             if Task.isCancelled { return }
 
             syncLogger.debug("SyncEngine start after \(Double(DispatchTime.now().uptimeNanoseconds - startMark.uptimeNanoseconds) / 1_000_000_000, privacy: .public)s delay")

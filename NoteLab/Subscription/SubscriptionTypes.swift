@@ -318,4 +318,6 @@ extension Notification.Name {
     static let subscriptionStatusChanged = Notification.Name("subscriptionStatusChanged")
     /// CloudKit 静默推送触发同步
     static let cloudKitRemoteNotification = Notification.Name("cloudKitRemoteNotification")
+    /// 本地变更入队后触发防抖上传
+    static let localSyncRequested = Notification.Name("localSyncRequested")
 }

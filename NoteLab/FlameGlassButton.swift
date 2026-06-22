@@ -1,5 +1,7 @@
 import Combine
+#if os(iOS)
 import CoreMotion
+#endif
 import SwiftUI
 
 struct FlameGlassButtonBackground: View {
@@ -49,9 +51,12 @@ struct FlameGlassButtonBackground: View {
 private final class FlameGlassMotion: ObservableObject {
     @Published var tilt = SIMD2<Float>(repeating: 0)
 
+    #if os(iOS)
     private let manager = CMMotionManager()
+    #endif
 
     func start() {
+        #if os(iOS)
         guard manager.isDeviceMotionAvailable, manager.isDeviceMotionActive == false else { return }
 
         manager.deviceMotionUpdateInterval = 1.0 / 30.0
@@ -62,10 +67,13 @@ private final class FlameGlassMotion: ObservableObject {
                 Float(max(-1.0, min(1.0, gravity.z)))
             )
         }
+        #endif
     }
 
     func stop() {
+        #if os(iOS)
         manager.stopDeviceMotionUpdates()
+        #endif
     }
 }
 

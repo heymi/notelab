@@ -712,7 +712,7 @@ final class NotebookRepository {
         for notebook in try storage.mainContext.fetch(notebooksRequest) {
             guard let id = UUID(uuidString: notebook.id),
                   try !hasPendingOutbox(profileId: profileId, type: .notebook, id: id) else { continue }
-            try enqueue(.notebook, id: id, profileId: profileId, operation: .upsert)
+            try enqueue(.notebook, id: id, profileId: profileId, operation: .upsert, notify: false)
             added += 1
         }
 
@@ -721,7 +721,7 @@ final class NotebookRepository {
         for note in try storage.mainContext.fetch(notesRequest) {
             guard let id = UUID(uuidString: note.id),
                   try !hasPendingOutbox(profileId: profileId, type: .note, id: id) else { continue }
-            try enqueue(.note, id: id, profileId: profileId, operation: .upsert)
+            try enqueue(.note, id: id, profileId: profileId, operation: .upsert, notify: false)
             added += 1
         }
 
@@ -821,7 +821,7 @@ final class NotebookRepository {
         entity.deviceId = DeviceIdentity.getOrCreateDeviceId()
     }
 
-    private func enqueue(_ type: SyncEntityType, id: UUID, profileId: UUID, operation: SyncOperation) throws {
+    private func enqueue(_ type: SyncEntityType, id: UUID, profileId: UUID, operation: SyncOperation, notify: Bool = true) throws {
         let now = Date()
         let item = SyncOutboxEntity(context: storage.mainContext)
         item.id = UUID().uuidString.lowercased()
@@ -835,6 +835,9 @@ final class NotebookRepository {
         item.retryCount = 0
         item.lastError = nil
         item.status = OutboxStatus.pending.rawValue
+        if notify {
+            NotificationCenter.default.post(name: .localSyncRequested, object: nil)
+        }
     }
 
     private func upsertTombstone(profileId: UUID, entityType: SyncEntityType, entityId: String, deletedAt: Date) throws {
@@ -1001,12 +1004,15 @@ final class AttachmentRepository {
 
     func enqueueFullUpload(profileId: UUID) throws -> Int {
         let request = AttachmentEntity.fetchRequest()
-        request.predicate = NSPredicate(format: "profileId == %@ AND deletedAt == nil", profileId.uuidString.lowercased())
+        request.predicate = NSPredicate(
+            format: "profileId == %@ AND deletedAt == nil AND missingLocalFile == NO",
+            profileId.uuidString.lowercased()
+        )
         var added = 0
         for attachment in try storage.mainContext.fetch(request) {
             guard let id = UUID(uuidString: attachment.id),
                   try !hasPendingOutbox(profileId: profileId, id: id) else { continue }
-            try enqueueAttachment(id: id, profileId: profileId, operation: .upsert)
+            try enqueueAttachment(id: id, profileId: profileId, operation: .upsert, notify: false)
             added += 1
         }
         if added > 0 {
@@ -1034,7 +1040,7 @@ final class AttachmentRepository {
         return try storage.mainContext.count(for: request) > 0
     }
 
-    private func enqueueAttachment(id: UUID, profileId: UUID, operation: SyncOperation) throws {
+    private func enqueueAttachment(id: UUID, profileId: UUID, operation: SyncOperation, notify: Bool = true) throws {
         let now = Date()
         let item = SyncOutboxEntity(context: storage.mainContext)
         item.id = UUID().uuidString.lowercased()
@@ -1046,6 +1052,9 @@ final class AttachmentRepository {
         item.updatedAt = now
         item.retryCount = 0
         item.status = OutboxStatus.pending.rawValue
+        if notify {
+            NotificationCenter.default.post(name: .localSyncRequested, object: nil)
+        }
     }
 
     private func upsertTombstone(profileId: UUID, id: UUID, deletedAt: Date) throws {
