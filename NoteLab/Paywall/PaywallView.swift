@@ -75,6 +75,11 @@ struct PaywallView: View {
         .onChange(of: subscriptionManager.purchaseError) { _, newValue in
             showError = newValue != nil
         }
+        .onChange(of: subscriptionManager.isPremium) { _, isPremium in
+            if isPremium {
+                dismiss()
+            }
+        }
         .task {
             if subscriptionManager.products.isEmpty {
                 await subscriptionManager.loadProducts()

@@ -117,7 +117,7 @@ final class SubscriptionManager: ObservableObject {
         await transaction.finish()
 
         if !applied {
-            await refreshEntitlementState()
+            await refreshEntitlementState(allowCachedFallback: false)
         }
         
         // 发送通知
@@ -166,7 +166,7 @@ final class SubscriptionManager: ObservableObject {
     // MARK: - Refresh Entitlement
     
     /// 刷新权益状态
-    func refreshEntitlementState() async {
+    func refreshEntitlementState(allowCachedFallback: Bool = true) async {
         var highestTier: SubscriptionTier = .free
         var latestExpiration: Date?
         var activeProductId: String?
@@ -187,6 +187,16 @@ final class SubscriptionManager: ObservableObject {
                 highestTier = tier
                 latestExpiration = transaction.expirationDate
                 activeProductId = transaction.productID
+            }
+        }
+
+        if highestTier == .free, allowCachedFallback {
+            let cachedTier = entitlementCache.cachedTier
+            if cachedTier > .free {
+                highestTier = cachedTier
+                latestExpiration = entitlementCache.cachedExpiration
+                activeProductId = currentProductId
+                logger.info("Entitlement refresh kept cached paid tier while StoreKit catches up")
             }
         }
 
@@ -260,7 +270,7 @@ final class SubscriptionManager: ObservableObject {
                 await transaction.finish()
 
                 if !applied {
-                    await refreshEntitlementState()
+                    await refreshEntitlementState(allowCachedFallback: false)
                 }
                 
                 // 发送通知
