@@ -18,6 +18,9 @@ final class EntitlementCache {
     private let expirationKey = "subscription.expiration"
     private let lastVerifiedKey = "subscription.lastVerified"
     private let entitlementCredentialKey = "subscription.entitlementCredential"
+    #if DEBUG
+    private let debugSubscriptionTokenKey = "subscription.debugToken"
+    #endif
     
     // MARK: - Singleton
     
@@ -106,6 +109,21 @@ final class EntitlementCache {
         }
         writeKeychain(key: entitlementCredentialKey, data: Data(credential.utf8))
     }
+
+    #if DEBUG
+    var cachedDebugSubscriptionToken: String? {
+        guard let data = readKeychain(key: debugSubscriptionTokenKey),
+              let token = String(data: data, encoding: .utf8),
+              !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return token
+    }
+
+    func cacheDebugSubscriptionToken(_ token: String) {
+        writeKeychain(key: debugSubscriptionTokenKey, data: Data(token.utf8))
+    }
+    #endif
     
     /// 清除所有缓存
     func clearCache() {
@@ -113,6 +131,9 @@ final class EntitlementCache {
         deleteKeychain(key: expirationKey)
         deleteKeychain(key: lastVerifiedKey)
         deleteKeychain(key: entitlementCredentialKey)
+        #if DEBUG
+        deleteKeychain(key: debugSubscriptionTokenKey)
+        #endif
     }
     
     /// 检查是否需要重新验证（超过24小时）

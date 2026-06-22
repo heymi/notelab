@@ -402,12 +402,14 @@ final class SubscriptionManager: ObservableObject {
     }
 
     private var debugSubscriptionToken: String? {
-        guard let token = Bundle.main.object(forInfoDictionaryKey: "NoteLabDevSubscriptionToken") as? String else {
-            return nil
+        if let token = Bundle.main.object(forInfoDictionaryKey: "NoteLabDevSubscriptionToken") as? String {
+            let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty, !trimmed.contains("$(") {
+                entitlementCache.cacheDebugSubscriptionToken(trimmed)
+                return trimmed
+            }
         }
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !trimmed.contains("$(") else { return nil }
-        return trimmed
+        return entitlementCache.cachedDebugSubscriptionToken
     }
     #endif
     
