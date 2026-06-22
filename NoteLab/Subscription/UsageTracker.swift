@@ -2,20 +2,20 @@
 //  UsageTracker.swift
 //  NoteLab
 //
-//  AI 功能用量追踪器，支持月度自动重置
+//  AI 功能点数追踪器，支持月度自动重置
 //
 
 import Foundation
 import Combine
 
-/// AI 功能用量追踪器
+/// AI 功能点数追踪器
 final class UsageTracker: ObservableObject {
     
     // MARK: - Storage Keys
     
     private let defaults = UserDefaults.standard
     private let lastResetDateKey = "usage.lastResetDate"
-    private let usagePrefix = "usage.count."
+    private let usagePrefix = "usage.credits."
     
     // MARK: - Published State
     
@@ -34,60 +34,46 @@ final class UsageTracker: ObservableObject {
     
     /// 检查是否可以使用某个功能
     func canUse(_ feature: AIFeature, tier: SubscriptionTier) -> Bool {
-        let limit = feature.limit(for: tier)
-        
-        switch limit {
-        case .unlimited:
-            return true
-        case .disabled:
-            return false
-        case .limited(let max):
-            let currentUsage = usageCounts[feature] ?? 0
-            return currentUsage < max
-        }
+        feature.isAvailable(for: tier) && remainingCredits(tier: tier) >= feature.creditCost
     }
     
     /// 记录一次功能使用
     func recordUsage(_ feature: AIFeature) {
         let current = usageCounts[feature] ?? 0
-        usageCounts[feature] = current + 1
-        saveUsageCount(feature: feature, count: current + 1)
+        let next = current + feature.creditCost
+        usageCounts[feature] = next
+        saveUsageCount(feature: feature, count: next)
     }
     
-    /// 获取剩余使用次数
+    /// 获取剩余可用次数（由点数折算）
     func remainingUsage(_ feature: AIFeature, tier: SubscriptionTier) -> UsageLimit {
-        let limit = feature.limit(for: tier)
-        
-        switch limit {
-        case .unlimited:
-            return .unlimited
-        case .disabled:
-            return .disabled
-        case .limited(let max):
-            let used = usageCounts[feature] ?? 0
-            let remaining = Swift.max(0, max - used)
-            return .limited(remaining)
-        }
+        guard feature.isAvailable(for: tier) else { return .disabled }
+        return .limited(remainingCredits(tier: tier) / feature.creditCost)
     }
     
-    /// 获取已使用次数
+    /// 获取功能已消耗点数
     func usedCount(_ feature: AIFeature) -> Int {
         return usageCounts[feature] ?? 0
+    }
+
+    func monthlyAllowance(tier: SubscriptionTier) -> Int {
+        tier.monthlyAICredits
+    }
+
+    func usedCredits() -> Int {
+        usageCounts.values.reduce(0, +)
+    }
+
+    func remainingCredits(tier: SubscriptionTier) -> Int {
+        Swift.max(0, monthlyAllowance(tier: tier) - usedCredits())
     }
     
     /// 获取用量百分比 (0.0 - 1.0)
     func usagePercentage(_ feature: AIFeature, tier: SubscriptionTier) -> Double {
-        let limit = feature.limit(for: tier)
-        
-        switch limit {
-        case .unlimited:
-            return 0.0
-        case .disabled:
-            return 1.0
-        case .limited(let max):
-            let used = usageCounts[feature] ?? 0
-            return min(1.0, Double(used) / Double(max))
-        }
+        guard feature.isAvailable(for: tier) else { return 1.0 }
+        let max = monthlyAllowance(tier: tier)
+        guard max > 0 else { return 1.0 }
+        return min(1.0, Double(usedCredits()) / Double(max))
     }
     
     /// 获取下次重置日期

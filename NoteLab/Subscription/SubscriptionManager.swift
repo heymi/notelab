@@ -111,7 +111,7 @@ final class SubscriptionManager: ObservableObject {
         
         logger.info("Transaction update: \(transaction.productID)")
 
-        let applied = applyEntitlement(from: transaction)
+        let applied = applyEntitlement(from: transaction, jwsRepresentation: result.jwsRepresentation)
 
         // 完成交易
         await transaction.finish()
@@ -170,6 +170,7 @@ final class SubscriptionManager: ObservableObject {
         var highestTier: SubscriptionTier = .free
         var latestExpiration: Date?
         var activeProductId: String?
+        var activeCredential: String?
 
         // 遍历当前权益
         for await result in Transaction.currentEntitlements {
@@ -187,6 +188,7 @@ final class SubscriptionManager: ObservableObject {
                 highestTier = tier
                 latestExpiration = transaction.expirationDate
                 activeProductId = transaction.productID
+                activeCredential = result.jwsRepresentation
             }
         }
 
@@ -216,12 +218,13 @@ final class SubscriptionManager: ObservableObject {
         
         // 缓存到 Keychain
         entitlementCache.cacheTier(highestTier, expiration: latestExpiration)
+        entitlementCache.cacheEntitlementCredential(activeCredential)
         
         logger.info("Entitlement refreshed: tier=\(highestTier.displayName), expires=\(latestExpiration?.description ?? "nil")")
     }
 
     @discardableResult
-    private func applyEntitlement(from transaction: Transaction) -> Bool {
+    private func applyEntitlement(from transaction: Transaction, jwsRepresentation: String?) -> Bool {
         let tier = SubscriptionProductID.activeTier(
             for: transaction.productID,
             expiration: transaction.expirationDate,
@@ -237,6 +240,7 @@ final class SubscriptionManager: ObservableObject {
             expirationDate = transaction.expirationDate
             currentProductId = transaction.productID
             entitlementCache.cacheTier(tier, expiration: transaction.expirationDate)
+            entitlementCache.cacheEntitlementCredential(jwsRepresentation)
         }
 
         logger.info("Entitlement applied from verified transaction: tier=\(tier.displayName), product=\(transaction.productID)")
@@ -264,7 +268,7 @@ final class SubscriptionManager: ObservableObject {
                 
                 logger.info("Purchase successful: \(product.id)")
 
-                let applied = applyEntitlement(from: transaction)
+                let applied = applyEntitlement(from: transaction, jwsRepresentation: verification.jwsRepresentation)
                 
                 // 完成交易
                 await transaction.finish()
@@ -333,6 +337,60 @@ final class SubscriptionManager: ObservableObject {
     func recordAIUsage(_ feature: AIFeature) {
         usageTracker.recordUsage(feature)
     }
+
+    var monthlyAICreditAllowance: Int {
+        usageTracker.monthlyAllowance(tier: currentTier)
+    }
+
+    var remainingAICredits: Int {
+        usageTracker.remainingCredits(tier: currentTier)
+    }
+
+    func currentEntitlementCredential() async -> String? {
+        var bestTier: SubscriptionTier = .free
+        var credential: String?
+
+        for await result in Transaction.currentEntitlements {
+            guard case .verified(let transaction) = result else { continue }
+            let tier = SubscriptionProductID.activeTier(
+                for: transaction.productID,
+                expiration: transaction.expirationDate,
+                revocationDate: transaction.revocationDate
+            )
+            if tier > bestTier {
+                bestTier = tier
+                credential = result.jwsRepresentation
+            }
+        }
+
+        if let credential {
+            entitlementCache.cacheEntitlementCredential(credential)
+            return credential
+        }
+
+        if currentTier > .free, let cached = entitlementCache.cachedEntitlementCredential {
+            return cached
+        }
+
+        #if DEBUG
+        if currentTier > .free, let debugToken = debugSubscriptionToken {
+            return debugToken
+        }
+        #endif
+
+        return nil
+    }
+
+    #if DEBUG
+    private var debugSubscriptionToken: String? {
+        guard let token = Bundle.main.object(forInfoDictionaryKey: "NoteLabDevSubscriptionToken") as? String else {
+            return nil
+        }
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains("$(") else { return nil }
+        return trimmed
+    }
+    #endif
     
     /// 检查是否可以创建笔记本
     func canCreateNotebook(currentCount: Int) -> Bool {

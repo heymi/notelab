@@ -114,10 +114,16 @@ final class AIProcessingCenter: ObservableObject {
                     fallbackTitle: newTitle
                 )
                 let restored = AttachmentPreserver.restoreAndEnsure(markdown: combined, tokens: attachmentTokens)
-                let highlighted = try await AIHighlightInjector.applyHighlightsIfNeeded(
-                    markdown: restored,
-                    aiClient: aiClient
-                )
+                let highlighted: String
+                if subscriptionManager.canUseAIFeature(.highlight) {
+                    highlighted = try await AIHighlightInjector.applyHighlightsIfNeeded(
+                        markdown: restored,
+                        aiClient: aiClient,
+                        didUseAI: { self.recordUsage(for: .highlight) }
+                    )
+                } else {
+                    highlighted = restored
+                }
                 applyFormattedResult(
                     noteId: noteId,
                     title: newTitle,
@@ -206,10 +212,16 @@ final class AIProcessingCenter: ObservableObject {
                 )
                 let resolvedTitle = AIInsightComposer.resolvedTitle(from: rewrite.title, fallback: title)
                 let restored = AttachmentPreserver.restoreAndEnsure(markdown: rewrite.markdown, tokens: attachmentTokens)
-                let highlighted = try await AIHighlightInjector.applyHighlightsIfNeeded(
-                    markdown: restored,
-                    aiClient: aiClient
-                )
+                let highlighted: String
+                if subscriptionManager.canUseAIFeature(.highlight) {
+                    highlighted = try await AIHighlightInjector.applyHighlightsIfNeeded(
+                        markdown: restored,
+                        aiClient: aiClient,
+                        didUseAI: { self.recordUsage(for: .highlight) }
+                    )
+                } else {
+                    highlighted = restored
+                }
                 applyFormattedResult(
                     noteId: noteId,
                     title: resolvedTitle,

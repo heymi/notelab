@@ -1,7 +1,11 @@
 import Foundation
 
 enum AIHighlightInjector {
-    static func applyHighlightsIfNeeded(markdown: String, aiClient: AIClient) async throws -> String {
+    static func applyHighlightsIfNeeded(
+        markdown: String,
+        aiClient: AIClient,
+        didUseAI: (() -> Void)? = nil
+    ) async throws -> String {
         let trimmed = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return markdown }
 
@@ -14,6 +18,7 @@ enum AIHighlightInjector {
 
         let suggestions = try await aiClient.supplementHighlights(text: trimmed, maxHighlights: remainingSlots)
         if suggestions.isEmpty { return markdown }
+        didUseAI?()
         return injectHighlights(markdown: markdown, highlights: suggestions)
     }
 

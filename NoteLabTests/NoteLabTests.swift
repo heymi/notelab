@@ -240,6 +240,20 @@ struct NoteLabTests {
         ) == .free)
     }
 
+    @MainActor @Test func aiCreditRulesExposeMonthlyAllowanceAndFeatureCosts() async throws {
+        #expect(SubscriptionTier.monthlyAICredits(for: .free) == 12)
+        #expect(SubscriptionTier.monthlyAICredits(for: .standard) == 180)
+        #expect(SubscriptionTier.monthlyAICredits(for: .pro) == 900)
+        #expect(AIFeature.extractTasks.creditCost == 3)
+        #expect(AIFeature.organize.creditCost == 6)
+        #expect(AIFeature.rewrite.creditCost == 8)
+        #expect(AIFeature.recentFocus.creditCost == 12)
+        #expect(AIFeature.organize.isAvailable(for: .free))
+        #expect(!AIFeature.rewrite.isAvailable(for: .free))
+        #expect(!AIFeature.semanticConnections.isAvailable(for: .standard))
+        #expect(AIFeature.semanticConnections.isAvailable(for: .pro))
+    }
+
     @Test func noteTitleDeriverSkipsGeneratedStructureHeadings() async throws {
         let markdown = """
         ## 摘要

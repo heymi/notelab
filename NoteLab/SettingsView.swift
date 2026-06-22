@@ -103,7 +103,7 @@ struct SettingsView: View {
                                     Text("AI 模型")
                                         .font(.system(size: 16, weight: .medium, design: .rounded))
                                         .foregroundStyle(Theme.ink)
-                                    Text(aiSettings.currentProvider.displayName)
+                                    Text("云端 AI")
                                         .font(.system(size: 13, weight: .regular, design: .rounded))
                                         .foregroundStyle(Theme.secondaryInk)
                                 }
@@ -653,19 +653,21 @@ struct SettingsView: View {
     }
     
     private var subscriptionBannerSubtitle: String {
+        let creditText = "AI 剩余 \(subscriptionManager.remainingAICredits)/\(subscriptionManager.monthlyAICreditAllowance) 点"
+
         if isPremium, let expDate = subscriptionManager.expirationDate {
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy年M月d日"
-            return "有效期至 \(formatter.string(from: expDate))"
+            return "有效期至 \(formatter.string(from: expDate)) · \(creditText)"
         }
         
         switch subscriptionManager.currentTier {
         case .free:
-            return "解锁无限笔记本、AI 助手等高级功能"
+            return "\(creditText) · 解锁更多 AI 能力"
         case .standard:
-            return "云同步已启用，AI 配额 15次/月"
+            return "云同步已启用 · \(creditText)"
         case .pro:
-            return "您已解锁所有高级功能"
+            return "您已解锁所有高级功能 · \(creditText)"
         }
     }
 }
@@ -806,108 +808,36 @@ struct LegalWebView: View {
 
 struct AISettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject private var aiSettings = AISettings.shared
-    
-    @State private var geminiKey: String = ""
-    @State private var deepseekKey: String = ""
-    @State private var showGeminiKey = false
-    @State private var showDeepSeekKey = false
+    @ObservedObject private var subscriptionManager = SubscriptionManager.shared
     
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 24) {
-                    // 模型选择
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("选择 AI 模型")
+                        Text("云端 AI")
                             .font(.system(size: 14, weight: .bold, design: .rounded))
                             .foregroundStyle(Theme.secondaryInk)
                             .padding(.leading, 8)
                         
                         VStack(spacing: 0) {
-                            ForEach(AIProvider.allCases) { provider in
-                                providerRow(provider)
-                                
-                                if provider != AIProvider.allCases.last {
-                                    Divider().padding(.leading, 52)
-                                }
-                            }
-                        }
-                        .background(Theme.cardBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .shadow(color: Theme.softShadow, radius: 8, x: 0, y: 4)
-                    }
-                    
-                    // API Key 配置
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("API Key 配置")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.secondaryInk)
-                            .padding(.leading, 8)
-                        
-                        VStack(spacing: 0) {
-                            // Gemini API Key
-                            apiKeyRow(
-                                provider: .gemini,
-                                key: $geminiKey,
-                                showKey: $showGeminiKey,
-                                placeholder: "输入 Gemini API Key"
+                            aiInfoRow(
+                                icon: "network",
+                                title: "服务",
+                                value: "notelab.aedc.cc"
                             )
-                            
-                            Divider().padding(.leading, 16)
-                            
-                            // DeepSeek API Key
-                            apiKeyRow(
-                                provider: .deepseek,
-                                key: $deepseekKey,
-                                showKey: $showDeepSeekKey,
-                                placeholder: "输入 DeepSeek API Key"
+                            Divider().padding(.leading, 52)
+                            aiInfoRow(
+                                icon: "creditcard",
+                                title: "本月 AI 点数",
+                                value: "\(subscriptionManager.remainingAICredits)/\(subscriptionManager.monthlyAICreditAllowance)"
                             )
-                        }
-                        .background(Theme.cardBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .shadow(color: Theme.softShadow, radius: 8, x: 0, y: 4)
-                    }
-                    
-                    // 说明
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("获取 API Key")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.secondaryInk)
-                            .padding(.leading, 8)
-                        
-                        VStack(alignment: .leading, spacing: 12) {
-                            Link(destination: URL(string: "https://aistudio.google.com/apikey")!) {
-                                HStack {
-                                    Image(systemName: "link")
-                                        .font(.system(size: 14))
-                                    Text("获取 Gemini API Key")
-                                        .font(.system(size: 14, weight: .medium, design: .rounded))
-                                    Spacer()
-                                    Image(systemName: "arrow.up.right")
-                                        .font(.system(size: 12))
-                                }
-                                .foregroundStyle(.blue)
-                                .padding(.vertical, 12)
-                                .padding(.horizontal, 16)
-                            }
-                            
-                            Divider().padding(.leading, 16)
-                            
-                            Link(destination: URL(string: "https://platform.deepseek.com/api_keys")!) {
-                                HStack {
-                                    Image(systemName: "link")
-                                        .font(.system(size: 14))
-                                    Text("获取 DeepSeek API Key")
-                                        .font(.system(size: 14, weight: .medium, design: .rounded))
-                                    Spacer()
-                                    Image(systemName: "arrow.up.right")
-                                        .font(.system(size: 12))
-                                }
-                                .foregroundStyle(.blue)
-                                .padding(.vertical, 12)
-                                .padding(.horizontal, 16)
-                            }
+                            Divider().padding(.leading, 52)
+                            aiInfoRow(
+                                icon: "lock.shield",
+                                title: "密钥",
+                                value: "由云端托管"
+                            )
                         }
                         .background(Theme.cardBackground)
                         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -926,7 +856,7 @@ struct AISettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") {
-                        saveAndDismiss()
+                        dismiss()
                     }
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
                 }
@@ -934,122 +864,29 @@ struct AISettingsView: View {
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
-        .onAppear {
-            geminiKey = aiSettings.geminiAPIKey
-            deepseekKey = aiSettings.deepseekAPIKey
-        }
     }
     
-    private func providerRow(_ provider: AIProvider) -> some View {
-        Button {
-            withAnimation(.spring(response: 0.3)) {
-                aiSettings.currentProvider = provider
+    private func aiInfoRow(icon: String, title: String, value: String) -> some View {
+        HStack(spacing: 16) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.blue.opacity(0.15))
+                    .frame(width: 32, height: 32)
+                Image(systemName: icon)
+                    .font(.system(size: 16))
+                    .foregroundStyle(.blue)
             }
-        } label: {
-            HStack(spacing: 16) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(providerColor(provider).opacity(0.15))
-                        .frame(width: 32, height: 32)
-                    
-                    Image(systemName: provider.iconName)
-                        .font(.system(size: 16))
-                        .foregroundStyle(providerColor(provider))
-                }
-                
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(provider.displayName)
-                        .font(.system(size: 16, weight: .medium, design: .rounded))
-                        .foregroundStyle(Theme.ink)
-                    Text(provider.description)
-                        .font(.system(size: 12, weight: .regular, design: .rounded))
-                        .foregroundStyle(Theme.secondaryInk)
-                }
-                
-                Spacer()
-                
-                if aiSettings.currentProvider == provider {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.green)
-                } else {
-                    Circle()
-                        .strokeBorder(Theme.secondaryInk.opacity(0.3), lineWidth: 1.5)
-                        .frame(width: 20, height: 20)
-                }
-            }
-            .padding(.vertical, 12)
-            .padding(.horizontal, 16)
-            .contentShape(Rectangle())
+            Text(title)
+                .font(.system(size: 16, weight: .medium, design: .rounded))
+                .foregroundStyle(Theme.ink)
+            Spacer()
+            Text(value)
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(Theme.secondaryInk)
+                .multilineTextAlignment(.trailing)
         }
-        .buttonStyle(.plain)
-    }
-    
-    private func apiKeyRow(provider: AIProvider, key: Binding<String>, showKey: Binding<Bool>, placeholder: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: provider.iconName)
-                    .font(.system(size: 14))
-                    .foregroundStyle(providerColor(provider))
-                Text(provider.displayName)
-                    .font(.system(size: 14, weight: .medium, design: .rounded))
-                    .foregroundStyle(Theme.ink)
-                
-                Spacer()
-                
-                if !key.wrappedValue.isEmpty {
-                    Button {
-                        showKey.wrappedValue.toggle()
-                    } label: {
-                        Image(systemName: showKey.wrappedValue ? "eye.slash" : "eye")
-                            .font(.system(size: 14))
-                            .foregroundStyle(Theme.secondaryInk)
-                    }
-                }
-            }
-            
-            HStack {
-                if showKey.wrappedValue {
-                    TextField(placeholder, text: key)
-                        .font(.system(size: 14, weight: .regular, design: .monospaced))
-                        .apiKeyTextInputBehavior()
-                } else {
-                    SecureField(placeholder, text: key)
-                        .font(.system(size: 14, weight: .regular, design: .monospaced))
-                        .apiKeyTextInputBehavior()
-                }
-                
-                if !key.wrappedValue.isEmpty {
-                    Button {
-                        key.wrappedValue = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 16))
-                            .foregroundStyle(Theme.secondaryInk.opacity(0.5))
-                    }
-                }
-            }
-            .padding(12)
-            .background(Theme.groupedBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        }
-        .padding(.vertical, 12)
+        .padding(.vertical, 14)
         .padding(.horizontal, 16)
-    }
-    
-    private func providerColor(_ provider: AIProvider) -> Color {
-        switch provider {
-        case .gemini:
-            return .blue
-        case .deepseek:
-            return .purple
-        }
-    }
-    
-    private func saveAndDismiss() {
-        aiSettings.geminiAPIKey = geminiKey
-        aiSettings.deepseekAPIKey = deepseekKey
-        dismiss()
     }
 }
 

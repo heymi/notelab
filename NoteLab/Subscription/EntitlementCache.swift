@@ -17,6 +17,7 @@ final class EntitlementCache {
     private let tierKey = "subscription.tier"
     private let expirationKey = "subscription.expiration"
     private let lastVerifiedKey = "subscription.lastVerified"
+    private let entitlementCredentialKey = "subscription.entitlementCredential"
     
     // MARK: - Singleton
     
@@ -68,6 +69,16 @@ final class EntitlementCache {
         }
         return Date(timeIntervalSince1970: interval)
     }
+
+    var cachedEntitlementCredential: String? {
+        guard cachedTier > .free,
+              let data = readKeychain(key: entitlementCredentialKey),
+              let credential = String(data: data, encoding: .utf8),
+              !credential.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return credential
+    }
     
     /// 缓存订阅等级和过期时间
     func cacheTier(_ tier: SubscriptionTier, expiration: Date?) {
@@ -87,12 +98,21 @@ final class EntitlementCache {
         let nowData = String(Date().timeIntervalSince1970).data(using: .utf8)!
         writeKeychain(key: lastVerifiedKey, data: nowData)
     }
+
+    func cacheEntitlementCredential(_ credential: String?) {
+        guard let credential,
+              !credential.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        writeKeychain(key: entitlementCredentialKey, data: Data(credential.utf8))
+    }
     
     /// 清除所有缓存
     func clearCache() {
         deleteKeychain(key: tierKey)
         deleteKeychain(key: expirationKey)
         deleteKeychain(key: lastVerifiedKey)
+        deleteKeychain(key: entitlementCredentialKey)
     }
     
     /// 检查是否需要重新验证（超过24小时）

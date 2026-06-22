@@ -147,19 +147,28 @@ struct PaywallView: View {
             
             PaywallFeatureRow(
                 icon: "wand.and.stars",
+                title: "AI 月度点数",
+                freeValue: "12点/月",
+                standardValue: "180点/月",
+                proValue: "900点/月",
+                iconColor: .purple
+            )
+
+            PaywallFeatureRow(
+                icon: "sparkles",
                 title: "AI 笔记整理",
-                freeValue: "3次/月",
-                standardValue: "15次/月",
-                proValue: "无限",
+                freeValue: "6点/次",
+                standardValue: "6点/次",
+                proValue: "6点/次",
                 iconColor: .purple
             )
             
             PaywallFeatureRow(
                 icon: "doc.text.magnifyingglass",
                 title: "AI 任务提取",
-                freeValue: "3次/月",
-                standardValue: "15次/月",
-                proValue: "无限",
+                freeValue: "3点/次",
+                standardValue: "3点/次",
+                proValue: "3点/次",
                 iconColor: .orange
             )
             
@@ -167,8 +176,8 @@ struct PaywallView: View {
                 icon: "pencil.and.outline",
                 title: "AI 笔记重写",
                 freeValue: "—",
-                standardValue: "10次/月",
-                proValue: "无限",
+                standardValue: "8点/次",
+                proValue: "8点/次",
                 iconColor: .pink
             )
             

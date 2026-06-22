@@ -5,6 +5,8 @@ import os
 enum AIClientError: Error {
     case invalidURL
     case missingAPIKey
+    case missingSubscriptionCredential
+    case quotaExhausted
     case badResponse(Int, String?)
     case decodingFailed
     case emptyResponse
@@ -23,6 +25,10 @@ extension AIClientError: LocalizedError {
             return "无效的请求地址"
         case .missingAPIKey:
             return "请先在设置中配置 API Key"
+        case .missingSubscriptionCredential:
+            return "订阅凭证未同步，请恢复购买后重试云端 AI"
+        case .quotaExhausted:
+            return "本月 AI 点数已用完"
         case .badResponse(let status, let message):
             if let message, !message.isEmpty {
                 return "请求失败 (\(status))：\(message)"
@@ -41,6 +47,7 @@ final class AIClient: ObservableObject {
     private let logger = Logger(subsystem: "NoteLab", category: "AI")
     private let requestTimeout: TimeInterval = 120
     private let aiSettings = AISettings.shared
+    private let proxyURL = URL(string: "https://notelab.aedc.cc/v1/ai/generate")!
 
     private func ensureAPIKey() throws -> String {
         let key = aiSettings.currentAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -50,13 +57,13 @@ final class AIClient: ObservableObject {
 
     func extractTasks(text: String) async throws -> [AITaskSuggestion] {
         let prompt = buildExtractTasksPrompt(text: text)
-        let response = try await sendPrompt(prompt)
+        let response = try await sendPrompt(prompt, feature: .extractTasks)
         let parsed = try decodeTasks(from: response)
         if !parsed.isEmpty {
             return parsed
         }
         logger.info("AI extractTasks empty result, retrying once")
-        let retryResponse = try await sendPrompt(prompt)
+        let retryResponse = try await sendPrompt(prompt, feature: .extractTasks)
         return try decodeTasks(from: retryResponse)
     }
 
@@ -72,13 +79,13 @@ final class AIClient: ObservableObject {
 
     func noteInsight(text: String, title: String, notebookContext: String? = nil, protectedAttachmentTokens: [String] = []) async throws -> (formattedMarkdown: String, report: AINoteInsightReport?, tasks: [AITaskSuggestion]) {
         let prompt = buildNoteInsightPrompt(text: text, title: title, notebookContext: notebookContext, protectedAttachmentTokens: protectedAttachmentTokens)
-        let response = try await sendPrompt(prompt)
+        let response = try await sendPrompt(prompt, feature: .organize)
         let parsed = try decodeNoteInsight(from: response)
         if parsed.report != nil {
             return parsed
         }
         logger.info("AI noteInsight missing report, retrying once")
-        let retryResponse = try await sendPrompt(prompt)
+        let retryResponse = try await sendPrompt(prompt, feature: .organize)
         return try decodeNoteInsight(from: retryResponse)
     }
 
@@ -118,7 +125,7 @@ final class AIClient: ObservableObject {
 
     func supplementHighlights(text: String, maxHighlights: Int) async throws -> [AIHighlightSuggestion] {
         let prompt = buildHighlightSupplementPrompt(text: text, maxHighlights: maxHighlights)
-        let response = try await sendPrompt(prompt)
+        let response = try await sendPrompt(prompt, feature: .highlight)
         let cleaned = cleanJSONResponse(response)
         guard let data = cleaned.data(using: .utf8),
               let result = try? JSONDecoder().decode(AIHighlightsData.self, from: data) else {
@@ -142,7 +149,7 @@ final class AIClient: ObservableObject {
             mode: mode,
             protectedAttachmentTokens: protectedAttachmentTokens
         )
-        let response = try await sendPrompt(prompt)
+        let response = try await sendPrompt(prompt, feature: .rewrite)
         let cleaned = cleanJSONResponse(response)
         guard let data = cleaned.data(using: .utf8),
               let result = try? JSONDecoder().decode(AIRewriteData.self, from: data) else {
@@ -166,7 +173,7 @@ final class AIClient: ObservableObject {
             titleHint: titleHint,
             notebookContext: notebookContext
         )
-        let response = try await sendPrompt(prompt)
+        let response = try await sendPrompt(prompt, feature: .organize)
         let cleaned = cleanJSONResponse(response)
         guard let data = cleaned.data(using: .utf8),
               let result = try? JSONDecoder().decode(VoiceNoteAIResult.self, from: data) else {
@@ -185,7 +192,7 @@ final class AIClient: ObservableObject {
 
     func plan(mode: String, goal: String, tasks: [PlanTaskRequest]) async throws -> AIPlanData {
         let prompt = buildPlanPrompt(mode: mode, goal: goal, tasks: tasks)
-        let response = try await sendPrompt(prompt)
+        let response = try await sendPrompt(prompt, feature: .plan)
         
         let cleaned = cleanJSONResponse(response)
         guard let data = cleaned.data(using: .utf8),
@@ -198,7 +205,7 @@ final class AIClient: ObservableObject {
 
     func recentFocusPayload(digests: [NoteDigest]) async throws -> (report: AIRecentFocusReport?, markdown: String?) {
         let prompt = buildRecentFocusPrompt(digests: digests)
-        let response = try await sendPrompt(prompt)
+        let response = try await sendPrompt(prompt, feature: .recentFocus)
         
         let cleaned = cleanJSONResponse(response)
         guard let data = cleaned.data(using: .utf8) else {
@@ -216,7 +223,7 @@ final class AIClient: ObservableObject {
     func semanticConnections(digests: [NoteDigest], limit: Int) async throws -> [AIConnectionSuggestion] {
         guard !digests.isEmpty, limit > 0 else { return [] }
         let prompt = buildConnectionPrompt(digests: digests, limit: limit)
-        let response = try await sendPrompt(prompt)
+        let response = try await sendPrompt(prompt, feature: .semanticConnections)
         let cleaned = cleanJSONResponse(response)
         guard let data = cleaned.data(using: .utf8),
               let result = try? JSONDecoder().decode(AIConnectionData.self, from: data) else {
@@ -228,18 +235,39 @@ final class AIClient: ObservableObject {
     
     // MARK: - Core Request Methods
     
-    private func sendPrompt(_ prompt: String) async throws -> String {
-        let apiKey = try ensureAPIKey()
-        let provider = aiSettings.currentProvider
-        
-        logger.info("AI request using provider=\(provider.rawValue, privacy: .public)")
-        
-        switch provider {
-        case .gemini:
-            return try await sendGeminiRequest(prompt: prompt, apiKey: apiKey)
-        case .deepseek:
-            return try await sendDeepSeekRequest(prompt: prompt, apiKey: apiKey)
+    private func sendPrompt(_ prompt: String, feature: AIFeature) async throws -> String {
+        guard let credential = await SubscriptionManager.shared.currentEntitlementCredential() else {
+            throw AIClientError.missingSubscriptionCredential
         }
+
+        var request = URLRequest(url: proxyURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = requestTimeout
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
+        request.setValue(UUID().uuidString, forHTTPHeaderField: "Idempotency-Key")
+        request.httpBody = try JSONEncoder().encode(AIProxyRequest(feature: feature.rawValue, prompt: prompt))
+
+        logger.info("AI proxy request feature=\(feature.rawValue, privacy: .public)")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw AIClientError.badResponse(-1, nil)
+        }
+        if http.statusCode == 402 {
+            throw AIClientError.quotaExhausted
+        }
+        if !(200...299).contains(http.statusCode) {
+            throw AIClientError.badResponse(http.statusCode, Self.extractErrorMessage(from: data))
+        }
+        guard let payload = try? JSONDecoder().decode(AIProxyResponse.self, from: data) else {
+            logger.error("AI proxy response parse failed body=\(Self.truncate(data: data), privacy: .public)")
+            throw AIClientError.decodingFailed
+        }
+        guard !payload.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AIClientError.emptyResponse
+        }
+        return payload.text
     }
     
     private func sendGeminiRequest(prompt: String, apiKey: String) async throws -> String {
@@ -406,6 +434,15 @@ final class AIClient: ObservableObject {
 
 private struct AIPartialInsightData: Decodable {
     let formattedMarkdown: String
+}
+
+private struct AIProxyRequest: Encodable {
+    let feature: String
+    let prompt: String
+}
+
+private struct AIProxyResponse: Decodable {
+    let text: String
 }
 
 private func buildRecentFocusPrompt(digests: [NoteDigest]) -> String {

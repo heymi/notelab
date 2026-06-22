@@ -9,6 +9,11 @@ routes = [
 [vars]
 ALLOW_WRITE = "true"
 
+[[d1_databases]]
+binding = "AI_DB"
+database_name = "notelab-ai"
+database_id = "24346b90-0e77-44fa-87db-5b02712a7051"
+
 [[durable_objects.bindings]]
 name = "RELAY"
 class_name = "NoteLabRelay"
