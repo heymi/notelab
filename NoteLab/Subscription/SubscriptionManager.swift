@@ -78,6 +78,9 @@ final class SubscriptionManager: ObservableObject {
         // 从缓存恢复状态
         self.currentTier = entitlementCache.cachedTier
         self.expirationDate = entitlementCache.cachedExpiration
+        #if DEBUG
+        applyDebugSubscriptionTokenIfAvailable()
+        #endif
 
         // 启动交易监听
         updateListenerTask = listenForTransactionUpdates()
@@ -167,6 +170,13 @@ final class SubscriptionManager: ObservableObject {
     
     /// 刷新权益状态
     func refreshEntitlementState(allowCachedFallback: Bool = true) async {
+        #if DEBUG
+        if applyDebugSubscriptionTokenIfAvailable() {
+            logger.info("Entitlement refresh skipped — debug subscription token active")
+            return
+        }
+        #endif
+
         var highestTier: SubscriptionTier = .free
         var latestExpiration: Date?
         var activeProductId: String?
@@ -373,7 +383,7 @@ final class SubscriptionManager: ObservableObject {
         }
 
         #if DEBUG
-        if currentTier > .free, let debugToken = debugSubscriptionToken {
+        if let debugToken = debugSubscriptionToken {
             return debugToken
         }
         #endif
@@ -382,6 +392,15 @@ final class SubscriptionManager: ObservableObject {
     }
 
     #if DEBUG
+    @discardableResult
+    private func applyDebugSubscriptionTokenIfAvailable() -> Bool {
+        guard debugSubscriptionToken != nil else { return false }
+        currentTier = .pro
+        currentProductId = SubscriptionProductID.proMonthly
+        expirationDate = nil
+        return true
+    }
+
     private var debugSubscriptionToken: String? {
         guard let token = Bundle.main.object(forInfoDictionaryKey: "NoteLabDevSubscriptionToken") as? String else {
             return nil
