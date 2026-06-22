@@ -140,8 +140,8 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
             multiSelectBackgroundView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
             container.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
             container.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
-            container.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 22),
-            container.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -22)
+            container.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
+            container.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24)
         ])
     }
 

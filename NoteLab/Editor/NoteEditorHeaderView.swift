@@ -139,22 +139,6 @@ struct NoteEditorHeaderView: View {
                 Color.clear.frame(height: 0)
             } else {
                 VStack(alignment: .leading, spacing: 24) {
-                    if showsReadingChrome {
-                        HStack(spacing: 8) {
-                            ZStack {
-                                Circle()
-                                    .fill(accent.opacity(0.12))
-                                    .frame(width: 20, height: 20)
-                                Circle()
-                                    .fill(accent.opacity(0.75))
-                                    .frame(width: 10, height: 10)
-                            }
-                            Text("\(metadata.notebookLabel) · 已同步")
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
-                                .foregroundStyle(secondaryInk)
-                        }
-                    }
-
                     if let aiPosterText, showsReadingChrome {
                         aiPoster(text: aiPosterText)
                     } else {
@@ -253,7 +237,21 @@ struct NoteEditorHeaderView: View {
             .minimumScaleFactor(0.85)
             .padding(.horizontal, 13)
             .frame(height: 34)
-            .background(paper.opacity(usesLightForeground ? 1 : 0.72), in: Capsule())
+            .background(metadataChipFill, in: Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(line.opacity(usesLightForeground ? 0.8 : 0.32), lineWidth: 0.7)
+            }
+    }
+
+    private var metadataChipFill: Color {
+        if usesLightForeground {
+            return Color.white.opacity(0.14)
+        }
+        if let currentStyle {
+            return Color(hex: currentStyle.markHex).opacity(0.14)
+        }
+        return Theme.editorPaperSoft.opacity(0.74)
     }
 
     private func contentPreviewCard(_ preview: NoteEditorHeaderMetadata.Preview) -> some View {

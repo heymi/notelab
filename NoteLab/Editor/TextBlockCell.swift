@@ -211,7 +211,7 @@ private enum TweetLinkPreviewDetector {
     }
 }
 
-private struct TweetPreviewPayload: Decodable {
+private struct TweetPreviewPayload: Codable {
     let url: String?
     let author_name: String?
     let author_url: String?
@@ -243,11 +243,15 @@ private enum GitHubLinkPreviewDetector {
 }
 
 private enum GitHubPreviewLoader {
-    // ponytail: LP metadata cache only; disk cache if relaunch latency matters.
     private static let cache = Mutex<[URL: LPLinkMetadata]>([:])
 
     static func cachedMetadata(for url: URL) -> LPLinkMetadata? {
-        cache.withLock { $0[url] }
+        if let cached = cache.withLock({ $0[url] }) {
+            return cached
+        }
+        guard let metadata = LinkPreviewDiskCache.loadMetadata(for: url) else { return nil }
+        cache.withLock { $0[url] = metadata }
+        return metadata
     }
 
     static func load(from url: URL) async throws -> LPLinkMetadata {
@@ -265,21 +269,31 @@ private enum GitHubPreviewLoader {
             }
         }
         cache.withLock { $0[url] = metadata }
+        LinkPreviewDiskCache.saveMetadata(metadata, for: url)
         return metadata
     }
 }
 
 private enum TweetPreviewLoader {
-    // ponytail: in-memory cache; add disk TTL only if cold starts become a real problem.
     private static let cache = Mutex<[URL: TweetPreviewPayload]>([:])
     private static let snapshots = Mutex<[URL: UIImage]>([:])
 
     static func cachedPayload(for tweetURL: URL) -> TweetPreviewPayload? {
-        cache.withLock { $0[tweetURL] }
+        if let cached = cache.withLock({ $0[tweetURL] }) {
+            return cached
+        }
+        guard let payload: TweetPreviewPayload = LinkPreviewDiskCache.loadJSON(for: tweetURL, suffix: "tweet.json") else { return nil }
+        cache.withLock { $0[tweetURL] = payload }
+        return payload
     }
 
     static func cachedSnapshot(for tweetURL: URL) -> UIImage? {
-        snapshots.withLock { $0[tweetURL] }
+        if let cached = snapshots.withLock({ $0[tweetURL] }) {
+            return cached
+        }
+        guard let image = LinkPreviewDiskCache.loadImage(for: tweetURL) else { return nil }
+        snapshots.withLock { $0[tweetURL] = image }
+        return image
     }
 
     static func load(from tweetURL: URL) async throws -> TweetPreviewPayload {
@@ -299,10 +313,12 @@ private enum TweetPreviewLoader {
 
     private static func store(_ payload: TweetPreviewPayload, for tweetURL: URL) {
         cache.withLock { $0[tweetURL] = payload }
+        LinkPreviewDiskCache.saveJSON(payload, for: tweetURL, suffix: "tweet.json")
     }
 
     static func storeSnapshot(_ image: UIImage, for tweetURL: URL) {
         snapshots.withLock { $0[tweetURL] = image }
+        LinkPreviewDiskCache.saveImage(image, for: tweetURL)
     }
 
     static func plainText(from html: String) -> String {
@@ -318,6 +334,57 @@ private enum TweetPreviewLoader {
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
+    }
+}
+
+private enum LinkPreviewDiskCache {
+    private static let directory: URL = {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let directory = base.appendingPathComponent("LinkPreviews", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }()
+
+    private static func key(for url: URL) -> String {
+        Data(url.absoluteString.utf8)
+            .base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func fileURL(for url: URL, suffix: String) -> URL {
+        directory.appendingPathComponent("\(key(for: url)).\(suffix)")
+    }
+
+    static func loadJSON<T: Decodable>(for url: URL, suffix: String) -> T? {
+        guard let data = try? Data(contentsOf: fileURL(for: url, suffix: suffix)) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    static func saveJSON<T: Encodable>(_ value: T, for url: URL, suffix: String) {
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        try? data.write(to: fileURL(for: url, suffix: suffix), options: .atomic)
+    }
+
+    static func loadImage(for url: URL) -> UIImage? {
+        guard let data = try? Data(contentsOf: fileURL(for: url, suffix: "png")) else { return nil }
+        return UIImage(data: data)
+    }
+
+    static func saveImage(_ image: UIImage, for url: URL) {
+        guard let data = image.pngData() else { return }
+        try? data.write(to: fileURL(for: url, suffix: "png"), options: .atomic)
+    }
+
+    static func loadMetadata(for url: URL) -> LPLinkMetadata? {
+        guard let data = try? Data(contentsOf: fileURL(for: url, suffix: "lpmetadata")) else { return nil }
+        return try? NSKeyedUnarchiver.unarchivedObject(ofClass: LPLinkMetadata.self, from: data)
+    }
+
+    static func saveMetadata(_ metadata: LPLinkMetadata, for url: URL) {
+        guard let data = try? NSKeyedArchiver.archivedData(withRootObject: metadata, requiringSecureCoding: true) else { return }
+        try? data.write(to: fileURL(for: url, suffix: "lpmetadata"), options: .atomic)
     }
 }
 
@@ -519,9 +586,9 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
         NSLayoutConstraint.activate([
             sentHighlightBackgroundView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 2),
             sentHighlightBackgroundView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -2),
-            sentHighlightBackgroundView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 34),
-            sentHighlightBackgroundView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -34),
-            quoteBorderView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 40),
+            sentHighlightBackgroundView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
+            sentHighlightBackgroundView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
+            quoteBorderView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 28),
             quoteBorderView.topAnchor.constraint(equalTo: hStack.topAnchor, constant: 2),
             quoteBorderView.bottomAnchor.constraint(equalTo: hStack.bottomAnchor, constant: -2),
             quoteBorderView.widthAnchor.constraint(equalToConstant: 4),
@@ -531,12 +598,12 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
             todoCardBackgroundView.trailingAnchor.constraint(equalTo: hStack.trailingAnchor),
             multiSelectBackgroundView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 2),
             multiSelectBackgroundView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -2),
-            multiSelectBackgroundView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 34),
-            multiSelectBackgroundView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -34),
+            multiSelectBackgroundView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
+            multiSelectBackgroundView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
             hStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
             hStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
-            hStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 46),
-            hStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -46)
+            hStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
+            hStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24)
         ])
 
         prefixLabel.font = UIFont.systemFont(ofSize: 16, weight: .semibold)

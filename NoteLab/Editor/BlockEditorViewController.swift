@@ -141,10 +141,14 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     
 
     func updateContentInsets(top: CGFloat, bottom: CGFloat) {
+        let wasAtTop = tableView.contentOffset.y <= -tableView.contentInset.top + 1
         tableView.contentInset.top = top
         tableView.contentInset.bottom = bottom
         tableView.scrollIndicatorInsets.top = top
         tableView.scrollIndicatorInsets.bottom = bottom
+        if wasAtTop {
+            tableView.setContentOffset(CGPoint(x: tableView.contentOffset.x, y: -top), animated: false)
+        }
         updateNotebookBackgroundLayout()
     }
 

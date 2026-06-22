@@ -147,8 +147,8 @@ final class AttachmentBlockCell: UITableViewCell {
             
             containerView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
             containerView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
-            containerView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 22),
-            containerView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -22),
+            containerView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
+            containerView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
             heightConstraint,
             
             thumbnailImageView.topAnchor.constraint(equalTo: containerView.topAnchor),

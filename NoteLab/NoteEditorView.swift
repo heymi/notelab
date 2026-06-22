@@ -250,7 +250,7 @@ struct NoteEditorView: View {
         GeometryReader { proxy in
             let safeTop = proxy.safeAreaInsets.top
             let contentTopInset = max(0, safeTop - 44)
-            let topInset = contentTopInset + 58
+            let topInset = contentTopInset + 34
             let toolbarTopInset = max(0, safeTop - 56)
             let bottomInset: CGFloat = 130
 
@@ -698,22 +698,39 @@ struct NoteEditorView: View {
         editorBottomBarContent
     }
 
-    private var presentationModeBinding: Binding<NoteDetailPresentationMode> {
-        Binding(
-            get: { detailPresentationMode },
-            set: { mode in
-                mode.isEditing ? enterEditingMode() : hideKeyboard()
-            }
-        )
-    }
-
     @ViewBuilder
     private var editorBottomBarContent: some View {
-        Picker("", selection: presentationModeBinding) {
-            Text("阅读").tag(NoteDetailPresentationMode.reading)
-            Text("编辑").tag(NoteDetailPresentationMode.editing)
+        GlassEffectContainer(spacing: 0) {
+            HStack(spacing: 0) {
+                editorModeButton("阅读", isSelected: !detailPresentationMode.isEditing) {
+                    hideKeyboard()
+                }
+                editorModeButton("编辑", isSelected: detailPresentationMode.isEditing) {
+                    enterEditingMode()
+                }
+            }
+            .padding(5)
+            .frame(width: 188, height: 62)
+            .glassEffect(.regular, in: Capsule())
         }
-        .pickerStyle(.segmented)
+    }
+
+    private func editorModeButton(_ title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 15, weight: .black, design: .rounded))
+                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .glassEffect(isSelected ? .regular : .identity, in: Capsule())
+                .overlay {
+                    if isSelected {
+                        Capsule()
+                            .strokeBorder(.white.opacity(0.5), lineWidth: 1)
+                    }
+                }
+                .shadow(color: isSelected ? .black.opacity(0.14) : .clear, radius: 8, x: 0, y: 4)
+        }
+        .buttonStyle(.plain)
     }
 
     private var linkBlocks: [LinkedNoteBlock] {
