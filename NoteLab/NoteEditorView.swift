@@ -259,7 +259,9 @@ struct NoteEditorView: View {
             let contentTopInset = max(0, safeTop - 44)
             let topInset = contentTopInset + 34
             let toolbarTopInset = max(0, safeTop - 56)
-            let bottomInset: CGFloat = 130 + keyboardOverlap
+            let systemKeyboardOverlap = max(0, UIScreen.main.bounds.maxY - proxy.frame(in: .global).maxY)
+            let keyboardPadding = max(0, keyboardOverlap - systemKeyboardOverlap)
+            let bottomInset: CGFloat = 130 + keyboardPadding
 
             Group {
                 if AppConfig.useWebEditor {
@@ -341,11 +343,10 @@ struct NoteEditorView: View {
                     editorBottomBar
                         .padding(.horizontal, 18)
                         .padding(.top, 4)
-                        .padding(.bottom, keyboardOverlap > 0 ? keyboardOverlap + 8 : max(proxy.safeAreaInsets.bottom, 8))
+                        .padding(.bottom, keyboardPadding > 0 ? keyboardPadding + 8 : max(proxy.safeAreaInsets.bottom, 8))
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }
-            .ignoresSafeArea(.keyboard, edges: .bottom)
         }
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
