@@ -170,7 +170,7 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
             view.endEditing(true)
             hideActiveTableControls()
         }
-        reloadVisibleRowsWithoutAnimation()
+        refreshVisibleRowsForPresentationMode()
         updateBodyPaperLayout()
     }
 
@@ -1084,6 +1084,35 @@ extension BlockEditorViewController {
         guard let visibleRows = tableView.indexPathsForVisibleRows, !visibleRows.isEmpty else { return }
         UIView.performWithoutAnimation {
             tableView.reloadRows(at: visibleRows, with: .none)
+        }
+    }
+
+    private func refreshVisibleRowsForPresentationMode() {
+        guard let visibleRows = tableView.indexPathsForVisibleRows, !visibleRows.isEmpty else { return }
+        UIView.performWithoutAnimation {
+            for indexPath in visibleRows where indexPath.row < document.blocks.count {
+                let block = document.blocks[indexPath.row]
+                switch tableView.cellForRow(at: indexPath) {
+                case let cell as TextBlockCell:
+                    cell.configure(with: block, numberIndex: numberIndexForBlock(at: indexPath.row), presentationMode: presentationMode, background: currentBackground)
+                    cell.setVisuallyCollapsed(isHiddenReadingBlock(at: indexPath.row))
+                    cell.setMultiSelected(isMultiSelecting && multiSelectedBlockIds.contains(block.id))
+                    cell.setContentInteraction(editable: presentationMode.isEditing && !isMultiSelecting, selectable: !isMultiSelecting)
+                    cell.setSentHighlight(sentHighlightBlockIds.contains(block.id))
+                case let cell as TableBlockCell:
+                    cell.setMultiSelected(isMultiSelecting && multiSelectedBlockIds.contains(block.id))
+                    cell.setContentInteraction(editable: presentationMode.isEditing && !isMultiSelecting, selectable: !isMultiSelecting)
+                    cell.setControlsVisible(presentationMode.isEditing && !isMultiSelecting && activeTableIndexPath == indexPath)
+                    cell.setSentHighlight(sentHighlightBlockIds.contains(block.id))
+                case let cell as AttachmentBlockCell:
+                    cell.setMultiSelected(isMultiSelecting && multiSelectedBlockIds.contains(block.id))
+                    cell.setSentHighlight(sentHighlightBlockIds.contains(block.id))
+                default:
+                    break
+                }
+            }
+            tableView.beginUpdates()
+            tableView.endUpdates()
         }
     }
 

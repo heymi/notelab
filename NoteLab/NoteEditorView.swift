@@ -62,6 +62,7 @@ struct NoteEditorView: View {
     @State private var flushNextDocumentChange = false
     @State private var detailPresentationMode: NoteDetailPresentationMode = .reading
     @State private var bodyFocusToken = UUID()
+    @State private var keyboardOverlap: CGFloat = 0
     @State private var whiteboardLinkDrag: CGSize = .zero
     @AppStorage("whiteboard.link.offset.x") private var whiteboardLinkOffsetX: Double = 0
     @AppStorage("whiteboard.link.offset.y") private var whiteboardLinkOffsetY: Double = 0
@@ -100,6 +101,12 @@ struct NoteEditorView: View {
                       let record = voiceNoteRecord,
                       record.id == recordId else { return }
                 voiceCoordinator.retry(recordId: record.id, profileId: record.profileId, store: store, aiClient: aiClient)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
+                updateKeyboardOverlap(from: notification)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                keyboardOverlap = 0
             }
             .sheet(isPresented: $showAIAction) {
                 AIMenuSheet(
@@ -252,7 +259,7 @@ struct NoteEditorView: View {
             let contentTopInset = max(0, safeTop - 44)
             let topInset = contentTopInset + 34
             let toolbarTopInset = max(0, safeTop - 56)
-            let bottomInset: CGFloat = 130
+            let bottomInset: CGFloat = 130 + keyboardOverlap
 
             Group {
                 if AppConfig.useWebEditor {
@@ -330,17 +337,15 @@ struct NoteEditorView: View {
                         .padding(.top, 4)
                         .padding(.bottom, max(proxy.safeAreaInsets.bottom, 8))
                         .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if detailPresentationMode.isEditing {
+                } else {
                     editorBottomBar
                         .padding(.horizontal, 18)
                         .padding(.top, 4)
-                        .padding(.bottom, 0)
+                        .padding(.bottom, keyboardOverlap > 0 ? keyboardOverlap + 8 : max(proxy.safeAreaInsets.bottom, 8))
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }
+            .ignoresSafeArea(.keyboard, edges: .bottom)
         }
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
@@ -525,9 +530,19 @@ struct NoteEditorView: View {
     }
 
     private func enterEditingMode(focusBody: Bool = true) {
+        guard !detailPresentationMode.isEditing || focusBody else { return }
         detailPresentationMode = .editing
         if focusBody {
             bodyFocusToken = UUID()
+        }
+    }
+
+    private func updateKeyboardOverlap(from notification: Notification) {
+        guard let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+        let overlap = max(0, UIScreen.main.bounds.maxY - frame.minY)
+        let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+        withAnimation(.easeOut(duration: duration)) {
+            keyboardOverlap = overlap
         }
     }
 
