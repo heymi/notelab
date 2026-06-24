@@ -214,7 +214,7 @@ final class BlockEditorViewControllerMac: NSViewController {
         case .requestAttachment:
             presentAttachmentPicker()
             return
-        case .insertAttachment(let data, let type, let fileName):
+        case .insertAttachment(let data, let type, let fileName, _):
             insertAttachment(data: data, type: type, fileName: fileName)
             return
         case .bold:

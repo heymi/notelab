@@ -40,7 +40,7 @@ final class MaterialsLibraryModel: ObservableObject {
             .reduce(into: [UUID: Note]()) { $0[$1.id] = $1 }
 
         let validAttachments = attachments
-            .filter { noteLookup[$0.noteId] != nil && !$0.isAudioAttachment }
+            .filter { noteLookup[$0.noteId] != nil && !$0.isAudioAttachment && !$0.isLivePhotoMotionAttachment }
             .reduce(into: [UUID: AttachmentRecord]()) { result, attachment in
                 if let existing = result[attachment.id], existing.updatedAt >= attachment.updatedAt {
                     return
@@ -79,5 +79,9 @@ private extension AttachmentRecord {
         }
         let ext = (fileName as NSString).pathExtension.lowercased()
         return ["aac", "aif", "aiff", "amr", "caf", "flac", "m4a", "mp3", "ogg", "opus", "wav"].contains(ext)
+    }
+
+    var isLivePhotoMotionAttachment: Bool {
+        LivePhotoAttachment.isMotionCompanion(fileName: fileName, mimeType: mimeType)
     }
 }

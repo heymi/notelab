@@ -10,7 +10,7 @@ enum EditorCommand: Equatable {
     case code
     case table(rows: Int, cols: Int)
     case requestAttachment
-    case insertAttachment(data: Data, type: AttachmentType, fileName: String)
+    case insertAttachment(data: Data, type: AttachmentType, fileName: String, livePhotoMotionData: Data? = nil)
     case bold
     case italic
     case inlineCode

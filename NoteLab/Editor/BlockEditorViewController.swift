@@ -3,6 +3,7 @@ import Foundation
 import UIKit
 import SwiftUI
 import UniformTypeIdentifiers
+import Photos
 
 final class BlockEditorViewController: UIViewController, UIGestureRecognizerDelegate {
     var document: NoteDocument
@@ -317,8 +318,8 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
         case .requestAttachment:
             presentAttachmentPicker()
             return
-        case .insertAttachment(let data, let type, let fileName):
-            insertAttachment(data: data, type: type, fileName: fileName)
+        case .insertAttachment(let data, let type, let fileName, let livePhotoMotionData):
+            insertAttachment(data: data, type: type, fileName: fileName, livePhotoMotionData: livePhotoMotionData)
             return
         case .bold:
             applyInlineFormat(at: indexPath, prefix: "**", suffix: "**")
@@ -427,6 +428,9 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
         alert.addAction(UIAlertAction(title: "图片", style: .default) { _ in
             self.presentImagePicker()
         })
+        alert.addAction(UIAlertAction(title: "拍摄", style: .default) { _ in
+            self.presentCameraPicker()
+        })
         alert.addAction(UIAlertAction(title: "PDF / 文件", style: .default) { _ in
             self.presentDocumentPicker()
         })
@@ -447,6 +451,16 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
         picker.mediaTypes = ["public.image"]
         present(picker, animated: true)
     }
+
+    private func presentCameraPicker() {
+        let picker = UIImagePickerController()
+        picker.delegate = self
+        picker.sourceType = UIImagePickerController.isSourceTypeAvailable(.camera) ? .camera : .photoLibrary
+        let availableTypes = UIImagePickerController.availableMediaTypes(for: picker.sourceType) ?? []
+        let livePhotoType = "com.apple.live-photo"
+        picker.mediaTypes = availableTypes.contains(livePhotoType) ? ["public.image", livePhotoType] : ["public.image"]
+        present(picker, animated: true)
+    }
     
     private func presentDocumentPicker() {
         let types: [UTType] = [.pdf, .image, .movie, .mpeg4Movie, .quickTimeMovie]
@@ -456,7 +470,7 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
         present(picker, animated: true)
     }
     
-    private func insertAttachment(data: Data, type: AttachmentType, fileName: String) {
+    private func insertAttachment(data: Data, type: AttachmentType, fileName: String, livePhotoMotionData: Data? = nil) {
         let indexPath = activeIndexPath ?? tableView.indexPathForSelectedRow ?? IndexPath(row: document.blocks.count, section: 0)
         let safeRow = min(indexPath.row, document.blocks.count)
         
@@ -480,6 +494,18 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
                         mimeType: mimeType
                     )
                     await AttachmentStorage.shared.uploadAndUpsertMetadataV3(attachment: localAttachment)
+                    if let livePhotoMotionData {
+                        let motionFileName = LivePhotoAttachment.motionFileName(for: attachmentId)
+                        let motionAttachment = try AttachmentStorage.shared.saveNewAttachmentV3(
+                            data: livePhotoMotionData,
+                            attachmentId: UUID(),
+                            ownerId: ownerId,
+                            noteId: noteId,
+                            fileName: motionFileName,
+                            mimeType: AttachmentStorage.mimeType(for: motionFileName)
+                        )
+                        await AttachmentStorage.shared.uploadAndUpsertMetadataV3(attachment: motionAttachment)
+                    }
                 } catch {
                     print("Failed to save attachment record: \(error)")
                 }
@@ -1141,12 +1167,13 @@ extension BlockEditorViewController: AttachmentBlockCellDelegate {
         }
     }
     
-    func attachmentBlockCellDidRequestPreview(_ cell: AttachmentBlockCell, attachmentId: UUID, data: Data, fileName: String, type: AttachmentType) {
+    func attachmentBlockCellDidRequestPreview(_ cell: AttachmentBlockCell, attachmentId: UUID, data: Data, fileName: String, type: AttachmentType, livePhotoMotionData: Data?) {
         let previewController = AttachmentPreviewViewController(
             attachmentId: attachmentId,
             data: data,
             fileName: fileName,
             type: type,
+            livePhotoMotionData: livePhotoMotionData,
             onDelete: { [weak self] attachmentId in
                 self?.deleteAttachment(withId: attachmentId)
             },
@@ -1247,10 +1274,26 @@ extension BlockEditorViewController: AttachmentBlockCellDelegate {
 extension BlockEditorViewController: UIImagePickerControllerDelegate, UINavigationControllerDelegate {
     func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]) {
         picker.dismiss(animated: true)
-        
-        guard let image = info[.originalImage] as? UIImage,
+
+        let image = info[.originalImage] as? UIImage
+        if let livePhoto = info[.livePhoto] as? PHLivePhoto {
+            Task {
+                guard let payload = await NoteAttachmentInserter.livePhotoPayload(from: livePhoto, fallbackImage: image) else { return }
+                await MainActor.run {
+                    self.insertAttachment(
+                        data: payload.data,
+                        type: payload.type,
+                        fileName: payload.fileName,
+                        livePhotoMotionData: payload.livePhotoMotionData
+                    )
+                }
+            }
+            return
+        }
+
+        guard let image,
               let data = image.jpegData(compressionQuality: 0.8) else { return }
-        
+
         let fileName = "Image_\(Date().timeIntervalSince1970).jpg"
         insertAttachment(data: data, type: .image, fileName: fileName)
     }

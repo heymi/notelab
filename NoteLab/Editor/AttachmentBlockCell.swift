@@ -7,7 +7,7 @@ import SwiftData
 
 protocol AttachmentBlockCellDelegate: AnyObject {
     func attachmentBlockCellDidRequestDelete(_ cell: AttachmentBlockCell)
-    func attachmentBlockCellDidRequestPreview(_ cell: AttachmentBlockCell, attachmentId: UUID, data: Data, fileName: String, type: AttachmentType)
+    func attachmentBlockCellDidRequestPreview(_ cell: AttachmentBlockCell, attachmentId: UUID, data: Data, fileName: String, type: AttachmentType, livePhotoMotionData: Data?)
     func attachmentBlockCellDidBeginDragging(_ cell: AttachmentBlockCell, locationInWindow: CGPoint)
     func attachmentBlockCellDidDrag(_ cell: AttachmentBlockCell, locationInWindow: CGPoint)
     func attachmentBlockCellDidEndDragging(_ cell: AttachmentBlockCell, locationInWindow: CGPoint)
@@ -25,6 +25,7 @@ final class AttachmentBlockCell: UITableViewCell {
     private let containerView = UIView()
     private let thumbnailImageView = UIImageView()
     private let infoLabel = UILabel()
+    private let livePhotoBadgeView = UIImageView(image: UIImage(systemName: "livephoto"))
     private let deleteButton = UIButton(type: .system)
     private let loadingIndicator = UIActivityIndicatorView(style: .medium)
     
@@ -33,12 +34,14 @@ final class AttachmentBlockCell: UITableViewCell {
     private var fileName: String?
     private var storagePath: String?
     private var attachmentId: UUID?
+    private var livePhotoMotionData: Data?
     
     private var blockId: UUID = UUID()
     private var isMultiSelected: Bool = false
     private var isSentHighlighted: Bool = false
     private var isDragging: Bool = false
     private var loadTask: Task<Void, Never>?
+    private var livePhotoMotionLoadTask: Task<Void, Never>?
     
     private let multiSelectBackgroundView = UIView()
     private let sentHighlightBackgroundView = UIView()
@@ -118,6 +121,12 @@ final class AttachmentBlockCell: UITableViewCell {
         infoLabel.font = .systemFont(ofSize: 14, weight: .semibold)
         infoLabel.textColor = infoLabelColor
         infoLabel.numberOfLines = 1
+
+        livePhotoBadgeView.tintColor = .white
+        livePhotoBadgeView.backgroundColor = UIColor.black.withAlphaComponent(0.38)
+        livePhotoBadgeView.layer.cornerRadius = 14
+        livePhotoBadgeView.contentMode = .center
+        livePhotoBadgeView.isHidden = true
         
         deleteButton.isHidden = true
         
@@ -126,11 +135,13 @@ final class AttachmentBlockCell: UITableViewCell {
         
         containerView.addSubview(thumbnailImageView)
         containerView.addSubview(infoLabel)
+        containerView.addSubview(livePhotoBadgeView)
         containerView.addSubview(deleteButton)
         containerView.addSubview(loadingIndicator)
         
         thumbnailImageView.translatesAutoresizingMaskIntoConstraints = false
         infoLabel.translatesAutoresizingMaskIntoConstraints = false
+        livePhotoBadgeView.translatesAutoresizingMaskIntoConstraints = false
         deleteButton.translatesAutoresizingMaskIntoConstraints = false
         loadingIndicator.translatesAutoresizingMaskIntoConstraints = false
         
@@ -163,6 +174,11 @@ final class AttachmentBlockCell: UITableViewCell {
             infoLabel.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 12),
             infoLabel.bottomAnchor.constraint(equalTo: containerView.bottomAnchor, constant: -12),
             infoLabel.trailingAnchor.constraint(lessThanOrEqualTo: deleteButton.leadingAnchor, constant: -12),
+
+            livePhotoBadgeView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 12),
+            livePhotoBadgeView.topAnchor.constraint(equalTo: containerView.topAnchor, constant: 12),
+            livePhotoBadgeView.widthAnchor.constraint(equalToConstant: 28),
+            livePhotoBadgeView.heightAnchor.constraint(equalToConstant: 28),
             
             deleteButton.topAnchor.constraint(equalTo: containerView.topAnchor, constant: 12),
             deleteButton.trailingAnchor.constraint(equalTo: containerView.trailingAnchor, constant: -12),
@@ -202,6 +218,8 @@ final class AttachmentBlockCell: UITableViewCell {
         // Cancel any ongoing load task
         loadTask?.cancel()
         loadTask = nil
+        livePhotoMotionLoadTask?.cancel()
+        livePhotoMotionLoadTask = nil
         
         self.blockId = block.id
         guard let attachment = block.attachment else { return }
@@ -211,6 +229,8 @@ final class AttachmentBlockCell: UITableViewCell {
         self.fileName = attachment.fileName
         self.storagePath = attachment.storagePath
         self.attachmentData = nil  // Will be loaded
+        self.livePhotoMotionData = nil
+        livePhotoBadgeView.isHidden = true
         
         let isFullBleedAttachment = attachment.type == .image || attachment.type == .pdf
         infoLabel.text = isFullBleedAttachment ? nil : attachment.fileName
@@ -236,6 +256,10 @@ final class AttachmentBlockCell: UITableViewCell {
             thumbnailImageView.image = UIImage(systemName: "photo")
             thumbnailImageView.contentMode = .scaleAspectFit
         }
+
+        if attachment.type == .image, let storagePath = attachment.storagePath {
+            loadLivePhotoMotionIfAvailable(stillAttachmentId: attachment.id, storagePath: storagePath)
+        }
         
         // Enable dragging by default
         setDraggingEnabled(true)
@@ -246,6 +270,7 @@ final class AttachmentBlockCell: UITableViewCell {
         containerView.layer.borderWidth = 0.5
         dragHandleView.isHidden = false
         thumbnailImageView.contentMode = .scaleAspectFill
+        livePhotoBadgeView.isHidden = true
         
         // Reset height constraint to default
         containerHeightConstraint?.isActive = false
@@ -315,6 +340,31 @@ final class AttachmentBlockCell: UITableViewCell {
                     self?.thumbnailImageView.tintColor = .systemOrange
                 }
                 print("[AttachmentBlockCell] load failed attachmentId=\(resolved.attachmentId.uuidString.lowercased()) storagePath=\(resolved.storagePath) error=\(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func loadLivePhotoMotionIfAvailable(stillAttachmentId: UUID, storagePath: String) {
+        guard let profileId = CloudKitSchema.ownerId(from: storagePath) else { return }
+        livePhotoMotionLoadTask?.cancel()
+        livePhotoMotionLoadTask = Task { [weak self] in
+            let companion = await MainActor.run {
+                try? AttachmentRepository().findLivePhotoMotion(profileId: profileId, stillAttachmentId: stillAttachmentId)
+            }
+            guard let companion else { return }
+            do {
+                let data = try await AttachmentStorage.shared.loadAttachmentData(
+                    attachmentId: companion.id,
+                    storagePath: companion.storagePath,
+                    fileName: companion.fileName
+                )
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self?.livePhotoMotionData = data
+                    self?.livePhotoBadgeView.isHidden = false
+                }
+            } catch {
+                print("[AttachmentBlockCell] live photo motion load failed stillAttachmentId=\(stillAttachmentId.uuidString.lowercased()) error=\(error.localizedDescription)")
             }
         }
     }
@@ -570,8 +620,11 @@ final class AttachmentBlockCell: UITableViewCell {
         loadTask?.cancel()
         loadTask = nil
         loadingIndicator.stopAnimating()
+        livePhotoMotionLoadTask?.cancel()
+        livePhotoMotionLoadTask = nil
         thumbnailImageView.image = nil
         attachmentData = nil
+        livePhotoMotionData = nil
         attachmentId = nil
         storagePath = nil
         
@@ -603,7 +656,7 @@ final class AttachmentBlockCell: UITableViewCell {
     @objc private func handleTap() {
         guard !isDragging else { return }
         guard let data = attachmentData, let fileName = fileName, let type = attachmentType else { return }
-        delegate?.attachmentBlockCellDidRequestPreview(self, attachmentId: blockId, data: data, fileName: fileName, type: type)
+        delegate?.attachmentBlockCellDidRequestPreview(self, attachmentId: blockId, data: data, fileName: fileName, type: type, livePhotoMotionData: livePhotoMotionData)
     }
     
     @objc private func handleTwoFingerPan(_ gesture: UIPanGestureRecognizer) {
