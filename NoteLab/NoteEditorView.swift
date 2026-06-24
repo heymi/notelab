@@ -711,7 +711,14 @@ struct NoteEditorView: View {
     }
 
     private var editorBottomBar: some View {
-        editorBottomBarContent
+        ZStack(alignment: .trailing) {
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture {}
+            editorBottomBarContent
+        }
+        .frame(width: 248, height: 78)
+        .contentShape(Rectangle())
     }
 
     @ViewBuilder
@@ -732,11 +739,15 @@ struct NoteEditorView: View {
     }
 
     private func editorModeButton(_ title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        Button {
+            Haptics.shared.play(.selection)
+            action()
+        } label: {
             Text(title)
                 .font(.system(size: 15, weight: .black, design: .rounded))
                 .foregroundStyle(isSelected ? Color.primary : Color.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
                 .glassEffect(isSelected ? .regular : .identity, in: Capsule())
                 .overlay {
                     if isSelected {
