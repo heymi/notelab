@@ -116,14 +116,6 @@ struct NoteLabTests {
         #expect(AttachmentStorage.attachmentType(from: "video/quicktime") == .video)
     }
 
-    @Test func livePhotoMotionCompanionNamesRoundTripToStillAttachment() async throws {
-        let stillId = UUID()
-        let motionFileName = LivePhotoAttachment.motionFileName(for: stillId)
-        #expect(LivePhotoAttachment.stillAttachmentId(fromMotionFileName: motionFileName) == stillId)
-        #expect(LivePhotoAttachment.isMotionCompanion(fileName: motionFileName, mimeType: "video/quicktime"))
-        #expect(!LivePhotoAttachment.isMotionCompanion(fileName: "\(stillId.uuidString).mov", mimeType: "video/quicktime"))
-    }
-
     @Test func pureImageOnlyNotesAreDetectedForAIGuard() async throws {
         let imageOnly = NoteDocument(version: 1, blocks: [
             .attachment(type: .image, fileName: "image.png", storagePath: "attachments/image.png", attachmentId: UUID())
@@ -270,57 +262,6 @@ struct NoteLabTests {
 
         #expect(groups.count == 1)
         #expect(groups.first?.attachments == [imageAttachment])
-    }
-
-    @MainActor @Test func materialsLibraryExcludesLivePhotoMotionCompanions() async throws {
-        let profileId = UUID()
-        let noteId = UUID()
-        let stillId = UUID()
-        let motionId = UUID()
-        let note = Note(
-            id: noteId,
-            title: "Live",
-            summary: "",
-            paragraphCount: 0,
-            bulletCount: 0,
-            hasAdditionalContext: false,
-            createdAt: Date(),
-            updatedAt: Date(),
-            content: ""
-        )
-        let still = AttachmentRecord(
-            id: stillId,
-            profileId: profileId,
-            noteId: noteId,
-            storagePath: "attachments/still.heic",
-            fileName: "\(stillId.uuidString).heic",
-            mimeType: "image/heic",
-            fileSize: 10,
-            originalPath: nil,
-            createdAt: Date(),
-            updatedAt: Date(),
-            deletedAt: nil,
-            missingLocalFile: false,
-            isUploaded: true
-        )
-        let motion = AttachmentRecord(
-            id: motionId,
-            profileId: profileId,
-            noteId: noteId,
-            storagePath: "attachments/motion.mov",
-            fileName: LivePhotoAttachment.motionFileName(for: stillId),
-            mimeType: "video/quicktime",
-            fileSize: 20,
-            originalPath: nil,
-            createdAt: Date(),
-            updatedAt: Date(),
-            deletedAt: nil,
-            missingLocalFile: false,
-            isUploaded: true
-        )
-
-        let groups = MaterialsLibraryModel.buildGroups(attachments: [motion, still], notes: [note])
-        #expect(groups.first?.attachments == [still])
     }
 
     @Test func stableIdentityUsesCloudKitRecordNameAsCanonicalScope() async throws {

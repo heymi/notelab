@@ -82,17 +82,12 @@ Run these tests on a real device after any changes to `TipTapEditorView.swift`.
 - [ ] Image shows loading state briefly
 - [ ] After upload completes, image still visible
 - [ ] Close and reopen note → image still visible
-- [ ] Tap 📎 → select Live Photo from Photos → still image appears immediately
-- [ ] Open Live Photo preview after paired video finishes loading → photo plays motion
-- [ ] Tap 📎 → 拍摄 → capture photo/Live Photo → result inserts into note
-- [ ] Reopen/sync on another device → still image appears first, motion becomes available after background download
 
 ### Attachment Round-trip
 - [ ] Insert image → save → reopen → image displays
 - [ ] Check markdown contains `![Attachment](userId/uuid.jpg)` format
 - [ ] Markdown does NOT contain `data:` URLs
 - [ ] Markdown does NOT contain `https://...supabase...` signed URLs
-- [ ] Live Photo paired `.live.mov` is not shown as a separate Assets item
 
 ## 7. Task List Tests
 

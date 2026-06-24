@@ -967,17 +967,6 @@ final class AttachmentRepository {
         try fetchAttachment(profileId: profileId, id: id)?.record
     }
 
-    func findLivePhotoMotion(profileId: UUID, stillAttachmentId: UUID) throws -> AttachmentRecord? {
-        let request = AttachmentEntity.fetchRequest()
-        request.predicate = NSPredicate(
-            format: "profileId == %@ AND fileName == %@ AND deletedAt == nil",
-            profileId.uuidString.lowercased(),
-            LivePhotoAttachment.motionFileName(for: stillAttachmentId)
-        )
-        request.fetchLimit = 1
-        return try storage.mainContext.fetch(request).first?.record
-    }
-
     func applyRemote(profileId: UUID, record: AttachmentRemoteRecord) throws {
         if record.deletedAt == nil,
            try hasTombstone(profileId: profileId, id: record.id, newerThan: record.updatedAt) {

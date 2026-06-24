@@ -6,11 +6,8 @@ import os
 #if canImport(UIKit)
 import UIKit
 #endif
-import Photos
-import PhotosUI
 import QuickLook
 import CoreText
-import UniformTypeIdentifiers
 
 struct NoteEditorView: View {
     @Binding var note: Note
@@ -59,7 +56,6 @@ struct NoteEditorView: View {
     @State private var pendingTipTapCommand: TipTapCommand?
     @State private var showAttachmentPicker = false
     @State private var showImagePicker = false
-    @State private var showCameraPicker = false
     @State private var showDocumentPicker = false
     @State private var showWhiteboardLinks = false
     @State private var showClearWhiteboardConfirm = false
@@ -197,19 +193,13 @@ struct NoteEditorView: View {
             .sheet(isPresented: $showAttachmentPicker) {
                 AttachmentMenuSheet(
                     onPhoto: { showImagePicker = true },
-                    onCamera: { showCameraPicker = true },
                     onFile: { showDocumentPicker = true }
                 )
-                .presentationDetents([.height(240)])
+                .presentationDetents([.height(220)])
             }
             .sheet(isPresented: $showImagePicker) {
-                ImagePickerView { payload in
-                    insertAttachmentPayload(payload)
-                }
-            }
-            .sheet(isPresented: $showCameraPicker) {
-                CameraPickerView { payload in
-                    insertAttachmentPayload(payload)
+                ImagePickerView { image in
+                    insertImageAttachment(image)
                 }
             }
             .sheet(isPresented: $showDocumentPicker) {
@@ -1044,14 +1034,16 @@ private extension View {
     }
 }
 
+import PhotosUI
+
 struct ImagePickerView: UIViewControllerRepresentable {
-    let onPicked: (NoteAttachmentPayload) -> Void
+    let onImagePicked: (UIImage) -> Void
     @Environment(\.dismiss) private var dismiss
 
     func makeUIViewController(context: Context) -> PHPickerViewController {
         var config = PHPickerConfiguration()
         config.selectionLimit = 1
-        config.filter = .any(of: [.images, .livePhotos])
+        config.filter = .images
         let picker = PHPickerViewController(configuration: config)
         picker.delegate = context.coordinator
         return picker
@@ -1073,26 +1065,11 @@ struct ImagePickerView: UIViewControllerRepresentable {
         func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
             parent.dismiss()
             guard let result = results.first else { return }
-
-            if result.itemProvider.canLoadObject(ofClass: PHLivePhoto.self) {
-                result.itemProvider.loadObject(ofClass: PHLivePhoto.self) { [weak self] livePhoto, _ in
-                    guard let self, let livePhoto = livePhoto as? PHLivePhoto else { return }
-                    Task {
-                        guard let payload = await NoteAttachmentInserter.livePhotoPayload(from: livePhoto) else { return }
-                        await MainActor.run {
-                            self.parent.onPicked(payload)
-                        }
-                    }
-                }
-                return
-            }
-
             if result.itemProvider.canLoadObject(ofClass: UIImage.self) {
                 result.itemProvider.loadObject(ofClass: UIImage.self) { [weak self] image, _ in
-                    if let image = image as? UIImage,
-                       let payload = NoteAttachmentInserter.imagePayload(from: image) {
+                    if let image = image as? UIImage {
                         DispatchQueue.main.async {
-                            self?.parent.onPicked(payload)
+                            self?.parent.onImagePicked(image)
                         }
                     }
                 }
@@ -1101,58 +1078,7 @@ struct ImagePickerView: UIViewControllerRepresentable {
     }
 }
 
-struct CameraPickerView: UIViewControllerRepresentable {
-    let onPicked: (NoteAttachmentPayload) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    func makeUIViewController(context: Context) -> UIImagePickerController {
-        let picker = UIImagePickerController()
-        picker.delegate = context.coordinator
-        picker.sourceType = UIImagePickerController.isSourceTypeAvailable(.camera) ? .camera : .photoLibrary
-        let availableTypes = UIImagePickerController.availableMediaTypes(for: picker.sourceType) ?? []
-        let livePhotoType = "com.apple.live-photo"
-        picker.mediaTypes = availableTypes.contains(livePhotoType) ? [UTType.image.identifier, livePhotoType] : [UTType.image.identifier]
-        return picker
-    }
-
-    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
-
-    class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
-        let parent: CameraPickerView
-
-        init(parent: CameraPickerView) {
-            self.parent = parent
-        }
-
-        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
-            parent.dismiss()
-            let image = info[.originalImage] as? UIImage
-            if let livePhoto = info[.livePhoto] as? PHLivePhoto {
-                Task {
-                    let payload = await NoteAttachmentInserter.livePhotoPayload(from: livePhoto, fallbackImage: image)
-                        ?? image.flatMap(NoteAttachmentInserter.imagePayload)
-                    guard let payload else { return }
-                    await MainActor.run {
-                        self.parent.onPicked(payload)
-                    }
-                }
-                return
-            }
-
-            if let image, let payload = NoteAttachmentInserter.imagePayload(from: image) {
-                parent.onPicked(payload)
-            }
-        }
-
-        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-            parent.dismiss()
-        }
-    }
-}
+import UniformTypeIdentifiers
 
 struct DocumentPickerView: UIViewControllerRepresentable {
     let onDocumentPicked: (URL) -> Void
@@ -1590,7 +1516,6 @@ struct ScaleButtonStyle: ButtonStyle {
 
 struct AttachmentMenuSheet: View {
     let onPhoto: () -> Void
-    let onCamera: () -> Void
     let onFile: () -> Void
     @Environment(\.dismiss) private var dismiss
 
@@ -1604,7 +1529,7 @@ struct AttachmentMenuSheet: View {
             Text("插入附件")
                 .font(.system(size: 17, weight: .semibold, design: .rounded))
 
-            HStack(spacing: 14) {
+            HStack(spacing: 20) {
                 Button(action: {
                     dismiss()
                     onPhoto()
@@ -1614,25 +1539,6 @@ struct AttachmentMenuSheet: View {
                             .font(.system(size: 28))
                             .foregroundStyle(.blue)
                         Text("图片")
-                            .font(.system(size: 15, weight: .medium, design: .rounded))
-                            .foregroundStyle(.primary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 24)
-                    .background(Theme.cardBackground)
-                    .clipShape(.rect(cornerRadius: 16))
-                }
-                .buttonStyle(ScaleButtonStyle())
-
-                Button(action: {
-                    dismiss()
-                    onCamera()
-                }) {
-                    VStack(spacing: 12) {
-                        Image(systemName: "camera.fill")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.green)
-                        Text("拍摄")
                             .font(.system(size: 15, weight: .medium, design: .rounded))
                             .foregroundStyle(.primary)
                     }

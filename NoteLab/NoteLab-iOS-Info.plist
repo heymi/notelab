@@ -24,8 +24,6 @@
     <string>$(NOTELAB_DEV_SUBSCRIPTION_TOKEN)</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
-    <key>NSCameraUsageDescription</key>
-    <string>NoteLab 需要使用相机拍摄照片和实况照片插入笔记。</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>NoteLab 需要使用麦克风录制语音笔记。</string>
     <key>NSSpeechRecognitionUsageDescription</key>

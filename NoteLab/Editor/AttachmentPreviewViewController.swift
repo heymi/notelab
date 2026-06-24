@@ -3,14 +3,12 @@ import Foundation
 import UIKit
 import PDFKit
 import AVKit
-import PhotosUI
 
 final class AttachmentPreviewViewController: UIViewController, UIScrollViewDelegate {
     private let attachmentId: UUID
     private let data: Data
     private let fileName: String
     private let type: AttachmentType
-    private let livePhotoMotionData: Data?
     private let onDelete: (UUID) -> Void
     private let onClose: () -> Void
     
@@ -24,15 +22,12 @@ final class AttachmentPreviewViewController: UIViewController, UIScrollViewDeleg
     private let deleteButton = UIButton(type: .system)
     private var playerController: AVPlayerViewController?
     private var temporaryPreviewURL: URL?
-    private var temporaryLivePhotoURLs: [URL] = []
-    private var livePhotoView: PHLivePhotoView?
     
-    init(attachmentId: UUID, data: Data, fileName: String, type: AttachmentType, livePhotoMotionData: Data? = nil, onDelete: @escaping (UUID) -> Void, onClose: @escaping () -> Void) {
+    init(attachmentId: UUID, data: Data, fileName: String, type: AttachmentType, onDelete: @escaping (UUID) -> Void, onClose: @escaping () -> Void) {
         self.attachmentId = attachmentId
         self.data = data
         self.fileName = fileName
         self.type = type
-        self.livePhotoMotionData = livePhotoMotionData
         self.onDelete = onDelete
         self.onClose = onClose
         super.init(nibName: nil, bundle: nil)
@@ -77,7 +72,6 @@ final class AttachmentPreviewViewController: UIViewController, UIScrollViewDeleg
                 scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                 scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
             ])
-            configureLivePhotoIfAvailable(placeholder: image)
         } else if type == .pdf, let document = PDFDocument(data: data) {
             pdfView.document = document
             pdfView.autoScales = true
@@ -121,61 +115,6 @@ final class AttachmentPreviewViewController: UIViewController, UIScrollViewDeleg
             return url
         } catch {
             print("Failed to write temp video preview: \(error)")
-            return nil
-        }
-    }
-
-    private func configureLivePhotoIfAvailable(placeholder: UIImage) {
-        guard let livePhotoMotionData,
-              let stillURL = writeTemporaryLivePhotoResource(data: data, fileName: fileName),
-              let motionURL = writeTemporaryLivePhotoResource(data: livePhotoMotionData, fileName: LivePhotoAttachment.motionFileName(for: attachmentId)) else {
-            return
-        }
-
-        let livePhotoView = PHLivePhotoView()
-        livePhotoView.contentMode = .scaleAspectFit
-        livePhotoView.backgroundColor = .black
-        livePhotoView.isMuted = false
-        scrollView.isHidden = true
-        view.addSubview(livePhotoView)
-        livePhotoView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            livePhotoView.topAnchor.constraint(equalTo: view.topAnchor),
-            livePhotoView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            livePhotoView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            livePhotoView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
-        ])
-        self.livePhotoView = livePhotoView
-
-        PHLivePhoto.request(
-            withResourceFileURLs: [stillURL, motionURL],
-            placeholderImage: placeholder,
-            targetSize: view.bounds.size == .zero ? UIScreen.main.bounds.size : view.bounds.size,
-            contentMode: .aspectFit
-        ) { [weak self] livePhoto, info in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if let livePhoto {
-                    livePhotoView.livePhoto = livePhoto
-                    livePhotoView.startPlayback(with: .full)
-                } else if info[PHLivePhotoInfoErrorKey] != nil {
-                    livePhotoView.removeFromSuperview()
-                    self.scrollView.isHidden = false
-                }
-            }
-        }
-    }
-
-    private func writeTemporaryLivePhotoResource(data: Data, fileName: String) -> URL? {
-        let safeFileName = (fileName as NSString).lastPathComponent
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("\(attachmentId.uuidString)-\(UUID().uuidString)-\(safeFileName)")
-        do {
-            try data.write(to: url, options: [.atomic])
-            temporaryLivePhotoURLs.append(url)
-            return url
-        } catch {
-            print("Failed to write temp live photo resource: \(error)")
             return nil
         }
     }
@@ -292,15 +231,6 @@ final class AttachmentPreviewViewController: UIViewController, UIScrollViewDeleg
     
     func viewForZooming(in scrollView: UIScrollView) -> UIView? {
         return imageView
-    }
-
-    deinit {
-        if let temporaryPreviewURL {
-            try? FileManager.default.removeItem(at: temporaryPreviewURL)
-        }
-        for url in temporaryLivePhotoURLs {
-            try? FileManager.default.removeItem(at: url)
-        }
     }
 }
 #endif
