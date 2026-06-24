@@ -343,7 +343,7 @@ struct NoteEditorView: View {
                     editorBottomBar
                         .padding(.horizontal, 18)
                         .padding(.top, 4)
-                        .padding(.bottom, keyboardPadding > 0 ? keyboardPadding + 8 : max(proxy.safeAreaInsets.bottom, 8))
+                        .padding(.bottom, keyboardOverlap > 0 ? keyboardPadding + 8 : max(proxy.safeAreaInsets.bottom, 8))
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }

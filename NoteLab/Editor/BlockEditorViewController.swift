@@ -165,12 +165,14 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
 
     func updatePresentationMode(_ mode: NoteDetailPresentationMode) {
         guard presentationMode != mode else { return }
+        let oldHiddenRows = hiddenReadingRowsInVisibleRange()
         presentationMode = mode
         if !mode.isEditing {
             view.endEditing(true)
             hideActiveTableControls()
         }
-        refreshVisibleRowsForPresentationMode()
+        let needsHeightUpdate = oldHiddenRows != hiddenReadingRowsInVisibleRange()
+        refreshVisibleRowsForPresentationMode(updateHeights: needsHeightUpdate)
         updateBodyPaperLayout()
     }
 
@@ -1087,14 +1089,18 @@ extension BlockEditorViewController {
         }
     }
 
-    private func refreshVisibleRowsForPresentationMode() {
+    private func hiddenReadingRowsInVisibleRange() -> Set<Int> {
+        Set((tableView.indexPathsForVisibleRows ?? []).map(\.row).filter { isHiddenReadingBlock(at: $0) })
+    }
+
+    private func refreshVisibleRowsForPresentationMode(updateHeights: Bool) {
         guard let visibleRows = tableView.indexPathsForVisibleRows, !visibleRows.isEmpty else { return }
         UIView.performWithoutAnimation {
             for indexPath in visibleRows where indexPath.row < document.blocks.count {
                 let block = document.blocks[indexPath.row]
                 switch tableView.cellForRow(at: indexPath) {
                 case let cell as TextBlockCell:
-                    cell.configure(with: block, numberIndex: numberIndexForBlock(at: indexPath.row), presentationMode: presentationMode, background: currentBackground)
+                    cell.updatePresentationMode(presentationMode, numberIndex: numberIndexForBlock(at: indexPath.row))
                     cell.setVisuallyCollapsed(isHiddenReadingBlock(at: indexPath.row))
                     cell.setMultiSelected(isMultiSelecting && multiSelectedBlockIds.contains(block.id))
                     cell.setContentInteraction(editable: presentationMode.isEditing && !isMultiSelecting, selectable: !isMultiSelecting)
@@ -1111,8 +1117,10 @@ extension BlockEditorViewController {
                     break
                 }
             }
-            tableView.beginUpdates()
-            tableView.endUpdates()
+            if updateHeights {
+                tableView.beginUpdates()
+                tableView.endUpdates()
+            }
         }
     }
 

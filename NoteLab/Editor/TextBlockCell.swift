@@ -742,6 +742,17 @@ final class TextBlockCell: UITableViewCell, UITextViewDelegate, WKNavigationDele
         updateLinkPreview(for: block.text)
     }
 
+    func updatePresentationMode(_ mode: NoteDetailPresentationMode, numberIndex: Int) {
+        guard presentationMode != mode || self.numberIndex != numberIndex else { return }
+        isVisuallyCollapsed = false
+        contentView.isHidden = false
+        isUserInteractionEnabled = true
+        textView.isHidden = false
+        presentationMode = mode
+        self.numberIndex = numberIndex
+        applyStyle()
+    }
+
     override func prepareForReuse() {
         super.prepareForReuse()
         clearTweetPreview()
