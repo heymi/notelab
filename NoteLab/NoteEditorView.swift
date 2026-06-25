@@ -573,13 +573,8 @@ struct NoteEditorView: View {
 
     private func syncNoteFromDocument(_ doc: NoteDocument) {
         let markdown = doc.flattenMarkdown()
-        let contentChanged = markdown != note.content
         note.content = markdown
         syncDerivedTitle(from: doc)
-        if contentChanged && !isWhiteboard {
-            note.summary = ""
-            AISummaryRegistry.clear(noteId: note.id)
-        }
         note.updateMetrics()
         if note.id == store.whiteboard.id {
             store.persistWhiteboard()

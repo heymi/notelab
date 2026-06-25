@@ -809,47 +809,41 @@ struct LegalWebView: View {
 struct AISettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var subscriptionManager = SubscriptionManager.shared
+    @ObservedObject private var usageTracker = UsageTracker.shared
+    @ObservedObject private var aiSettings = AISettings.shared
+    @State private var isRefreshing = false
+    @State private var lastRefreshedAt = Date()
+
+    private var allowance: Int {
+        usageTracker.monthlyAllowance(tier: subscriptionManager.currentTier)
+    }
+
+    private var usedCredits: Int {
+        usageTracker.usedCredits()
+    }
+
+    private var remainingCredits: Int {
+        usageTracker.remainingCredits(tier: subscriptionManager.currentTier)
+    }
+
+    private var usageRatio: Double {
+        guard allowance > 0 else { return 1 }
+        return min(1, Double(usedCredits) / Double(allowance))
+    }
     
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 24) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("云端 AI")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.secondaryInk)
-                            .padding(.leading, 8)
-                        
-                        VStack(spacing: 0) {
-                            aiInfoRow(
-                                icon: "network",
-                                title: "服务",
-                                value: "notelab.aedc.cc"
-                            )
-                            Divider().padding(.leading, 52)
-                            aiInfoRow(
-                                icon: "creditcard",
-                                title: "本月 AI 点数",
-                                value: "\(subscriptionManager.remainingAICredits)/\(subscriptionManager.monthlyAICreditAllowance)"
-                            )
-                            Divider().padding(.leading, 52)
-                            aiInfoRow(
-                                icon: "lock.shield",
-                                title: "密钥",
-                                value: "由云端托管"
-                            )
-                        }
-                        .background(Theme.cardBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .shadow(color: Theme.softShadow, radius: 8, x: 0, y: 4)
-                    }
-                    
+                VStack(spacing: 18) {
+                    usageSummaryCard
+                    modelCard
+                    usageDetailsCard
                     Spacer(minLength: 40)
                 }
                 .padding(20)
             }
             .background(Theme.background.ignoresSafeArea())
-            .navigationTitle("AI 设置")
+            .navigationTitle("AI 模型")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -865,28 +859,242 @@ struct AISettingsView: View {
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
     }
-    
-    private func aiInfoRow(icon: String, title: String, value: String) -> some View {
-        HStack(spacing: 16) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.blue.opacity(0.15))
-                    .frame(width: 32, height: 32)
-                Image(systemName: icon)
-                    .font(.system(size: 16))
-                    .foregroundStyle(.blue)
+
+    private var usageSummaryCard: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("CREDITS USED")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.secondaryInk)
+                    Text(usageRatio, format: .percent.precision(.fractionLength(1)))
+                        .font(.system(size: 44, weight: .regular, design: .rounded))
+                        .foregroundStyle(Theme.ink)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+
+                Spacer()
+
+                Button {
+                    refreshUsage()
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: isRefreshing ? "hourglass" : "arrow.clockwise")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(isRefreshing ? "刷新中" : "手动刷新")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundStyle(isRefreshing ? Theme.secondaryInk : Color.green)
+                    .padding(.horizontal, 12)
+                    .frame(height: 36)
+                    .background((isRefreshing ? Theme.groupedBackground : Color.green.opacity(0.12)), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(isRefreshing)
+                .accessibilityLabel("手动刷新 AI 点数")
             }
-            Text(title)
-                .font(.system(size: 16, weight: .medium, design: .rounded))
-                .foregroundStyle(Theme.ink)
-            Spacer()
-            Text(value)
-                .font(.system(size: 14, weight: .medium, design: .rounded))
-                .foregroundStyle(Theme.secondaryInk)
-                .multilineTextAlignment(.trailing)
+
+            AIUsageTickBar(progress: usageRatio)
+                .frame(height: 34)
+
+            HStack(alignment: .firstTextBaseline) {
+                Text("\(usedCredits) / \(allowance) 点")
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Theme.ink)
+                Spacer()
+                Text("剩余 \(remainingCredits) 点")
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Theme.secondaryInk)
+            }
+
+            Divider()
+
+            HStack {
+                Text("下次重置 \(usageTracker.daysUntilReset) 天后")
+                Spacer()
+                Text("更新 \(lastRefreshedAt.formatted(date: .omitted, time: .shortened))")
+            }
+            .font(.system(size: 12, weight: .medium, design: .rounded))
+            .foregroundStyle(Theme.secondaryInk)
         }
-        .padding(.vertical, 14)
+        .padding(20)
+        .background(Theme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .shadow(color: Theme.softShadow, radius: 14, x: 0, y: 8)
+    }
+
+    private var modelCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("当前模型")
+            HStack(spacing: 14) {
+                Image(systemName: aiSettings.currentProvider.iconName)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 38, height: 38)
+                    .background(Color.purple, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(aiSettings.currentProvider.description)
+                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Theme.ink)
+                    Text(aiSettings.currentProvider.modelName)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Theme.secondaryInk)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+
+                Spacer()
+
+                Text(subscriptionManager.currentTier.displayName)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(Theme.ink)
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(Theme.groupedBackground, in: Capsule())
+            }
+            .padding(16)
+            .background(Theme.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+    }
+
+    private var usageDetailsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("使用明细")
+            VStack(spacing: 0) {
+                ForEach(AIFeature.allCases, id: \.rawValue) { feature in
+                    AIUsageDetailRow(
+                        feature: feature,
+                        usedCredits: usageTracker.usedCount(feature),
+                        totalUsedCredits: usedCredits
+                    )
+
+                    if feature != AIFeature.allCases.last {
+                        Divider().padding(.leading, 56)
+                    }
+                }
+            }
+            .background(Theme.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+    }
+
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 13, weight: .bold, design: .rounded))
+            .foregroundStyle(Theme.secondaryInk)
+            .padding(.horizontal, 4)
+    }
+
+    private func refreshUsage() {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        Task { @MainActor in
+            await subscriptionManager.refreshEntitlementState()
+            lastRefreshedAt = Date()
+            isRefreshing = false
+        }
+    }
+}
+
+private struct AIUsageTickBar: View {
+    let progress: Double
+
+    var body: some View {
+        GeometryReader { proxy in
+            let tickCount = max(24, Int(proxy.size.width / 7))
+            let filledCount = Int((Double(tickCount) * progress).rounded())
+
+            HStack(spacing: 3) {
+                ForEach(0..<tickCount, id: \.self) { index in
+                    Capsule()
+                        .fill(index < filledCount ? Color.orange : Theme.groupedBackground)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+        }
+        .accessibilityLabel("AI 点数使用占比")
+        .accessibilityValue(Text(progress, format: .percent.precision(.fractionLength(1))))
+    }
+}
+
+private struct AIUsageDetailRow: View {
+    let feature: AIFeature
+    let usedCredits: Int
+    let totalUsedCredits: Int
+
+    private var usageShare: Double {
+        guard totalUsedCredits > 0 else { return 0 }
+        return min(1, Double(usedCredits) / Double(totalUsedCredits))
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: iconName)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(iconColor)
+                .frame(width: 34, height: 34)
+                .background(iconColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(feature.displayName)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Theme.ink)
+                    Spacer()
+                    Text("\(usedCredits) 点")
+                        .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(usedCredits == 0 ? Theme.secondaryInk : Theme.ink)
+                }
+
+                HStack(spacing: 8) {
+                    GeometryReader { proxy in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Theme.groupedBackground)
+                            Capsule()
+                                .fill(iconColor)
+                                .frame(width: max(4, proxy.size.width * usageShare))
+                                .opacity(usedCredits == 0 ? 0 : 1)
+                        }
+                    }
+                    .frame(height: 5)
+
+                    Text("\(feature.creditCost) 点/次")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(Theme.secondaryInk)
+                        .frame(width: 54, alignment: .trailing)
+                }
+            }
+        }
+        .padding(.vertical, 13)
         .padding(.horizontal, 16)
+    }
+
+    private var iconName: String {
+        switch feature {
+        case .organize: return "wand.and.stars"
+        case .extractTasks: return "checklist"
+        case .rewrite: return "pencil.and.outline"
+        case .highlight: return "highlighter"
+        case .recentFocus: return "scope"
+        case .semanticConnections: return "point.3.connected.trianglepath.dotted"
+        case .plan: return "calendar.badge.clock"
+        }
+    }
+
+    private var iconColor: Color {
+        switch feature {
+        case .organize: return .orange
+        case .extractTasks: return .blue
+        case .rewrite: return .purple
+        case .highlight: return .yellow
+        case .recentFocus: return .green
+        case .semanticConnections: return .teal
+        case .plan: return .indigo
+        }
     }
 }
 
