@@ -2,60 +2,111 @@
 
 ## Goal
 
-Replace the current bar-style recording meter in the home recording overlay with a screenshot-inspired dynamic waveform: a thin center line with colorful, soft wave peaks that respond to live microphone input.
+Make the home voice-recording waveform feel like a system recorder: sensitive, low-latency, and visibly tied to the user's mouth. The reference screenshot remains the visual direction, but responsiveness wins over static similarity.
+
+## Problem With The Previous Direction
+
+The earlier visual-only approach assumed `AVAudioRecorder` metering was a reliable source for the animation. Real-device testing showed the opposite: the shape could look closer to the reference while still feeling fake because the waveform did not move clearly with speech.
+
+The revised design treats that as a data-source problem, not an animation-tuning problem.
 
 ## Scope
 
-- Change only the active recording overlay shown while `voiceCoordinator.isRecording == true`.
-- Keep the home bottom voice button unchanged.
-- Keep recording, cancel, stop, notebook selection, save, transcription, and AI organization behavior unchanged.
-- Reuse the existing `VoiceNoteCoordinator.inputLevel` meter; do not add a new audio engine or sampling path.
+- Replace the recording input path inside `VoiceNoteCoordinator` with one `AVAudioEngine` input pipeline.
+- Use the same live PCM buffers for both writing the recording file and calculating `inputLevel`.
+- Keep the existing public state surface: `phase`, `elapsed`, `inputLevel`, `stopRecording()`, `discardCurrentRecording()`, and `savePendingRecording(...)`.
+- Keep the current saved voice-note flow: temporary audio file -> attachment storage -> Speech transcription -> AI organization.
+- Keep the active recording overlay as the only visual surface changed for this waveform work.
 
 ## Recommended Approach
 
-Add a small SwiftUI waveform view inside `VoiceRecordingOverlay`, replacing the existing 18 capsule bars. The view uses `TimelineView` plus `Canvas` to draw:
+Use `AVAudioEngine.inputNode.installTap` as the single source of truth:
 
-- A subtle horizontal center line.
-- Four or five colored wave lobes distributed around the center.
-- Height, width, opacity, and slight phase movement driven by the smoothed `level` value.
+1. Configure `AVAudioSession` for recording, prefer the built-in microphone, and request a low IO buffer duration.
+2. Start `AVAudioEngine`.
+3. On each input buffer:
+   - Write the buffer to a temporary audio file.
+   - Calculate RMS and peak energy from the exact same buffer.
+   - Smooth the energy with fast attack and slower release.
+   - Publish the normalized value through `VoiceNoteCoordinator.inputLevel`.
+4. On stop, close the audio file cleanly and continue into the existing notebook-selection/save flow.
+5. On cancel or short recording, stop the engine and remove the temporary file.
 
-This keeps the implementation local to the visual layer while preserving the real audio-driven behavior already in `VoiceNoteCoordinator.updateMeter()`.
+This removes the split-brain state where one API records audio and another API tries to guess meter values.
+
+## File Format
+
+Use `.caf` with linear PCM for the first implementation. It is the simplest reliable format for direct `AVAudioPCMBuffer` writing, and it avoids pretending raw PCM is an `.m4a`.
+
+Save the attachment with a `.caf` filename and `audio/x-caf` MIME type. Add `caf -> audio/x-caf` to `AttachmentStorage.mimeType(for:)` so imported/reused CAF files are classified consistently.
+
+Do not keep a `.m4a` filename unless the implementation actually writes MPEG-4 AAC.
 
 ## Visual Behavior
 
-When recording starts, the overlay continues to show the cancel button, recording label, elapsed timer, and stop button. The meter area becomes the waveform. Quiet input should settle close to the center line. Louder input should expand the colored lobes outward, with mild flowing motion so it feels alive without looking noisy.
+The overlay keeps the same controls: cancel, "正在录音", waveform, elapsed time, stop.
 
-The palette should echo the reference image: teal/green as the main accent, with smaller blue, rose, and violet highlights. Colors should sit inside the existing material overlay and keep enough contrast in both light and dark appearances instead of changing the surrounding app theme.
+The waveform should:
+
+- Sit near a thin center line in silence.
+- Show small but visible movement for quiet speech.
+- Expand immediately on normal speech.
+- Spike quickly on plosives or louder syllables.
+- Fall back quickly enough that pauses feel live, not sluggish.
+- Avoid self-running loops when `inputLevel` is unchanged.
+
+The reference visual language remains: a thin center line with teal/green, blue, rose, and violet lobes. The lobe geometry can be simplified if that makes the response clearer.
+
+## Quality Bar
+
+The implementation is not done until it passes real-device behavior checks:
+
+- Speaking directly at the phone from normal distance causes obvious waveform movement within about one frame of perceived delay.
+- Whisper/soft speech causes a smaller but still visible change.
+- Silence returns close to the center line.
+- The elapsed timer still advances correctly.
+- Stop after more than one second still opens notebook selection.
+- Cancel still discards the temporary recording.
+- Saved audio can still play back.
+- Transcription still receives a valid audio file.
+
+## Error Handling
+
+- If microphone permission is denied, keep the existing error message.
+- If the engine cannot start, fail recording with the existing recorder-unavailable path.
+- If file writing fails, stop the engine and fail instead of silently showing a fake waveform.
+- Always remove the input tap and stop the engine on stop, cancel, short recording, and failure.
 
 ## Accessibility
 
-Respect Reduce Motion. When motion is reduced, the waveform should still reflect the current level but avoid continuous phase animation. The center line and a subdued static waveform are enough.
+Respect Reduce Motion. Reduced Motion should not run decorative phase movement. It may still update amplitude from real input because that is functional feedback, not decoration.
 
 ## Files Expected To Change
 
-- `NoteLab/VoiceNoteViews.swift`: replace the current bar meter with the new waveform view, likely as a private nested or file-local SwiftUI view.
-
-No data models, persistence, audio recording logic, AI paths, or navigation files should change.
+- `NoteLab/VoiceNoteCoordinator.swift`: replace recorder-based capture/metering with a unified `AVAudioEngine` input pipeline, preserving existing coordinator API and state machine.
+- `NoteLab/VoiceNoteViews.swift`: keep the screenshot-inspired waveform but drive it only from `inputLevel` and recent samples, with no fake loop.
+- `NoteLab/Storage/AttachmentStorage.swift`: add `caf -> audio/x-caf` MIME handling.
 
 ## Verification
 
-Run the smallest reliable iOS build check with the current scheme:
+Run:
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -project NoteLab.xcodeproj -scheme "NoteLab Local StoreKit" -destination 'generic/platform=iOS' build
 ```
 
-Then verify on simulator or device:
+Then install and test on `Strictly's iPhone`:
 
-- Starting voice input shows the recording overlay.
-- Speaking changes the waveform amplitude.
-- Cancel still discards the recording.
-- Stop still opens notebook selection for recordings longer than one second.
-- Reduce Motion does not leave a constantly animated waveform.
+```bash
+ios-deploy --id 00008140-000C6D403AC3801C --bundle <built NoteLab.app>
+DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcrun devicectl device process launch --device 00008140-000C6D403AC3801C com.psg.NoteLab
+```
+
+Manual verification must include speaking at the phone while watching the waveform. Build success alone is not enough.
 
 ## Non-Goals
 
-- Do not redesign the bottom navigation voice button.
-- Do not alter voice note storage, transcription, or AI cleanup.
-- Do not add a reusable animation framework or new dependency.
-- Do not implement playback waveform visualization in saved voice notes.
+- Do not redesign the full home screen.
+- Do not add a third-party waveform or audio dependency.
+- Do not build saved-note playback waveforms.
+- Do not keep decorative animation that moves when the input level is flat.
