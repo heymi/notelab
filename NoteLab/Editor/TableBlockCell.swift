@@ -11,6 +11,7 @@ protocol TableBlockCellDelegate: AnyObject {
     func tableBlockCellDidRequestDeleteTable(_ cell: TableBlockCell)
     func tableBlockCellDidBeginEditing(_ cell: TableBlockCell)
     func tableBlockCellDidEndEditing(_ cell: TableBlockCell)
+    func tableBlockCellDidRequestLayoutUpdate(_ cell: TableBlockCell)
 }
 
 final class TableBlockCell: UITableViewCell, UITextViewDelegate {
@@ -38,51 +39,27 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
     private var controlsVisible: Bool = false
 
     private var inkColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(red: 0.94, green: 0.94, blue: 0.96, alpha: 1) :
-                UIColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1)
-        }
+        .noteEditorInk
     }
 
     private var tableHeaderBackgroundColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.15, alpha: 1.0) :
-                UIColor(red: 0.97, green: 0.97, blue: 0.98, alpha: 1.0)
-        }
+        .noteEditorPaperSoft
     }
     
     private var tableCellBackgroundColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.1, alpha: 1.0) :
-                UIColor.white
-        }
+        .noteEditorPaper
     }
     
     private var gridBorderColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.3, alpha: 1.0) :
-                UIColor(white: 0.85, alpha: 1.0)
-        }
+        .noteEditorLine
     }
     
     private var buttonBackgroundColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.25, alpha: 0.8) :
-                UIColor.white.withAlphaComponent(0.6)
-        }
+        .noteEditorPaperSoft
     }
     
     private var buttonTextColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.9, alpha: 0.8) :
-                UIColor(white: 0.2, alpha: 0.8)
-        }
+        .noteEditorAccentDeep
     }
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -97,11 +74,7 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
     }
 
     private var sentHighlightColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(red: 0.3, green: 0.25, blue: 0.05, alpha: 1.0) :
-                UIColor(red: 1.0, green: 0.95, blue: 0.64, alpha: 1.0)
-        }
+        .noteEditorSelection
     }
 
     private func setupViews() {
@@ -111,7 +84,7 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
         contentView.addSubview(sentHighlightBackgroundView)
         sentHighlightBackgroundView.translatesAutoresizingMaskIntoConstraints = false
 
-        multiSelectBackgroundView.backgroundColor = UIColor.black.withAlphaComponent(0.06)
+        multiSelectBackgroundView.backgroundColor = UIColor.noteEditorSelection
         multiSelectBackgroundView.layer.cornerRadius = 12
         multiSelectBackgroundView.isHidden = true
         contentView.addSubview(multiSelectBackgroundView)
@@ -142,11 +115,16 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
         gridStack.backgroundColor = gridBorderColor // Border color for the grid
         gridStack.layer.borderWidth = 0.5
         gridStack.layer.borderColor = gridBorderColor.cgColor
-        gridStack.layer.cornerRadius = 8
+        gridStack.layer.cornerRadius = 14
         gridStack.clipsToBounds = true
 
         container.axis = .vertical
         container.spacing = 8
+        container.backgroundColor = UIColor.noteEditorPaperSoft.withAlphaComponent(0.42)
+        container.layer.cornerRadius = 18
+        container.layer.masksToBounds = true
+        container.isLayoutMarginsRelativeArrangement = true
+        container.layoutMargins = UIEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
         container.addArrangedSubview(headerStack)
         container.addArrangedSubview(gridStack)
         contentView.addSubview(container)
@@ -160,10 +138,10 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
             multiSelectBackgroundView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -2),
             multiSelectBackgroundView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
             multiSelectBackgroundView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
-            container.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-            container.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
-            container.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            container.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16)
+            container.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
+            container.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
+            container.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
+            container.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24)
         ])
     }
 
@@ -173,8 +151,8 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
         button.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
         button.setTitleColor(buttonTextColor, for: .normal)
         button.backgroundColor = buttonBackgroundColor
-        button.layer.cornerRadius = 10
-        button.contentEdgeInsets = UIEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+        button.layer.cornerRadius = 12
+        button.contentEdgeInsets = UIEdgeInsets(top: 5, left: 9, bottom: 5, right: 9)
         button.addTarget(self, action: action, for: .touchUpInside)
         return button
     }
@@ -233,13 +211,17 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
     }
 
     private func makeCellView(row: Int, col: Int) -> UITextView {
-        let textView = UITextView()
-        textView.textContainerInset = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        let textView = TableCellTextView()
+        textView.textContainerInset = UIEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
         textView.textContainer.lineFragmentPadding = 0
         textView.isScrollEnabled = false
         textView.delegate = self
         textView.tag = row * 1000 + col
         textView.text = tableModel.cells[safe: row]?[safe: col] ?? ""
+        textView.onTab = { [weak self, weak textView] shift in
+            guard let self, let textView else { return }
+            self.moveFocus(from: textView, backwards: shift)
+        }
         
         if row == 0 {
             textView.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
@@ -248,11 +230,33 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
         } else {
             textView.font = UIFont.systemFont(ofSize: 15, weight: .regular)
             textView.backgroundColor = tableCellBackgroundColor
-            textView.textColor = inkColor
+            textView.textColor = .noteEditorBody
         }
+        textView.tintColor = .noteEditorAccentDeep
         textView.layer.cornerRadius = 0 // No corner radius for joined cells
         
         return textView
+    }
+
+    private func moveFocus(from textView: UITextView, backwards: Bool) {
+        textViewDidChange(textView)
+        let row = textView.tag / 1000
+        let col = textView.tag % 1000
+        let nextIndex = row * tableModel.cols + col + (backwards ? -1 : 1)
+        if backwards, nextIndex < 0 {
+            return
+        }
+        if nextIndex >= tableModel.rows * tableModel.cols {
+            tableModel.addRow()
+            rebuildGrid()
+            delegate?.tableBlockCellDidChange(self, table: tableModel)
+            delegate?.tableBlockCellDidRequestLayoutUpdate(self)
+            DispatchQueue.main.async {
+                self.focusCell(row: self.tableModel.rows - 1, col: 0)
+            }
+            return
+        }
+        focusCell(row: nextIndex / tableModel.cols, col: nextIndex % tableModel.cols)
     }
 
     func setControlsVisible(_ visible: Bool) {
@@ -275,28 +279,32 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
         sentHighlightBackgroundView.isHidden = !isSentHighlighted || isMultiSelected
     }
 
-    func setContentInteractionEnabled(_ enabled: Bool) {
-        addRowButton?.isEnabled = enabled
-        addColButton?.isEnabled = enabled
-        removeRowButton?.isEnabled = enabled
-        removeColButton?.isEnabled = enabled
-        deleteTableButton?.isEnabled = enabled
-        addRowButton?.alpha = enabled ? 1.0 : 0.4
-        addColButton?.alpha = enabled ? 1.0 : 0.4
-        removeRowButton?.alpha = enabled ? 1.0 : 0.4
-        removeColButton?.alpha = enabled ? 1.0 : 0.4
-        deleteTableButton?.alpha = enabled ? 1.0 : 0.4
-        if !enabled {
+    func setContentInteraction(editable: Bool, selectable: Bool) {
+        addRowButton?.isEnabled = editable
+        addColButton?.isEnabled = editable
+        removeRowButton?.isEnabled = editable
+        removeColButton?.isEnabled = editable
+        deleteTableButton?.isEnabled = editable
+        addRowButton?.alpha = editable ? 1.0 : 0.4
+        addColButton?.alpha = editable ? 1.0 : 0.4
+        removeRowButton?.alpha = editable ? 1.0 : 0.4
+        removeColButton?.alpha = editable ? 1.0 : 0.4
+        deleteTableButton?.alpha = editable ? 1.0 : 0.4
+        if !editable {
             setControlsVisible(false)
         }
-        if enabled {
+        if editable {
             updateControlAvailability()
         }
         for tv in cellTextViews {
-            tv.isEditable = enabled
-            tv.isSelectable = enabled
-            tv.isUserInteractionEnabled = enabled
+            tv.isEditable = editable
+            tv.isSelectable = selectable
+            tv.isUserInteractionEnabled = editable || selectable
         }
+    }
+
+    func setContentInteractionEnabled(_ enabled: Bool) {
+        setContentInteraction(editable: enabled, selectable: enabled)
     }
 
     func textViewDidChange(_ textView: UITextView) {
@@ -306,6 +314,14 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
             tableModel.cells[row][col] = textView.text
             delegate?.tableBlockCellDidChange(self, table: tableModel)
         }
+    }
+
+    func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
+        if text == "\t" {
+            moveFocus(from: textView, backwards: false)
+            return false
+        }
+        return true
     }
 
     func textViewDidBeginEditing(_ textView: UITextView) {
@@ -346,6 +362,25 @@ final class TableBlockCell: UITableViewCell, UITextViewDelegate {
     @objc private func deleteTableTapped() {
         Haptics.shared.play(.warning)
         delegate?.tableBlockCellDidRequestDeleteTable(self)
+    }
+}
+
+private final class TableCellTextView: UITextView {
+    var onTab: ((Bool) -> Void)?
+
+    override var keyCommands: [UIKeyCommand]? {
+        [
+            UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(handleTab)),
+            UIKeyCommand(input: "\t", modifierFlags: .shift, action: #selector(handleShiftTab))
+        ]
+    }
+
+    @objc private func handleTab() {
+        onTab?(false)
+    }
+
+    @objc private func handleShiftTab() {
+        onTab?(true)
     }
 }
 

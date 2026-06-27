@@ -78,6 +78,12 @@ struct AIRewriteData: Decodable {
     let markdown: String
 }
 
+struct VoiceNoteAIResult: Codable, Equatable {
+    let title: String
+    let summary: String
+    let markdown: String
+}
+
 struct AIHighlightSuggestion: Decodable, Identifiable {
     let color: String
     let text: String

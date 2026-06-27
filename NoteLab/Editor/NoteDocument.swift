@@ -93,7 +93,7 @@ struct NoteDocument: Codable, Equatable {
 
             if let attachment = parseAttachment(trimmedLine) {
                 flushParagraph()
-                let type: AttachmentType = attachment.fileName.lowercased().hasSuffix(".pdf") ? .pdf : .image
+                let type = AttachmentType.from(fileName: attachment.fileName)
                 blocks.append(.attachment(type: type, fileName: attachment.fileName, storagePath: attachment.storagePath, attachmentId: attachment.attachmentId))
                 index += 1
                 continue
@@ -149,6 +149,40 @@ struct NoteDocument: Codable, Equatable {
     func flattenMarkdown() -> String {
         blocks.map { $0.markdownText }.joined(separator: "\n\n")
     }
+
+    var isPureImageOnly: Bool {
+        var hasImage = false
+        for block in blocks {
+            switch block.kind {
+            case .attachment where block.attachment?.type == .image:
+                hasImage = true
+            case .paragraph, .heading, .bullet, .numbered, .todo, .quote, .code:
+                if !block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return false
+                }
+            case .table:
+                if !(block.table?.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) {
+                    return false
+                }
+            default:
+                return false
+            }
+        }
+        return hasImage
+    }
+}
+
+extension String {
+    nonisolated func splitAtUTF16Offset(_ offset: Int) -> (prefix: String, suffix: String) {
+        var location = min(max(0, offset), utf16.count)
+        while location >= 0 {
+            if let range = Range(NSRange(location: location, length: 0), in: self) {
+                return (String(self[..<range.lowerBound]), String(self[range.lowerBound...]))
+            }
+            location -= 1
+        }
+        return ("", self)
+    }
 }
 
 enum BlockKind: String, Codable {
@@ -168,7 +202,7 @@ struct AttachmentModel: Codable, Equatable {
     let type: AttachmentType
     let fileName: String
     
-    /// Storage path in Supabase Storage (new way)
+    /// Stable remote attachment path (CloudKit-backed)
     let storagePath: String?
     
     /// Legacy: embedded data (for backward compatibility, will be migrated)
@@ -192,6 +226,31 @@ struct AttachmentModel: Codable, Equatable {
 enum AttachmentType: String, Codable {
     case image
     case pdf
+    case video
+
+    nonisolated static func from(fileName: String) -> AttachmentType {
+        switch (fileName as NSString).pathExtension.lowercased() {
+        case "pdf":
+            return .pdf
+        case "mov", "mp4", "m4v":
+            return .video
+        default:
+            return .image
+        }
+    }
+
+    nonisolated static func from(mimeType: String) -> AttachmentType {
+        if mimeType.hasPrefix("image/") {
+            return .image
+        }
+        if mimeType == "application/pdf" {
+            return .pdf
+        }
+        if mimeType.hasPrefix("video/") {
+            return .video
+        }
+        return .image
+    }
 }
 
 struct Block: Codable, Equatable, Identifiable {
@@ -349,18 +408,96 @@ private func parseQuote(_ line: String) -> String? {
 }
 
 private func parseAttachment(_ line: String) -> (fileName: String, storagePath: String, attachmentId: UUID)? {
-    guard line.hasPrefix("![Attachment]("), line.hasSuffix(")") else { return nil }
-    let start = line.index(line.startIndex, offsetBy: "![Attachment](".count)
-    let end = line.index(before: line.endIndex)
-    let target = String(line[start..<end]).trimmingCharacters(in: .whitespaces)
-    guard !target.isEmpty else { return nil }
+    let pattern = #"!\[[^\]]*\]\(([^)]+)\)"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+    let ns = line as NSString
+    let fullRange = NSRange(location: 0, length: ns.length)
+    guard let match = regex.firstMatch(in: line, range: fullRange),
+          match.range.location != NSNotFound,
+          match.range.length == fullRange.length else {
+        return nil
+    }
 
-    // If target looks like a storage path (e.g. "{userId}/{uuid}.jpg"), extract fileName and UUID.
-    let fileName = (target as NSString).lastPathComponent
-    let base = (fileName as NSString).deletingPathExtension
-    let attachmentId = UUID(uuidString: base) ?? UUID()
+    let rawTarget = ns.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+    let target = unwrapMarkdownTarget(rawTarget)
+    guard !target.isEmpty else { return nil }
+    guard isAttachmentTarget(target) else { return nil }
+
+    let cleanTarget = target.split(separator: "?").first.map(String.init) ?? target
+    let fileName = attachmentFileName(from: cleanTarget)
+    let attachmentId = UUID(uuidString: (fileName as NSString).deletingPathExtension)
+        ?? attachmentTokenUUID(from: cleanTarget)
+        ?? extractUUID(from: cleanTarget)
+        ?? UUID()
 
     return (fileName: fileName.isEmpty ? "attachment" : fileName, storagePath: target, attachmentId: attachmentId)
+}
+
+private func unwrapMarkdownTarget(_ rawTarget: String) -> String {
+    guard rawTarget.hasPrefix("<"), rawTarget.hasSuffix(">"), rawTarget.count >= 2 else {
+        return rawTarget
+    }
+    return String(rawTarget.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func isAttachmentTarget(_ target: String) -> Bool {
+    if attachmentTokenUUID(from: target) != nil {
+        return true
+    }
+    if canonicalAttachmentPathParts(from: target) != nil {
+        return true
+    }
+    if target.contains("://") || target == "#" {
+        return false
+    }
+    return extractUUID(from: target) != nil
+}
+
+private func canonicalAttachmentPathParts(from target: String) -> (ownerId: UUID, attachmentId: UUID)? {
+    guard !target.hasPrefix("/"), !target.hasPrefix("attachment:"), !target.contains("://") else {
+        return nil
+    }
+    let pathWithoutQuery = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? target
+    let components = pathWithoutQuery.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
+    guard components.count == 2,
+          let ownerId = UUID(uuidString: String(components[0])) else {
+        return nil
+    }
+    let fileName = String(components[1])
+    let base = (fileName as NSString).deletingPathExtension
+    guard let attachmentId = UUID(uuidString: base) else { return nil }
+    return (ownerId, attachmentId)
+}
+
+private func attachmentTokenUUID(from target: String) -> UUID? {
+    guard target.lowercased().hasPrefix("attachment:") else { return nil }
+    let rawId = String(target.dropFirst("attachment:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+    return UUID(uuidString: rawId)
+}
+
+private func attachmentFileName(from target: String) -> String {
+    if let tokenId = attachmentTokenUUID(from: target) {
+        return tokenId.uuidString.lowercased()
+    }
+    let fileName = (target as NSString).lastPathComponent
+    if !fileName.isEmpty {
+        return fileName
+    }
+    if let extractedId = extractUUID(from: target) {
+        return extractedId.uuidString.lowercased()
+    }
+    return "attachment"
+}
+
+private func extractUUID(from text: String) -> UUID? {
+    let pattern = #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+    let nsText = text as NSString
+    let range = NSRange(location: 0, length: nsText.length)
+    let matches = regex.matches(in: text, range: range)
+    guard let match = matches.last else { return nil }
+    let raw = nsText.substring(with: match.range)
+    return UUID(uuidString: raw.lowercased())
 }
 
 private func isTableHeader(line: String, nextLine: String) -> Bool {

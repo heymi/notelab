@@ -1,8 +1,8 @@
 import Foundation
 #if os(macOS)
 import AppKit
+import QuartzCore
 import SwiftUI
-import SwiftData
 import UniformTypeIdentifiers
 
 // MARK: - Block Editor View Controller for macOS
@@ -13,13 +13,13 @@ final class BlockEditorViewControllerMac: NSViewController {
     var onSelectionChange: ((String, NSRange) -> Void)?
     var onSelectedBlockIdsChange: (([UUID]) -> Void)?
     
-    // Context for attachment storage
-    var modelContext: ModelContext?
+    // IDs for attachment storage
     var ownerId: UUID?
     var noteId: UUID?
     
     private let scrollView = NSScrollView()
     private let stackView = NSStackView()
+    private let notebookBackgroundView = ScrollingNotebookBackgroundViewMac()
     private var blockViews: [UUID: BlockCellViewMac] = [:]
     private var activeBlockId: UUID?
     private var activeTextSelectionRange: NSRange?
@@ -28,6 +28,9 @@ final class BlockEditorViewControllerMac: NSViewController {
     // Header
     private var headerHostingView: NSHostingView<NoteEditorHeaderView>?
     private var titleFocusBridge: TitleFocusBridge?
+    private var currentTitle: String = ""
+    private var currentAISummary: String = ""
+    private var presentationMode: NoteDetailPresentationMode = .reading
     
     init(document: NoteDocument) {
         self.document = document
@@ -41,6 +44,7 @@ final class BlockEditorViewControllerMac: NSViewController {
     override func loadView() {
         let containerView = NSView()
         containerView.wantsLayer = true
+        containerView.layer?.backgroundColor = NSColor.clear.cgColor
         self.view = containerView
     }
     
@@ -71,38 +75,57 @@ final class BlockEditorViewControllerMac: NSViewController {
     private func setupStackView() {
         stackView.translatesAutoresizingMaskIntoConstraints = false
         stackView.orientation = .vertical
-        stackView.alignment = .leading
+        stackView.alignment = .width
         stackView.spacing = 0
         stackView.distribution = .fill
         
         // Create a flipped document view to have correct top-to-bottom layout
         let documentView = FlippedView()
-        documentView.translatesAutoresizingMaskIntoConstraints = false
+        documentView.translatesAutoresizingMaskIntoConstraints = true
+        documentView.addSubview(notebookBackgroundView)
         documentView.addSubview(stackView)
         
         NSLayoutConstraint.activate([
-            stackView.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 16),
-            stackView.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
-            stackView.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
-            stackView.bottomAnchor.constraint(lessThanOrEqualTo: documentView.bottomAnchor, constant: -16)
+            notebookBackgroundView.topAnchor.constraint(equalTo: documentView.topAnchor),
+            notebookBackgroundView.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+            notebookBackgroundView.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
+            notebookBackgroundView.bottomAnchor.constraint(equalTo: documentView.bottomAnchor),
+            stackView.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 72),
+            stackView.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: 40),
+            stackView.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -40),
+            stackView.bottomAnchor.constraint(lessThanOrEqualTo: documentView.bottomAnchor, constant: -120)
         ])
         
         scrollView.documentView = documentView
-        
-        // Bind document view width to scroll view
-        if let documentView = scrollView.documentView {
-            documentView.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                documentView.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
-                documentView.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
-                documentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor)
-            ])
-        }
+        syncDocumentViewWidth()
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        syncDocumentViewWidth()
+    }
+
+    private func syncDocumentViewWidth() {
+        guard let documentView = scrollView.documentView else { return }
+        let width = scrollView.contentView.bounds.width
+        let height = max(documentView.fittingSize.height, scrollView.contentView.bounds.height)
+        guard width > 0 else { return }
+        let nextSize = NSSize(width: width, height: height)
+        guard abs(documentView.frame.width - nextSize.width) > 0.5 ||
+                abs(documentView.frame.height - nextSize.height) > 0.5 else { return }
+        documentView.setFrameSize(nextSize)
+        documentView.needsLayout = true
+    }
+
+    func updateNotebookBackground(_ background: NotebookBackground) {
+        notebookBackgroundView.background = background
     }
     
-    func updateHeader(title: Binding<String>, linkBlocks: [LinkedNoteBlock], summary: String, isWhiteboard: Bool, focusBridge: TitleFocusBridge, onOpenNote: @escaping (UUID) -> Void) {
+    func updateHeader(title: Binding<String>, metadata: NoteEditorHeaderMetadata, linkBlocks: [LinkedNoteBlock], presentationMode: NoteDetailPresentationMode, isWhiteboard: Bool, focusBridge: TitleFocusBridge, onOpenNote: @escaping (UUID) -> Void) {
         titleFocusBridge = focusBridge
-        let headerView = NoteEditorHeaderView(title: title, focusBridge: focusBridge, linkBlocks: linkBlocks, summary: summary, isWhiteboard: isWhiteboard, onOpenNote: onOpenNote)
+        currentTitle = title.wrappedValue
+        currentAISummary = metadata.preview?.style == .excerpt ? (metadata.preview?.items.first ?? "") : ""
+        let headerView = NoteEditorHeaderView(title: title, focusBridge: focusBridge, metadata: metadata, linkBlocks: linkBlocks, presentationMode: presentationMode, isWhiteboard: isWhiteboard, onOpenNote: onOpenNote)
         
         if let existing = headerHostingView {
             existing.rootView = headerView
@@ -117,6 +140,29 @@ final class BlockEditorViewControllerMac: NSViewController {
                 hostingView.trailingAnchor.constraint(equalTo: stackView.trailingAnchor, constant: -16)
             ])
         }
+    }
+
+    func updatePresentationMode(_ mode: NoteDetailPresentationMode) {
+        guard presentationMode != mode else { return }
+        presentationMode = mode
+        if !mode.isEditing {
+            view.window?.makeFirstResponder(nil)
+        }
+        rebuildBlocks()
+    }
+
+    func focusPreferredTextBlock() {
+        let targetId = activeBlockId.flatMap { id -> UUID? in
+            guard let block = document.blocks.first(where: { $0.id == id }),
+                  block.kind != .table,
+                  block.kind != .attachment else { return nil }
+            return id
+        } ?? firstEditableTextBlockId()
+
+        guard let targetId, let cell = blockViews[targetId] as? TextBlockCellViewMac else { return }
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: max(0, cell.frame.minY - 80)))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        cell.beginEditing(atEnd: true)
     }
     
     func updateDocument(_ newDocument: NoteDocument) {
@@ -208,8 +254,11 @@ final class BlockEditorViewControllerMac: NSViewController {
         }
         blockViews.removeAll()
         
-        // Create new block views
         for (index, block) in document.blocks.enumerated() {
+            if isHiddenReadingBlock(at: index) {
+                continue
+            }
+
             let blockView: BlockCellViewMac
             
             switch block.kind {
@@ -227,10 +276,13 @@ final class BlockEditorViewControllerMac: NSViewController {
                 let textCell = TextBlockCellViewMac()
                 textCell.delegate = self
                 let numberIndex = numberIndexForBlock(at: index)
-                textCell.configure(with: block, numberIndex: numberIndex)
+                textCell.configure(with: block, numberIndex: numberIndex, presentationMode: presentationMode)
+                textCell.setContentInteraction(editable: presentationMode.isEditing, selectable: true)
                 blockView = textCell
             }
             
+            blockView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            blockView.setContentCompressionResistancePriority(.required, for: .horizontal)
             blockView.setSentHighlight(sentHighlightBlockIds.contains(block.id))
             blockViews[block.id] = blockView
             stackView.addArrangedSubview(blockView)
@@ -243,6 +295,59 @@ final class BlockEditorViewControllerMac: NSViewController {
         }
         
         view.needsLayout = true
+    }
+
+    private func firstEditableTextBlockId() -> UUID? {
+        for (index, block) in document.blocks.enumerated() {
+            guard !isHiddenReadingBlock(at: index),
+                  block.kind != .table,
+                  block.kind != .attachment else { continue }
+            return block.id
+        }
+        return nil
+    }
+
+    private func isHiddenReadingBlock(at index: Int) -> Bool {
+        isDuplicateTitleBlock(at: index) || isDuplicateAISummaryBlock(at: index)
+    }
+
+    private func isDuplicateTitleBlock(at index: Int) -> Bool {
+        guard presentationMode == .reading else { return false }
+        guard index == 0, index < document.blocks.count else { return false }
+        let block = document.blocks[index]
+        guard block.kind != .attachment, block.kind != .table else { return false }
+        let title = currentTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let blockTitle = NoteTitleDeriver.cleanedTitleLine(block.text)
+        return !title.isEmpty && title == blockTitle
+    }
+
+    private func isDuplicateAISummaryBlock(at index: Int) -> Bool {
+        guard presentationMode == .reading, index < document.blocks.count else { return false }
+        let summary = currentAISummary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !summary.isEmpty else { return false }
+        let block = document.blocks[index]
+        guard block.kind != .attachment, block.kind != .table else { return false }
+        let blockTitle = NoteTitleDeriver.cleanedTitleLine(block.text)
+        if block.kind == .heading && blockTitle == "摘要" {
+            return index <= 1 && nextTextBlockMatchesSummary(after: index, summary: summary)
+        }
+        return index <= 2 &&
+            previousTextBlockIsSummaryHeading(before: index) &&
+            block.text.trimmingCharacters(in: .whitespacesAndNewlines) == summary
+    }
+
+    private func nextTextBlockMatchesSummary(after index: Int, summary: String) -> Bool {
+        guard index + 1 < document.blocks.count else { return false }
+        let next = document.blocks[index + 1]
+        guard next.kind != .attachment, next.kind != .table else { return false }
+        return next.text.trimmingCharacters(in: .whitespacesAndNewlines) == summary
+    }
+
+    private func previousTextBlockIsSummaryHeading(before index: Int) -> Bool {
+        guard index > 0 else { return false }
+        let previous = document.blocks[index - 1]
+        guard previous.kind == .heading else { return false }
+        return NoteTitleDeriver.cleanedTitleLine(previous.text) == "摘要"
     }
     
     private func numberIndexForBlock(at index: Int) -> Int {
@@ -279,7 +384,7 @@ final class BlockEditorViewControllerMac: NSViewController {
     private func handleSelectedFile(_ url: URL) {
         guard let data = try? Data(contentsOf: url) else { return }
         let fileName = url.lastPathComponent
-        let type: AttachmentType = url.pathExtension.lowercased() == "pdf" ? .pdf : .image
+        let type = AttachmentType.from(fileName: url.lastPathComponent)
         insertAttachment(data: data, type: type, fileName: fileName)
     }
     
@@ -295,28 +400,22 @@ final class BlockEditorViewControllerMac: NSViewController {
         let attachmentId = UUID()
         let attachmentBlock: Block
         
-        if let context = modelContext, let ownerId = ownerId, let noteId = noteId {
+        if let ownerId = ownerId, let noteId = noteId {
             // Save to local cache
             AttachmentCache.save(data: data, attachmentId: attachmentId, fileName: fileName)
             
-            // Create LocalAttachment record
             let mimeType = AttachmentStorage.mimeType(for: fileName)
             Task { @MainActor in
                 do {
-                    let localAttachment = try await AttachmentStorage.shared.saveNewAttachment(
+                    let localAttachment = try AttachmentStorage.shared.saveNewAttachmentV3(
                         data: data,
                         attachmentId: attachmentId,
                         ownerId: ownerId,
                         noteId: noteId,
                         fileName: fileName,
-                        mimeType: mimeType,
-                        context: context
+                        mimeType: mimeType
                     )
-                    try? context.save()
-                    await AttachmentStorage.shared.uploadAndUpsertMetadata(
-                        attachment: localAttachment,
-                        context: context
-                    )
+                    await AttachmentStorage.shared.uploadAndUpsertMetadataV3(attachment: localAttachment)
                 } catch {
                     print("Failed to save attachment: \(error)")
                 }
@@ -324,7 +423,7 @@ final class BlockEditorViewControllerMac: NSViewController {
             
             let ext = (fileName as NSString).pathExtension
             let storageName = ext.isEmpty ? attachmentId.uuidString : "\(attachmentId.uuidString).\(ext)"
-            let storagePath = "\(ownerId.uuidString)/\(storageName)"
+            let storagePath = "icloud/\(ownerId.uuidString)/\(storageName)"
             attachmentBlock = Block.attachment(type: type, fileName: fileName, storagePath: storagePath, attachmentId: attachmentId)
         } else {
             attachmentBlock = Block.attachment(type: type, fileName: fileName, data: data)
@@ -334,6 +433,112 @@ final class BlockEditorViewControllerMac: NSViewController {
         document.blocks.insert(Block.paragraph(""), at: insertIndex + 1)
         onDocumentChange?(document)
         rebuildBlocks()
+    }
+}
+
+private final class ScrollingNotebookBackgroundViewMac: NSView {
+    private let gradientLayer = CAGradientLayer()
+    private let patternLayer = CAShapeLayer()
+
+    var background: NotebookBackground = .default {
+        didSet {
+            isHidden = background.generatedStyle == nil
+            updateLayers()
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        isHidden = true
+        wantsLayer = true
+        layer?.addSublayer(gradientLayer)
+        layer?.addSublayer(patternLayer)
+        patternLayer.fillColor = NSColor.clear.cgColor
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        updateLayers()
+    }
+
+    private func updateLayers() {
+        guard let style = background.generatedStyle else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        gradientLayer.frame = bounds
+        gradientLayer.colors = [
+            NSColor.notebookBackground(hex: style.washHex).cgColor,
+            NSColor.notebookBackground(hex: style.baseHex).cgColor
+        ]
+        gradientLayer.startPoint = CGPoint(x: 0, y: 0)
+        gradientLayer.endPoint = CGPoint(x: 1, y: 1)
+
+        patternLayer.frame = bounds
+        patternLayer.strokeColor = NSColor.notebookBackground(hex: style.markHex).withAlphaComponent(style.opacity).cgColor
+        patternLayer.fillColor = style.pattern == .dots
+            ? NSColor.notebookBackground(hex: style.markHex).withAlphaComponent(style.opacity).cgColor
+            : NSColor.clear.cgColor
+        patternLayer.lineWidth = style.pattern == .softGrid ? 0.7 : 1
+        patternLayer.path = patternPath(style: style).cgPath
+
+        CATransaction.commit()
+    }
+
+    private func patternPath(style: NotebookBackgroundStyle) -> CGPath {
+        let path = CGMutablePath()
+        let spacing = max(24, style.spacing)
+        switch style.pattern {
+        case .ruled:
+            var y: CGFloat = 0
+            while y < bounds.height {
+                path.move(to: CGPoint(x: 0, y: y))
+                path.addLine(to: CGPoint(x: bounds.width, y: y))
+                y += spacing
+            }
+        case .grid, .softGrid:
+            var x: CGFloat = 0
+            while x < bounds.width {
+                path.move(to: CGPoint(x: x, y: 0))
+                path.addLine(to: CGPoint(x: x, y: bounds.height))
+                x += spacing
+            }
+            var y: CGFloat = 0
+            while y < bounds.height {
+                path.move(to: CGPoint(x: 0, y: y))
+                path.addLine(to: CGPoint(x: bounds.width, y: y))
+                y += spacing
+            }
+        case .dots:
+            let radius: CGFloat = 1.15
+            var y: CGFloat = 0
+            while y < bounds.height {
+                var x: CGFloat = spacing * 0.5
+                while x < bounds.width {
+                    path.addEllipse(in: CGRect(x: x, y: y, width: radius * 2, height: radius * 2))
+                    x += spacing
+                }
+                y += spacing
+            }
+        }
+        return path
+    }
+}
+
+private extension NSColor {
+    static func notebookBackground(hex: String) -> NSColor {
+        let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&int)
+        let r = CGFloat((int >> 16) & 0xFF) / 255
+        let g = CGFloat((int >> 8) & 0xFF) / 255
+        let b = CGFloat(int & 0xFF) / 255
+        return NSColor(calibratedRed: r, green: g, blue: b, alpha: 1)
     }
 }
 
@@ -373,12 +578,9 @@ extension BlockEditorViewControllerMac: TextBlockCellViewMacDelegate {
             }
         }
         
-        let fullText = current.text
-        let safeLocation = min(max(0, location), fullText.count)
-        let prefix = String(fullText.prefix(safeLocation))
-        let suffix = String(fullText.dropFirst(safeLocation))
+        let split = current.text.splitAtUTF16Offset(location)
         
-        document.blocks[index].text = prefix
+        document.blocks[index].text = split.prefix
         
         let newKind: BlockKind
         if current.kind == .heading {
@@ -387,7 +589,7 @@ extension BlockEditorViewControllerMac: TextBlockCellViewMacDelegate {
             newKind = (current.kind == .bullet || current.kind == .numbered || current.kind == .todo || current.kind == .quote) ? current.kind : .paragraph
         }
         
-        let newBlock = Block(id: UUID(), kind: newKind, text: suffix, level: nil, isChecked: false, table: nil, attachment: nil, fontSizeOffset: current.fontSizeOffset)
+        let newBlock = Block(id: UUID(), kind: newKind, text: split.suffix, level: nil, isChecked: false, table: nil, attachment: nil, fontSizeOffset: current.fontSizeOffset)
         document.blocks.insert(newBlock, at: index + 1)
         onDocumentChange?(document)
         rebuildBlocks()
@@ -423,6 +625,7 @@ extension BlockEditorViewControllerMac: TextBlockCellViewMacDelegate {
         let previousIndex = index - 1
         let currentText = document.blocks[index].text
         let previousText = document.blocks[previousIndex].text
+        let mergedCursorLocation = previousText.utf16.count
         document.blocks[previousIndex].text = previousText + currentText
         document.blocks.remove(at: index)
         onDocumentChange?(document)
@@ -431,7 +634,7 @@ extension BlockEditorViewControllerMac: TextBlockCellViewMacDelegate {
         DispatchQueue.main.async {
             let prevBlock = self.document.blocks[previousIndex]
             if let prevCell = self.blockViews[prevBlock.id] as? TextBlockCellViewMac {
-                prevCell.beginEditing(atEnd: true)
+                prevCell.beginEditing(atUTF16Location: mergedCursorLocation)
             }
         }
     }

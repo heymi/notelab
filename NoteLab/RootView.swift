@@ -1,6 +1,5 @@
 import SwiftUI
 import Combine
-import SwiftData
 import os
 
 enum AppTab: String, CaseIterable {
@@ -18,14 +17,18 @@ struct RootView: View {
     @StateObject private var store = NotebookStore()
     @StateObject private var aiClient = AIClient()
     @StateObject private var aiCenter = AIProcessingCenter()
+    @StateObject private var voiceCoordinator = VoiceNoteCoordinator()
     @StateObject private var planStore = PlanStore()
     @StateObject private var router = AppRouter()
-    @StateObject private var syncEngine = SyncEngine()
     @StateObject private var avatarStore = AvatarStore()
     @State private var syncTask: Task<Void, Never>?
+    @State private var migrationTask: Task<Void, Never>?
+    @State private var showPaywall = false
+    @State private var paywallTrigger: PaywallTrigger = .manual
     @EnvironmentObject private var auth: AuthManager
-    @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var syncEngine: SyncEngine
     @Environment(\.scenePhase) private var scenePhase
+    private let profileRepository = ProfileRepository()
     private let syncLogger = Logger(subsystem: "NoteLab", category: "Sync")
 
     var body: some View {
@@ -33,9 +36,39 @@ struct RootView: View {
             .environmentObject(store)
             .environmentObject(aiClient)
             .environmentObject(aiCenter)
+            .environmentObject(voiceCoordinator)
             .environmentObject(planStore)
             .environmentObject(router)
             .environmentObject(avatarStore)
+            .sheet(isPresented: $showPaywall) {
+                PaywallView(trigger: paywallTrigger)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .showPaywall)) { notification in
+                if let trigger = notification.object as? PaywallTrigger {
+                    paywallTrigger = trigger
+                } else {
+                    paywallTrigger = .manual
+                }
+                showPaywall = true
+            }
+            .onChange(of: aiCenter.showPaywall) { _, newValue in
+                if newValue {
+                    if let feature = aiCenter.paywallTriggerFeature {
+                        paywallTrigger = feature.limit(for: SubscriptionManager.shared.currentTier).isAvailable
+                            ? .aiQuotaExceeded
+                            : .aiFeatureDisabled
+                    }
+                    showPaywall = true
+                    aiCenter.showPaywall = false
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .cloudKitRemoteNotification)) { _ in
+                startSync(reason: .remoteNotification)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .localSyncRequested)) { _ in
+                // ponytail: app-level debounce; use a per-profile scheduler only if CloudKit load proves it needs one.
+                startSync(reason: .backgroundRefresh, delayNanoseconds: 5_000_000_000)
+            }
     }
 
     @ViewBuilder
@@ -43,19 +76,14 @@ struct RootView: View {
         #if os(macOS)
         macOSLayout
             .task(id: auth.userId) {
-                syncTask?.cancel()
-                avatarStore.updateUserId(auth.userId)
-                guard let userId = auth.userId else { return }
-                // Small delay to ensure modelContext is fully ready
-                try? await Task.sleep(nanoseconds: 50_000_000) // 0.05s
-                guard !Task.isCancelled else { return }
-                store.configure(ownerId: userId, context: modelContext)
-                syncEngine.configure(ownerId: userId, context: modelContext)
-                startSync()
+                await configureForCurrentAccount()
             }
             .onChange(of: scenePhase) { _, newValue in
-                guard newValue == .active else { return }
-                startSync()
+                if newValue == .active {
+                    startSync(reason: .sceneActive)
+                } else {
+                    store.flushAllPendingNotePersistence()
+                }
             }
             .onChange(of: auth.userId) { _, newValue in
                 if newValue == nil {
@@ -84,19 +112,14 @@ struct RootView: View {
                 // #endregion
             }
             .task(id: auth.userId) {
-                syncTask?.cancel()
-                avatarStore.updateUserId(auth.userId)
-                guard let userId = auth.userId else { return }
-                // Small delay to ensure modelContext is fully ready
-                try? await Task.sleep(nanoseconds: 50_000_000) // 0.05s
-                guard !Task.isCancelled else { return }
-                store.configure(ownerId: userId, context: modelContext)
-                syncEngine.configure(ownerId: userId, context: modelContext)
-                startSync()
+                await configureForCurrentAccount()
             }
             .onChange(of: scenePhase) { _, newValue in
-                guard newValue == .active else { return }
-                startSync()
+                if newValue == .active {
+                    startSync(reason: .sceneActive)
+                } else {
+                    store.flushAllPendingNotePersistence()
+                }
             }
             .onChange(of: auth.userId) { _, newValue in
                 if newValue == nil {
@@ -137,7 +160,19 @@ struct RootView: View {
                 content
                 
                 if router.path.isEmpty {
-                    BottomNavBar(selection: $selection)
+                    BottomNavBar(
+                        selection: $selection,
+                        isVoiceRecording: voiceCoordinator.isRecording,
+                        voiceLevel: voiceCoordinator.inputLevel,
+                        onVoiceTap: {
+                            voiceCoordinator.toggleRecording(store: store, aiClient: aiClient)
+                        },
+                        onWhiteboardTap: {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                                selection = .whiteboard
+                            }
+                        }
+                    )
                         .transition(.move(edge: .bottom))
                 }
             }
@@ -154,6 +189,7 @@ struct RootView: View {
                     detail: aiCenter.statusDetail,
                     isLoading: aiCenter.isLoading,
                     isCompleted: aiCenter.isCompleted,
+                    hasError: aiCenter.error != nil,
                     onCancel: { aiCenter.cancel() },
                     onTap: {
                         if let noteId = aiCenter.activeNoteId {
@@ -167,6 +203,52 @@ struct RootView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .overlay(alignment: .bottom) {
+            if voiceCoordinator.isRecording {
+                VoiceRecordingOverlay(
+                    elapsed: voiceCoordinator.elapsed,
+                    level: voiceCoordinator.inputLevel,
+                    onStop: { voiceCoordinator.stopRecording() },
+                    onCancel: { voiceCoordinator.discardCurrentRecording() }
+                )
+                .padding(.horizontal, 16)
+                .padding(.bottom, 104)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if case .failed(let message) = voiceCoordinator.phase {
+                VoiceNoteErrorToast(message: message) {
+                    voiceCoordinator.discardCurrentRecording()
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 104)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if let noteId = voiceCoordinator.completedNoteId {
+                VoiceNoteSavedToast(
+                    onOpen: {
+                        router.push(.note(noteId))
+                        voiceCoordinator.clearCompletedNote()
+                    },
+                    onClose: {
+                        voiceCoordinator.clearCompletedNote()
+                    }
+                )
+                .padding(.horizontal, 16)
+                .padding(.bottom, 104)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .sheet(isPresented: $voiceCoordinator.isSelectingNotebook) {
+            VoiceNotebookSelectionSheet(
+                notebooks: store.notebooks,
+                onSelect: { notebookId in
+                    voiceCoordinator.savePendingRecording(to: notebookId, store: store, aiClient: aiClient)
+                },
+                onDiscard: {
+                    voiceCoordinator.discardCurrentRecording()
+                }
+            )
+            .presentationDetents([.medium, .large])
+        }
+        .background(InteractivePopGestureEnabler())
         .background(WindowTapHapticsInstaller())
     }
 
@@ -196,11 +278,7 @@ struct RootView: View {
         Group {
             switch selection {
             case .library:
-                #if os(macOS)
                 LibraryView(tabSelection: $selection)
-                #else
-                LibraryPagerView(tabSelection: $selection)
-                #endif
             case .list:
                 AllNotesListView()
             case .whiteboard:
@@ -217,25 +295,19 @@ struct RootView: View {
     }
 
     // Note binding now comes from `NotebookStore.noteBinding(noteId:)`.
-    private func startSync() {
+    private func startSync(reason: SyncReason, delayNanoseconds: UInt64 = 1_500_000_000) {
         syncTask?.cancel()
         syncTask = Task(priority: .background) {
             let startMark = DispatchTime.now()
             // Allow first frame render before any network sync work.
-            try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5s
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
             if Task.isCancelled { return }
 
-            // Avoid syncing while user is navigating/reading.
-            // After a rebuild, the first few navigations are sensitive to MainActor work.
-            let canStart = await waitForIdleNavigation(
-                maxWaitNanoseconds: 30_000_000_000,
-                stableNanoseconds: 600_000_000
-            ) // 30s max, require 0.6s stable idle
-            if !canStart || Task.isCancelled { return }
             syncLogger.debug("SyncEngine start after \(Double(DispatchTime.now().uptimeNanoseconds - startMark.uptimeNanoseconds) / 1_000_000_000, privacy: .public)s delay")
-            await syncEngine.syncNow()
+            let summary = await syncEngine.syncNow(reason: reason)
             syncLogger.debug("SyncEngine finished in \(Double(DispatchTime.now().uptimeNanoseconds - startMark.uptimeNanoseconds) / 1_000_000_000, privacy: .public)s")
-            
+            if summary.pulled == 0 && summary.deleted == 0 { return }
+
             // Defer cache refresh until UI is idle, so we don't stutter the current page.
             let canRefresh = await waitForIdleNavigation(
                 maxWaitNanoseconds: 30_000_000_000,
@@ -295,6 +367,8 @@ struct RootView: View {
     private func handleSignOutCleanup() {
         syncTask?.cancel()
         syncTask = nil
+        migrationTask?.cancel()
+        migrationTask = nil
         syncEngine.resetForSignOut()
         store.resetForSignOut()
         planStore.resetForSignOut()
@@ -302,5 +376,35 @@ struct RootView: View {
         selection = .library
         avatarStore.updateUserId(nil)
         AttachmentStorage.shared.clearCache()
+    }
+
+    private func configureForCurrentAccount() async {
+        syncTask?.cancel()
+        migrationTask?.cancel()
+        avatarStore.updateUserId(auth.userId)
+        guard let account = auth.account else { return }
+        do {
+            let syncIdentity = await SyncProfileIdentityResolver.resolve(account: account)
+            let profile = try profileRepository.ensureProfile(account: account, syncIdentity: syncIdentity)
+            store.configure(profileId: profile.profileId)
+            syncEngine.configure(profileId: profile.profileId)
+            startLegacyMigrationIfNeeded(profileId: profile.profileId, isCloudBacked: syncIdentity.isCloudBacked)
+            startSync(reason: .launch)
+        } catch {
+            syncLogger.error("profile setup failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func startLegacyMigrationIfNeeded(profileId: UUID, isCloudBacked: Bool) {
+        migrationTask = Task(priority: .utility) {
+            await SwiftDataV3MigrationService.migrateIfNeeded(profileId: profileId)
+            #if DEBUG
+            await DebugSampleDataSeeder.seedIfNeeded(profileId: profileId, isCloudBacked: isCloudBacked)
+            #endif
+            if Task.isCancelled { return }
+            await MainActor.run {
+                store.loadFromLocalCache()
+            }
+        }
     }
 }

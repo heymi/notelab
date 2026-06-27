@@ -1,17 +1,31 @@
 import SwiftUI
 import Combine
-import Auth
+#if os(macOS)
+import AppKit
+#elseif os(iOS)
+import UIKit
+#endif
 
 struct SettingsView: View {
     @EnvironmentObject var auth: AuthManager
     @EnvironmentObject private var avatarStore: AvatarStore
-    @AppStorage("isPremium") private var isPremium: Bool = false
+    @EnvironmentObject private var syncEngine: SyncEngine
+    @StateObject private var subscriptionManager = SubscriptionManager.shared
     @AppStorage("appearanceMode") private var appearanceMode: Int = 0 // 0: Auto, 1: Light, 2: Dark
     @AppStorage("launchPage") private var launchPage: String = "library"
+    @AppStorage("AgentAccessEnabled") private var agentAccessEnabled = false
+    @AppStorage("AgentWriteEnabled") private var agentWriteEnabled = false
+    @AppStorage("AgentAccessToken") private var agentAccessToken = ""
     @State private var showClearCacheConfirm = false
     @State private var cacheCleared = false
     @State private var showAISettings = false
+    @State private var showPaywall = false
+    @State private var syncProtectionMessage: String?
     @ObservedObject private var aiSettings = AISettings.shared
+    
+    private var isPremium: Bool {
+        subscriptionManager.isPremium
+    }
     
     var body: some View {
         ScrollView {
@@ -20,7 +34,9 @@ struct SettingsView: View {
                 profileHeader
                 
                 // Premium Banner
-                NavigationLink(destination: PremiumIntroView()) {
+                Button {
+                    showPaywall = true
+                } label: {
                     premiumBanner
                 }
                 .buttonStyle(.plain)
@@ -87,7 +103,7 @@ struct SettingsView: View {
                                     Text("AI 模型")
                                         .font(.system(size: 16, weight: .medium, design: .rounded))
                                         .foregroundStyle(Theme.ink)
-                                    Text(aiSettings.currentProvider.displayName)
+                                    Text("云端 AI")
                                         .font(.system(size: 13, weight: .regular, design: .rounded))
                                         .foregroundStyle(Theme.secondaryInk)
                                 }
@@ -104,6 +120,132 @@ struct SettingsView: View {
                         }
                         .buttonStyle(.plain)
                     }
+
+                    #if os(macOS)
+                    SettingsSection(title: "本机 Agent") {
+                        Toggle(isOn: $agentAccessEnabled) {
+                            HStack(spacing: 16) {
+                                SettingsIcon(icon: "terminal.fill", color: .teal)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("允许本机 AI 访问")
+                                        .font(.system(size: 16, weight: .medium, design: .rounded))
+                                        .foregroundStyle(Theme.ink)
+                                    Text("127.0.0.1:47719")
+                                        .font(.system(size: 13, weight: .regular, design: .rounded))
+                                        .foregroundStyle(Theme.secondaryInk)
+                                }
+                            }
+                        }
+                        .toggleStyle(.switch)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+
+                        Divider().padding(.leading, 52)
+
+                        Toggle(isOn: $agentWriteEnabled) {
+                            HStack(spacing: 16) {
+                                SettingsIcon(icon: "square.and.pencil", color: .orange)
+                                Text("允许写入和删除")
+                                    .font(.system(size: 16, weight: .medium, design: .rounded))
+                                    .foregroundStyle(Theme.ink)
+                            }
+                        }
+                        .toggleStyle(.switch)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+                        .disabled(!agentAccessEnabled)
+
+                        Divider().padding(.leading, 52)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 16) {
+                                SettingsIcon(icon: "key.fill", color: .blue)
+                                SecureField("Agent token", text: $agentAccessToken)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                            Text("配置 Cloudflare Worker/bridge 时使用同一个 token。留空则只适合本机临时调试。")
+                                .font(.system(size: 12, weight: .regular, design: .rounded))
+                                .foregroundStyle(Theme.secondaryInk)
+                                .padding(.leading, 48)
+                        }
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+
+                        Divider().padding(.leading, 52)
+
+                        agentInfoRow(
+                            icon: "link",
+                            color: .teal,
+                            title: "本机 API",
+                            value: "http://127.0.0.1:47719"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        agentInfoRow(
+                            icon: "cloud.fill",
+                            color: .blue,
+                            title: "云端 API",
+                            value: "https://notelab.aedc.cc"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        agentInfoRow(
+                            icon: "terminal",
+                            color: .gray,
+                            title: "CLI",
+                            value: "Tools/notelab notes list --limit 5"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        agentInfoRow(
+                            icon: "point.3.connected.trianglepath.dotted",
+                            color: .purple,
+                            title: "MCP",
+                            value: "node /Users/strictly/DEV/NoteLab/Tools/notelab-mcp.js"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: agentWriteEnabled ? "lock.open.fill" : "lock.fill",
+                            iconColor: agentWriteEnabled ? .orange : .gray,
+                            title: "权限",
+                            detail: agentWriteEnabled ? "读写" : "只读"
+                        )
+                    }
+                    #endif
+
+                    #if os(iOS)
+                    SettingsSection(title: "云端 Agent") {
+                        agentInfoRow(
+                            icon: "cloud.fill",
+                            color: .blue,
+                            title: "云端 API",
+                            value: "https://notelab.aedc.cc"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: "lock.fill",
+                            iconColor: .gray,
+                            title: "权限",
+                            detail: "由云端 token 控制"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: "terminal",
+                            iconColor: .gray,
+                            title: "CLI / MCP",
+                            detail: "仅 macOS"
+                        )
+                    }
+                    #endif
                     
                     // Account
                     SettingsSection(title: "账号") {
@@ -111,8 +253,103 @@ struct SettingsView: View {
                             icon: "person.fill",
                             iconColor: .blue,
                             title: "当前账号",
-                            detail: auth.session?.user.email ?? "未登录"
+                            detail: auth.displayEmail ?? "未登录"
                         )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: auth.iCloudState.canSync ? "icloud.fill" : "icloud.slash.fill",
+                            iconColor: auth.iCloudState.canSync ? .blue : .orange,
+                            title: "iCloud 同步",
+                            detail: auth.iCloudStatusMessage ?? "正在检查"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        Button {
+                            Task {
+                                await syncEngine.syncNow(reason: .manual)
+                                syncEngine.refreshPendingCount()
+                            }
+                        } label: {
+                            HStack(spacing: 16) {
+                                SettingsIcon(icon: syncEngine.isSyncing ? "arrow.triangle.2.circlepath" : "arrow.clockwise.icloud.fill", color: .blue)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(syncEngine.isSyncing ? "正在同步" : "立即同步")
+                                        .font(.system(size: 16, weight: .medium, design: .rounded))
+                                        .foregroundStyle(Theme.ink)
+                                    Text(syncStatusDetail)
+                                        .font(.system(size: 13, weight: .regular, design: .rounded))
+                                        .foregroundStyle(Theme.secondaryInk)
+                                }
+                                Spacer()
+                                if syncEngine.isSyncing {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+                            }
+                            .padding(.vertical, 12)
+                            .padding(.horizontal, 16)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(syncEngine.isSyncing)
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: syncEngine.pendingItemCount == 0 ? "checkmark.icloud.fill" : "tray.and.arrow.up.fill",
+                            iconColor: syncEngine.pendingItemCount == 0 ? .green : .orange,
+                            title: "待同步",
+                            detail: "\(syncEngine.pendingItemCount) 项"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: "internaldrive.fill",
+                            iconColor: syncEngine.lastLocalRecordCount == 0 ? .orange : .blue,
+                            title: "本地记录",
+                            detail: syncEngine.lastLocalRecordCount.map { "\($0) 项" } ?? "未校验"
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: "icloud.and.arrow.up.fill",
+                            iconColor: syncEngine.lastPushAt == nil ? .orange : .green,
+                            title: "上次上传",
+                            detail: formattedSyncDate(syncEngine.lastPushAt)
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: "icloud.and.arrow.down.fill",
+                            iconColor: syncEngine.lastPullAt == nil ? .orange : .green,
+                            title: "上次恢复",
+                            detail: formattedSyncDate(syncEngine.lastPullAt)
+                        )
+
+                        Divider().padding(.leading, 52)
+
+                        SettingsRow(
+                            icon: "externaldrive.connected.to.line.below.fill",
+                            iconColor: syncEngine.lastCloudRecordCount == 0 ? .orange : .blue,
+                            title: "云端记录",
+                            detail: syncEngine.lastCloudRecordCount.map { "\($0) 项" } ?? "未校验"
+                        )
+
+                        if let error = syncEngine.lastError {
+                            Divider().padding(.leading, 52)
+                            SettingsRow(
+                                icon: "exclamationmark.triangle.fill",
+                                iconColor: .orange,
+                                title: "最近错误",
+                                detail: error
+                            )
+                        }
                     }
                     
                     // About & Legal
@@ -144,7 +381,7 @@ struct SettingsView: View {
                     // Data Management
                     SettingsSection(title: "数据") {
                         Button(action: {
-                            showClearCacheConfirm = true
+                            requestClearLocalCache()
                         }) {
                             HStack {
                                 SettingsIcon(icon: "trash.fill", color: .red)
@@ -191,7 +428,15 @@ struct SettingsView: View {
                 clearLocalCache()
             }
         } message: {
-            Text("这将清除所有本地存储的数据。您的云端数据不会受影响，重新登录后会自动同步。")
+            Text("仅在已完成同步且没有待上传项目时清除。本地缓存会被删除，之后从 iCloud 重新恢复。")
+        }
+        .alert("先完成 iCloud 同步", isPresented: Binding(
+            get: { syncProtectionMessage != nil },
+            set: { if !$0 { syncProtectionMessage = nil } }
+        )) {
+            Button("知道了", role: .cancel) {}
+        } message: {
+            Text(syncProtectionMessage ?? "")
         }
         .alert("缓存已清除", isPresented: $cacheCleared) {
             Button("确定", role: .cancel) {
@@ -205,10 +450,78 @@ struct SettingsView: View {
         .sheet(isPresented: $showAISettings) {
             AISettingsView()
         }
+        .sheet(isPresented: $showPaywall) {
+            PaywallView(trigger: .settings)
+        }
         .onAppear {
             sanitizeUserDefaults()
+            syncEngine.refreshPendingCount()
         }
+        #if os(macOS)
+        .onChange(of: agentAccessEnabled) { _, enabled in
+            if enabled {
+                AgentAccessServer.shared.start()
+            }
+        }
+        #endif
     }
+
+    private var syncStatusDetail: String {
+        if let error = syncEngine.lastError {
+            return error
+        }
+        guard let date = syncEngine.lastSyncAt else {
+            return "尚未完成同步"
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "M月d日 HH:mm"
+        return "上次成功 \(formatter.string(from: date))"
+    }
+
+    private func formattedSyncDate(_ date: Date?) -> String {
+        guard let date else { return "从未完成" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "M月d日 HH:mm"
+        return formatter.string(from: date)
+    }
+
+    #if os(macOS) || os(iOS)
+    private func agentInfoRow(icon: String, color: Color, title: String, value: String) -> some View {
+        HStack(spacing: 16) {
+            SettingsIcon(icon: icon, color: color)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 16, weight: .medium, design: .rounded))
+                    .foregroundStyle(Theme.ink)
+                Text(value)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .foregroundStyle(Theme.secondaryInk)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+            Spacer()
+            Button {
+                copyAgentValue(value)
+            } label: {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+            .buttonStyle(.borderless)
+            .help("复制")
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 16)
+    }
+
+    private func copyAgentValue(_ value: String) {
+        #if os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        #elseif os(iOS)
+        UIPasteboard.general.string = value
+        #endif
+    }
+    #endif
     
     private func sanitizeUserDefaults() {
         let defaults = UserDefaults.standard
@@ -221,9 +534,7 @@ struct SettingsView: View {
         if let value = defaults.object(forKey: "appearanceMode"), !(value is Int) {
             defaults.set(0, forKey: "appearanceMode")
         }
-        if let value = defaults.object(forKey: "isPremium"), !(value is Bool) {
-            defaults.set(false, forKey: "isPremium")
-        }
+        // isPremium 现在由 SubscriptionManager 管理，不再使用 UserDefaults
     }
     
     private func clearLocalCache() {
@@ -236,12 +547,24 @@ struct SettingsView: View {
             print("Failed to clear cache: \(error)")
         }
     }
+
+    private func requestClearLocalCache() {
+        syncEngine.refreshPendingCount()
+        guard syncEngine.canClearLocalData else {
+            syncProtectionMessage = syncEngine.pendingItemCount > 0
+                ? "还有 \(syncEngine.pendingItemCount) 项未上传。请先点“立即同步”，确认待同步为 0 后再清除。"
+                : "这台设备还没有完成过 iCloud 同步。请先点“立即同步”，确认上次上传/恢复有时间记录后再清除。"
+            Task { await syncEngine.syncNow(reason: .manual) }
+            return
+        }
+        showClearCacheConfirm = true
+    }
     
     @ViewBuilder
     private var profileHeader: some View {
         HStack(spacing: 16) {
             ZStack {
-                let emailFirst = auth.session?.user.email?.first
+                let emailFirst = auth.displayEmail?.first
                 let initial = String((emailFirst ?? "U").uppercased())
                 AvatarImageView(
                     options: avatarStore.options,
@@ -251,12 +574,12 @@ struct SettingsView: View {
             }
             
             VStack(alignment: .leading, spacing: 4) {
-            let emailPrefix = auth.session?.user.email?.components(separatedBy: "@").first ?? "用户"
+            let emailPrefix = auth.displayEmail?.components(separatedBy: "@").first ?? "用户"
                 Text(emailPrefix)
                     .font(.system(size: 20, weight: .bold, design: .rounded))
                     .foregroundStyle(Theme.ink)
                 
-                Text(isPremium ? "NoteLab Pro 会员" : "免费版用户")
+                Text(subscriptionManager.currentTier.displayName + "用户")
                     .font(.system(size: 14, weight: .medium, design: .rounded))
                     .foregroundStyle(Theme.secondaryInk)
             }
@@ -287,22 +610,64 @@ struct SettingsView: View {
             
             HStack {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(isPremium ? "尊享会员权益" : "升级到 Pro")
-                        .font(.system(size: 18, weight: .bold, design: .rounded))
-                        .foregroundStyle(isPremium ? .white : Theme.ink)
+                    HStack(spacing: 8) {
+                        Text(subscriptionBannerTitle)
+                            .font(.system(size: 18, weight: .bold, design: .rounded))
+                            .foregroundStyle(isPremium ? .white : Theme.ink)
+                        
+                        if isPremium {
+                            Text(subscriptionManager.currentTier.shortName)
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Color.white.opacity(0.25))
+                                .clipShape(Capsule())
+                        }
+                    }
                     
-                    Text(isPremium ? "您已解锁所有高级功能" : "解锁无限笔记本、AI 助手等高级功能")
+                    Text(subscriptionBannerSubtitle)
                         .font(.system(size: 14, weight: .medium, design: .rounded))
                         .foregroundStyle(isPremium ? .white.opacity(0.9) : Theme.secondaryInk)
                 }
                 
                 Spacer()
                 
-                Image(systemName: "chevron.right")
+                Image(systemName: isPremium ? "gearshape.fill" : "chevron.right")
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(isPremium ? .white.opacity(0.8) : Theme.secondaryInk.opacity(0.5))
             }
             .padding(20)
+        }
+    }
+    
+    private var subscriptionBannerTitle: String {
+        switch subscriptionManager.currentTier {
+        case .free:
+            return "升级到 Pro"
+        case .standard:
+            return "标准版会员"
+        case .pro:
+            return "专业版会员"
+        }
+    }
+    
+    private var subscriptionBannerSubtitle: String {
+        let creditText = "AI 剩余 \(subscriptionManager.remainingAICredits)/\(subscriptionManager.monthlyAICreditAllowance) 点"
+
+        if isPremium, let expDate = subscriptionManager.expirationDate {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy年M月d日"
+            return "有效期至 \(formatter.string(from: expDate)) · \(creditText)"
+        }
+        
+        switch subscriptionManager.currentTier {
+        case .free:
+            return "\(creditText) · 解锁更多 AI 能力"
+        case .standard:
+            return "云同步已启用 · \(creditText)"
+        case .pro:
+            return "您已解锁所有高级功能 · \(creditText)"
         }
     }
 }
@@ -443,127 +808,49 @@ struct LegalWebView: View {
 
 struct AISettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var subscriptionManager = SubscriptionManager.shared
+    @ObservedObject private var usageTracker = UsageTracker.shared
     @ObservedObject private var aiSettings = AISettings.shared
-    
-    @State private var geminiKey: String = ""
-    @State private var deepseekKey: String = ""
-    @State private var showGeminiKey = false
-    @State private var showDeepSeekKey = false
+    @State private var isRefreshing = false
+    @State private var lastRefreshedAt = Date()
+
+    private var allowance: Int {
+        usageTracker.monthlyAllowance(tier: subscriptionManager.currentTier)
+    }
+
+    private var usedCredits: Int {
+        usageTracker.usedCredits()
+    }
+
+    private var remainingCredits: Int {
+        usageTracker.remainingCredits(tier: subscriptionManager.currentTier)
+    }
+
+    private var usageRatio: Double {
+        guard allowance > 0 else { return 1 }
+        return min(1, Double(usedCredits) / Double(allowance))
+    }
     
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 24) {
-                    // 模型选择
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("选择 AI 模型")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.secondaryInk)
-                            .padding(.leading, 8)
-                        
-                        VStack(spacing: 0) {
-                            ForEach(AIProvider.allCases) { provider in
-                                providerRow(provider)
-                                
-                                if provider != AIProvider.allCases.last {
-                                    Divider().padding(.leading, 52)
-                                }
-                            }
-                        }
-                        .background(Theme.cardBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .shadow(color: Theme.softShadow, radius: 8, x: 0, y: 4)
-                    }
-                    
-                    // API Key 配置
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("API Key 配置")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.secondaryInk)
-                            .padding(.leading, 8)
-                        
-                        VStack(spacing: 0) {
-                            // Gemini API Key
-                            apiKeyRow(
-                                provider: .gemini,
-                                key: $geminiKey,
-                                showKey: $showGeminiKey,
-                                placeholder: "输入 Gemini API Key"
-                            )
-                            
-                            Divider().padding(.leading, 16)
-                            
-                            // DeepSeek API Key
-                            apiKeyRow(
-                                provider: .deepseek,
-                                key: $deepseekKey,
-                                showKey: $showDeepSeekKey,
-                                placeholder: "输入 DeepSeek API Key"
-                            )
-                        }
-                        .background(Theme.cardBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .shadow(color: Theme.softShadow, radius: 8, x: 0, y: 4)
-                    }
-                    
-                    // 说明
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("获取 API Key")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.secondaryInk)
-                            .padding(.leading, 8)
-                        
-                        VStack(alignment: .leading, spacing: 12) {
-                            Link(destination: URL(string: "https://aistudio.google.com/apikey")!) {
-                                HStack {
-                                    Image(systemName: "link")
-                                        .font(.system(size: 14))
-                                    Text("获取 Gemini API Key")
-                                        .font(.system(size: 14, weight: .medium, design: .rounded))
-                                    Spacer()
-                                    Image(systemName: "arrow.up.right")
-                                        .font(.system(size: 12))
-                                }
-                                .foregroundStyle(.blue)
-                                .padding(.vertical, 12)
-                                .padding(.horizontal, 16)
-                            }
-                            
-                            Divider().padding(.leading, 16)
-                            
-                            Link(destination: URL(string: "https://platform.deepseek.com/api_keys")!) {
-                                HStack {
-                                    Image(systemName: "link")
-                                        .font(.system(size: 14))
-                                    Text("获取 DeepSeek API Key")
-                                        .font(.system(size: 14, weight: .medium, design: .rounded))
-                                    Spacer()
-                                    Image(systemName: "arrow.up.right")
-                                        .font(.system(size: 12))
-                                }
-                                .foregroundStyle(.blue)
-                                .padding(.vertical, 12)
-                                .padding(.horizontal, 16)
-                            }
-                        }
-                        .background(Theme.cardBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .shadow(color: Theme.softShadow, radius: 8, x: 0, y: 4)
-                    }
-                    
+                VStack(spacing: 18) {
+                    usageSummaryCard
+                    modelCard
+                    usageDetailsCard
                     Spacer(minLength: 40)
                 }
                 .padding(20)
             }
             .background(Theme.background.ignoresSafeArea())
-            .navigationTitle("AI 设置")
+            .navigationTitle("AI 模型")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") {
-                        saveAndDismiss()
+                        dismiss()
                     }
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
                 }
@@ -571,124 +858,256 @@ struct AISettingsView: View {
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
-        .onAppear {
-            geminiKey = aiSettings.geminiAPIKey
-            deepseekKey = aiSettings.deepseekAPIKey
-        }
     }
-    
-    private func providerRow(_ provider: AIProvider) -> some View {
-        Button {
-            withAnimation(.spring(response: 0.3)) {
-                aiSettings.currentProvider = provider
-            }
-        } label: {
-            HStack(spacing: 16) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(providerColor(provider).opacity(0.15))
-                        .frame(width: 32, height: 32)
-                    
-                    Image(systemName: provider.iconName)
-                        .font(.system(size: 16))
-                        .foregroundStyle(providerColor(provider))
-                }
-                
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(provider.displayName)
-                        .font(.system(size: 16, weight: .medium, design: .rounded))
-                        .foregroundStyle(Theme.ink)
-                    Text(provider.description)
-                        .font(.system(size: 12, weight: .regular, design: .rounded))
+
+    private var usageSummaryCard: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("CREDITS USED")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Theme.secondaryInk)
+                    Text(usageRatio, format: .percent.precision(.fractionLength(1)))
+                        .font(.system(size: 44, weight: .regular, design: .rounded))
+                        .foregroundStyle(Theme.ink)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                 }
-                
+
                 Spacer()
-                
-                if aiSettings.currentProvider == provider {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.green)
-                } else {
-                    Circle()
-                        .strokeBorder(Theme.secondaryInk.opacity(0.3), lineWidth: 1.5)
-                        .frame(width: 20, height: 20)
+
+                Button {
+                    refreshUsage()
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: isRefreshing ? "hourglass" : "arrow.clockwise")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(isRefreshing ? "刷新中" : "手动刷新")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundStyle(isRefreshing ? Theme.secondaryInk : Color.green)
+                    .padding(.horizontal, 12)
+                    .frame(height: 36)
+                    .background((isRefreshing ? Theme.groupedBackground : Color.green.opacity(0.12)), in: Capsule())
                 }
+                .buttonStyle(.plain)
+                .disabled(isRefreshing)
+                .accessibilityLabel("手动刷新 AI 点数")
             }
-            .padding(.vertical, 12)
-            .padding(.horizontal, 16)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-    
-    private func apiKeyRow(provider: AIProvider, key: Binding<String>, showKey: Binding<Bool>, placeholder: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: provider.iconName)
-                    .font(.system(size: 14))
-                    .foregroundStyle(providerColor(provider))
-                Text(provider.displayName)
-                    .font(.system(size: 14, weight: .medium, design: .rounded))
+
+            AIUsageTickBar(progress: usageRatio)
+                .frame(height: 34)
+
+            HStack(alignment: .firstTextBaseline) {
+                Text("\(usedCredits) / \(allowance) 点")
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
                     .foregroundStyle(Theme.ink)
-                
                 Spacer()
-                
-                if !key.wrappedValue.isEmpty {
-                    Button {
-                        showKey.wrappedValue.toggle()
-                    } label: {
-                        Image(systemName: showKey.wrappedValue ? "eye.slash" : "eye")
-                            .font(.system(size: 14))
-                            .foregroundStyle(Theme.secondaryInk)
-                    }
-                }
+                Text("剩余 \(remainingCredits) 点")
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Theme.secondaryInk)
             }
-            
+
+            Divider()
+
             HStack {
-                if showKey.wrappedValue {
-                    TextField(placeholder, text: key)
-                        .font(.system(size: 14, weight: .regular, design: .monospaced))
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                } else {
-                    SecureField(placeholder, text: key)
-                        .font(.system(size: 14, weight: .regular, design: .monospaced))
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                Text("下次重置 \(usageTracker.daysUntilReset) 天后")
+                Spacer()
+                Text("更新 \(lastRefreshedAt.formatted(date: .omitted, time: .shortened))")
+            }
+            .font(.system(size: 12, weight: .medium, design: .rounded))
+            .foregroundStyle(Theme.secondaryInk)
+        }
+        .padding(20)
+        .background(Theme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .shadow(color: Theme.softShadow, radius: 14, x: 0, y: 8)
+    }
+
+    private var modelCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("当前模型")
+            HStack(spacing: 14) {
+                Image(systemName: aiSettings.currentProvider.iconName)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 38, height: 38)
+                    .background(Color.purple, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(aiSettings.currentProvider.description)
+                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Theme.ink)
+                    Text(aiSettings.currentProvider.modelName)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Theme.secondaryInk)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
-                
-                if !key.wrappedValue.isEmpty {
-                    Button {
-                        key.wrappedValue = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 16))
-                            .foregroundStyle(Theme.secondaryInk.opacity(0.5))
+
+                Spacer()
+
+                Text(subscriptionManager.currentTier.displayName)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(Theme.ink)
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(Theme.groupedBackground, in: Capsule())
+            }
+            .padding(16)
+            .background(Theme.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+    }
+
+    private var usageDetailsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("使用明细")
+            VStack(spacing: 0) {
+                ForEach(AIFeature.allCases, id: \.rawValue) { feature in
+                    AIUsageDetailRow(
+                        feature: feature,
+                        usedCredits: usageTracker.usedCount(feature),
+                        totalUsedCredits: usedCredits
+                    )
+
+                    if feature != AIFeature.allCases.last {
+                        Divider().padding(.leading, 56)
                     }
                 }
             }
-            .padding(12)
-            .background(Theme.groupedBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(Theme.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
-        .padding(.vertical, 12)
+    }
+
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 13, weight: .bold, design: .rounded))
+            .foregroundStyle(Theme.secondaryInk)
+            .padding(.horizontal, 4)
+    }
+
+    private func refreshUsage() {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        Task { @MainActor in
+            await subscriptionManager.refreshEntitlementState()
+            lastRefreshedAt = Date()
+            isRefreshing = false
+        }
+    }
+}
+
+private struct AIUsageTickBar: View {
+    let progress: Double
+
+    var body: some View {
+        GeometryReader { proxy in
+            let tickCount = max(24, Int(proxy.size.width / 7))
+            let filledCount = Int((Double(tickCount) * progress).rounded())
+
+            HStack(spacing: 3) {
+                ForEach(0..<tickCount, id: \.self) { index in
+                    Capsule()
+                        .fill(index < filledCount ? Color.orange : Theme.groupedBackground)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+        }
+        .accessibilityLabel("AI 点数使用占比")
+        .accessibilityValue(Text(progress, format: .percent.precision(.fractionLength(1))))
+    }
+}
+
+private struct AIUsageDetailRow: View {
+    let feature: AIFeature
+    let usedCredits: Int
+    let totalUsedCredits: Int
+
+    private var usageShare: Double {
+        guard totalUsedCredits > 0 else { return 0 }
+        return min(1, Double(usedCredits) / Double(totalUsedCredits))
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: iconName)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(iconColor)
+                .frame(width: 34, height: 34)
+                .background(iconColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(feature.displayName)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Theme.ink)
+                    Spacer()
+                    Text("\(usedCredits) 点")
+                        .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(usedCredits == 0 ? Theme.secondaryInk : Theme.ink)
+                }
+
+                HStack(spacing: 8) {
+                    GeometryReader { proxy in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Theme.groupedBackground)
+                            Capsule()
+                                .fill(iconColor)
+                                .frame(width: max(4, proxy.size.width * usageShare))
+                                .opacity(usedCredits == 0 ? 0 : 1)
+                        }
+                    }
+                    .frame(height: 5)
+
+                    Text("\(feature.creditCost) 点/次")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(Theme.secondaryInk)
+                        .frame(width: 54, alignment: .trailing)
+                }
+            }
+        }
+        .padding(.vertical, 13)
         .padding(.horizontal, 16)
     }
-    
-    private func providerColor(_ provider: AIProvider) -> Color {
-        switch provider {
-        case .gemini:
-            return .blue
-        case .deepseek:
-            return .purple
+
+    private var iconName: String {
+        switch feature {
+        case .organize: return "wand.and.stars"
+        case .extractTasks: return "checklist"
+        case .rewrite: return "pencil.and.outline"
+        case .highlight: return "highlighter"
+        case .recentFocus: return "scope"
+        case .semanticConnections: return "point.3.connected.trianglepath.dotted"
+        case .plan: return "calendar.badge.clock"
         }
     }
-    
-    private func saveAndDismiss() {
-        aiSettings.geminiAPIKey = geminiKey
-        aiSettings.deepseekAPIKey = deepseekKey
-        dismiss()
+
+    private var iconColor: Color {
+        switch feature {
+        case .organize: return .orange
+        case .extractTasks: return .blue
+        case .rewrite: return .purple
+        case .highlight: return .yellow
+        case .recentFocus: return .green
+        case .semanticConnections: return .teal
+        case .plan: return .indigo
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func apiKeyTextInputBehavior() -> some View {
+        #if os(iOS)
+        self
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+        #else
+        self.autocorrectionDisabled()
+        #endif
     }
 }
 
@@ -697,5 +1116,6 @@ struct AISettingsView: View {
         SettingsView()
             .environmentObject(AuthManager())
             .environmentObject(AvatarStore())
+            .environmentObject(SyncEngine())
     }
 }

@@ -41,7 +41,7 @@ struct AllNotesListView: View {
                     }
                 }
             }
-            .listStyle(.insetGrouped)
+            .allNotesListStyle()
             .scrollContentBackground(.hidden)
             .background(Theme.background)
             .overlay {
@@ -249,6 +249,17 @@ struct AllNotesListView: View {
                       .replacingOccurrences(of: "*", with: "")
                       .replacingOccurrences(of: "`", with: "")
                       .replacingOccurrences(of: "\n", with: " ")
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func allNotesListStyle() -> some View {
+        #if os(iOS)
+        self.listStyle(.insetGrouped)
+        #else
+        self.listStyle(.inset)
+        #endif
     }
 }
 

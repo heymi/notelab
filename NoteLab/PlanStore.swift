@@ -80,6 +80,13 @@ final class PlanStore: ObservableObject {
         aiClient: AIClient
     ) async {
         if isLoading { return }
+        let subscriptionManager = SubscriptionManager.shared
+        guard subscriptionManager.canUseAIFeature(.recentFocus) else {
+            errorMessage = "AI 点数不足"
+            NotificationCenter.default.post(name: .showPaywall, object: PaywallTrigger.aiQuotaExceeded)
+            return
+        }
+
         isLoading = true
         errorMessage = nil
 
@@ -93,6 +100,7 @@ final class PlanStore: ObservableObject {
             let cachePayload = RecentFocusCachePayload(report: report, markdown: rawReportMarkdown)
             cache.save(key: cacheKey, value: cachePayload)
             persistInputHash(inputHash)
+            subscriptionManager.recordAIUsage(.recentFocus)
         } catch {
             errorMessage = error.localizedDescription
         }

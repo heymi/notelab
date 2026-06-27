@@ -2,6 +2,7 @@ import Foundation
 #if canImport(UIKit)
 import UIKit
 import PDFKit
+import AVKit
 
 final class AttachmentPreviewViewController: UIViewController, UIScrollViewDelegate {
     private let attachmentId: UUID
@@ -19,6 +20,8 @@ final class AttachmentPreviewViewController: UIViewController, UIScrollViewDeleg
     private let closeButton = UIButton(type: .system)
     private let saveButton = UIButton(type: .system)
     private let deleteButton = UIButton(type: .system)
+    private var playerController: AVPlayerViewController?
+    private var temporaryPreviewURL: URL?
     
     init(attachmentId: UUID, data: Data, fileName: String, type: AttachmentType, onDelete: @escaping (UUID) -> Void, onClose: @escaping () -> Void) {
         self.attachmentId = attachmentId
@@ -47,7 +50,7 @@ final class AttachmentPreviewViewController: UIViewController, UIScrollViewDeleg
     }
     
     private func setupContent() {
-        if type == .image, let image = UIImage(data: data) {
+        if type == .image, let image = AttachmentImage.image(data: data, fileName: fileName) {
             scrollView.delegate = self
             scrollView.minimumZoomScale = 1.0
             scrollView.maximumZoomScale = 3.0
@@ -82,6 +85,37 @@ final class AttachmentPreviewViewController: UIViewController, UIScrollViewDeleg
                 pdfView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                 pdfView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
             ])
+        } else if type == .video, let url = writeTemporaryPreviewFile() {
+            let playerController = AVPlayerViewController()
+            playerController.player = AVPlayer(url: url)
+            addChild(playerController)
+            view.addSubview(playerController.view)
+            playerController.view.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                playerController.view.topAnchor.constraint(equalTo: view.topAnchor),
+                playerController.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+                playerController.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                playerController.view.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+            ])
+            playerController.didMove(toParent: self)
+            self.playerController = playerController
+            playerController.player?.play()
+        }
+    }
+
+    private func writeTemporaryPreviewFile() -> URL? {
+        let safeFileName = (fileName as NSString).lastPathComponent
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(attachmentId.uuidString)-\(safeFileName)")
+        do {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+            try data.write(to: url, options: [.atomic])
+            temporaryPreviewURL = url
+            return url
+        } catch {
+            print("Failed to write temp video preview: \(error)")
+            return nil
         }
     }
     

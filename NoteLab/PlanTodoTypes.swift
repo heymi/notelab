@@ -9,4 +9,6 @@ struct LocalTodoItem: Identifiable, Hashable {
     let notebookTitle: String
     let lineIndex: Int
     let isWhiteboard: Bool
+    let isCompleted: Bool
+    let sortDate: Date
 }

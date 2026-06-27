@@ -5,6 +5,7 @@ struct GlobalAIStatusCard: View {
     let detail: String
     let isLoading: Bool
     let isCompleted: Bool
+    let hasError: Bool
     let onCancel: () -> Void
     let onTap: () -> Void
 
@@ -12,7 +13,12 @@ struct GlobalAIStatusCard: View {
         HStack(spacing: 16) {
             // Status Icon
             ZStack {
-                if isCompleted {
+                if hasError {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.orange)
+                        .transition(.scale.combined(with: .opacity))
+                } else if isCompleted {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 20))
                         .foregroundStyle(.green)
@@ -39,7 +45,7 @@ struct GlobalAIStatusCard: View {
             
             Spacer()
             
-            if isLoading {
+            if isLoading || hasError || isCompleted {
                 Button(action: onCancel) {
                     Image(systemName: "xmark")
                         .font(.system(size: 12, weight: .bold))
@@ -59,10 +65,11 @@ struct GlobalAIStatusCard: View {
                 .strokeBorder(.white.opacity(0.2), lineWidth: 0.5)
         )
         .onTapGesture {
-            guard isCompleted else { return }
+            guard isCompleted, !hasError else { return }
             onTap()
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isCompleted)
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isLoading)
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: hasError)
     }
 }

@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -33,12 +36,113 @@ enum Theme {
     
     static let groupedBackground = Color(light: Color.black.opacity(0.05),
                                          dark: Color.white.opacity(0.08))
+
+    // Note detail surface
+    static let editorBackground = Color(light: Color(red: 0.985, green: 0.980, blue: 0.955),
+                                        dark: Color(red: 0.075, green: 0.083, blue: 0.090))
+
+    static let editorTopWash = Color(light: Color(red: 0.895, green: 0.950, blue: 0.925),
+                                     dark: Color(red: 0.080, green: 0.155, blue: 0.160))
+
+    static let editorPaper = Color(light: Color(red: 0.995, green: 0.990, blue: 0.970),
+                                   dark: Color(red: 0.125, green: 0.130, blue: 0.140))
+
+    static let editorPaperSoft = Color(light: Color(red: 0.955, green: 0.958, blue: 0.930),
+                                       dark: Color(red: 0.165, green: 0.175, blue: 0.180))
+
+    static let editorLine = Color(light: Color(red: 0.875, green: 0.870, blue: 0.825),
+                                  dark: Color(red: 0.255, green: 0.265, blue: 0.275))
+
+    static let editorAccent = Color(light: Color(red: 0.290, green: 0.620, blue: 0.560),
+                                    dark: Color(red: 0.425, green: 0.760, blue: 0.700))
+
+    static let editorAccentDeep = Color(light: Color(red: 0.135, green: 0.335, blue: 0.345),
+                                        dark: Color(red: 0.610, green: 0.860, blue: 0.820))
+
+    static let editorQuiet = Color(light: Color(red: 0.620, green: 0.650, blue: 0.630),
+                                   dark: Color(red: 0.520, green: 0.560, blue: 0.565))
     
     // UI Constants
     static let cornerRadius: CGFloat = 22
     static let buttonHeight: CGFloat = 56
     static let inputHeight: CGFloat = 54
 }
+
+#if canImport(UIKit)
+extension UIColor {
+    static var noteEditorInk: UIColor {
+        UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark ?
+                UIColor(red: 0.94, green: 0.94, blue: 0.96, alpha: 1) :
+                UIColor(red: 0.15, green: 0.18, blue: 0.18, alpha: 1)
+        }
+    }
+
+    static var noteEditorBody: UIColor {
+        UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark ?
+                UIColor(red: 0.82, green: 0.84, blue: 0.84, alpha: 1) :
+                UIColor(red: 0.25, green: 0.29, blue: 0.29, alpha: 1)
+        }
+    }
+
+    static var noteEditorSecondaryInk: UIColor {
+        UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark ?
+                UIColor(red: 0.62, green: 0.65, blue: 0.66, alpha: 1) :
+                UIColor(red: 0.47, green: 0.50, blue: 0.49, alpha: 1)
+        }
+    }
+
+    static var noteEditorPaper: UIColor {
+        UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark ?
+                UIColor(red: 0.125, green: 0.130, blue: 0.140, alpha: 1) :
+                UIColor(red: 0.995, green: 0.990, blue: 0.970, alpha: 1)
+        }
+    }
+
+    static var noteEditorPaperSoft: UIColor {
+        UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark ?
+                UIColor(red: 0.165, green: 0.175, blue: 0.180, alpha: 1) :
+                UIColor(red: 0.955, green: 0.958, blue: 0.930, alpha: 1)
+        }
+    }
+
+    static var noteEditorLine: UIColor {
+        UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark ?
+                UIColor(red: 0.255, green: 0.265, blue: 0.275, alpha: 1) :
+                UIColor(red: 0.875, green: 0.870, blue: 0.825, alpha: 1)
+        }
+    }
+
+    static var noteEditorAccent: UIColor {
+        UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark ?
+                UIColor(red: 0.425, green: 0.760, blue: 0.700, alpha: 1) :
+                UIColor(red: 0.290, green: 0.620, blue: 0.560, alpha: 1)
+        }
+    }
+
+    static var noteEditorAccentDeep: UIColor {
+        UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark ?
+                UIColor(red: 0.610, green: 0.860, blue: 0.820, alpha: 1) :
+                UIColor(red: 0.135, green: 0.335, blue: 0.345, alpha: 1)
+        }
+    }
+
+    static var noteEditorSelection: UIColor {
+        UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark ?
+                UIColor(red: 0.200, green: 0.300, blue: 0.295, alpha: 0.72) :
+                UIColor(red: 0.845, green: 0.930, blue: 0.895, alpha: 1.0)
+        }
+    }
+}
+#endif
 
 extension Color {
     init(light: Color, dark: Color) {

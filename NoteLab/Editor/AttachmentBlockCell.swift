@@ -3,6 +3,7 @@ import Combine
 #if canImport(UIKit)
 import UIKit
 import PDFKit
+import SwiftData
 
 protocol AttachmentBlockCellDelegate: AnyObject {
     func attachmentBlockCellDidRequestDelete(_ cell: AttachmentBlockCell)
@@ -14,6 +15,10 @@ protocol AttachmentBlockCellDelegate: AnyObject {
 
 final class AttachmentBlockCell: UITableViewCell {
     static let reuseIdentifier = "AttachmentBlockCell"
+    private static let fallbackModelContext: ModelContext? = {
+        guard let container = try? PersistenceController.makeContainer() else { return nil }
+        return ModelContext(container)
+    }()
     
     weak var delegate: AttachmentBlockCellDelegate?
     
@@ -45,27 +50,15 @@ final class AttachmentBlockCell: UITableViewCell {
     private var imageAspectRatioConstraint: NSLayoutConstraint?
     
     private var containerBackgroundColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.15, alpha: 1.0) :
-                UIColor(white: 0.97, alpha: 1.0)
-        }
+        .noteEditorPaperSoft
     }
     
     private var containerBorderColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.3, alpha: 1.0) :
-                UIColor(white: 0.9, alpha: 1.0)
-        }
+        .noteEditorLine
     }
     
     private var infoLabelColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(white: 0.7, alpha: 1.0) :
-                UIColor.darkGray
-        }
+        .noteEditorSecondaryInk
     }
     
     private var dragHandleBackgroundColor: UIColor {
@@ -88,11 +81,7 @@ final class AttachmentBlockCell: UITableViewCell {
     }
     
     private var sentHighlightColor: UIColor {
-        UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ?
-                UIColor(red: 0.3, green: 0.25, blue: 0.05, alpha: 1.0) :
-                UIColor(red: 1.0, green: 0.95, blue: 0.64, alpha: 1.0)
-        }
+        .noteEditorSelection
     }
 
     private func setupViews() {
@@ -102,16 +91,16 @@ final class AttachmentBlockCell: UITableViewCell {
         contentView.addSubview(sentHighlightBackgroundView)
         sentHighlightBackgroundView.translatesAutoresizingMaskIntoConstraints = false
         
-        multiSelectBackgroundView.backgroundColor = UIColor.black.withAlphaComponent(0.06)
+        multiSelectBackgroundView.backgroundColor = UIColor.noteEditorSelection
         multiSelectBackgroundView.layer.cornerRadius = 12
         multiSelectBackgroundView.isHidden = true
         contentView.addSubview(multiSelectBackgroundView)
         multiSelectBackgroundView.translatesAutoresizingMaskIntoConstraints = false
         
         containerView.backgroundColor = containerBackgroundColor
-        containerView.layer.cornerRadius = 12
+        containerView.layer.cornerRadius = 18
         containerView.clipsToBounds = true
-        containerView.layer.borderWidth = 0.5
+        containerView.layer.borderWidth = 0.7
         containerView.layer.borderColor = containerBorderColor.cgColor
         
         contentView.addSubview(containerView)
@@ -126,7 +115,7 @@ final class AttachmentBlockCell: UITableViewCell {
         thumbnailImageView.clipsToBounds = true
         thumbnailImageView.backgroundColor = .white
         
-        infoLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        infoLabel.font = .systemFont(ofSize: 14, weight: .semibold)
         infoLabel.textColor = infoLabelColor
         infoLabel.numberOfLines = 1
         
@@ -156,10 +145,10 @@ final class AttachmentBlockCell: UITableViewCell {
             multiSelectBackgroundView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
             multiSelectBackgroundView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
             
-            containerView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-            containerView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
-            containerView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            containerView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            containerView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
+            containerView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
+            containerView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
+            containerView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
             heightConstraint,
             
             thumbnailImageView.topAnchor.constraint(equalTo: containerView.topAnchor),
@@ -285,8 +274,15 @@ final class AttachmentBlockCell: UITableViewCell {
     }
     
     private func loadFromStorage(attachmentId: UUID, storagePath: String, fileName: String, type: AttachmentType) {
+        let resolved = resolveAttachmentReference(
+            attachmentId: attachmentId,
+            storagePath: storagePath,
+            fileName: fileName
+        )
+
         // Try local cache first (synchronous, using AttachmentCache directly)
-        if let cachedData = AttachmentCache.load(attachmentId: attachmentId, fileName: fileName) {
+        if let cachedData = AttachmentCache.load(attachmentId: resolved.attachmentId, fileName: resolved.fileName) {
+            print("[AttachmentBlockCell] source=cache attachmentId=\(resolved.attachmentId.uuidString.lowercased()) fileName=\(resolved.fileName) storagePath=\(resolved.storagePath)")
             self.attachmentData = cachedData
             displayThumbnail(data: cachedData, type: type)
             return
@@ -299,9 +295,9 @@ final class AttachmentBlockCell: UITableViewCell {
         loadTask = Task { [weak self] in
             do {
                 let data = try await AttachmentStorage.shared.loadAttachmentData(
-                    attachmentId: attachmentId,
-                    storagePath: storagePath,
-                    fileName: fileName
+                    attachmentId: resolved.attachmentId,
+                    storagePath: resolved.storagePath,
+                    fileName: resolved.fileName
                 )
                 
                 guard !Task.isCancelled else { return }
@@ -318,13 +314,80 @@ final class AttachmentBlockCell: UITableViewCell {
                     self?.thumbnailImageView.contentMode = .scaleAspectFit
                     self?.thumbnailImageView.tintColor = .systemOrange
                 }
+                print("[AttachmentBlockCell] load failed attachmentId=\(resolved.attachmentId.uuidString.lowercased()) storagePath=\(resolved.storagePath) error=\(error.localizedDescription)")
             }
         }
+    }
+
+    private func resolveAttachmentReference(
+        attachmentId: UUID,
+        storagePath: String,
+        fileName: String
+    ) -> (attachmentId: UUID, storagePath: String, fileName: String) {
+        let trimmedPath = storagePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isCanonicalStoragePath(trimmedPath) else {
+            return (attachmentId, trimmedPath, fileName)
+        }
+
+        guard let candidateId = attachmentTokenUUID(from: trimmedPath)
+            ?? extractUUID(from: trimmedPath)
+            ?? extractUUID(from: fileName) else {
+            print("[AttachmentBlockCell] legacy target unmapped attachmentId=\(attachmentId.uuidString.lowercased()) storagePath=\(trimmedPath)")
+            return (attachmentId, trimmedPath, fileName)
+        }
+
+        guard let local = localAttachment(for: candidateId),
+              isCanonicalStoragePath(local.storagePath) else {
+            print("[AttachmentBlockCell] missing local mapping attachmentId=\(candidateId.uuidString.lowercased()) storagePath=\(trimmedPath)")
+            return (candidateId, trimmedPath, fileName)
+        }
+
+        let resolvedFileName = local.fileName.isEmpty ? ((local.storagePath as NSString).lastPathComponent) : local.fileName
+        print("[AttachmentBlockCell] resolved legacy target attachmentId=\(candidateId.uuidString.lowercased()) from=\(trimmedPath) to=\(local.storagePath)")
+        return (candidateId, local.storagePath, resolvedFileName)
+    }
+
+    private func localAttachment(for attachmentId: UUID) -> LocalAttachment? {
+        guard let context = Self.fallbackModelContext else { return nil }
+        var fetch = FetchDescriptor<LocalAttachment>(
+            predicate: #Predicate<LocalAttachment> { $0.id == attachmentId }
+        )
+        fetch.fetchLimit = 1
+        return (try? context.fetch(fetch))?.first
+    }
+
+    private func isCanonicalStoragePath(_ path: String) -> Bool {
+        guard !path.hasPrefix("attachment:") else { return false }
+        guard !path.hasPrefix("/") else { return false }
+        guard !path.contains("://") else { return false }
+        let comps = path.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
+        guard comps.count == 2 else { return false }
+        guard UUID(uuidString: String(comps[0])) != nil else { return false }
+        let fileName = String(comps[1])
+        let base = (fileName as NSString).deletingPathExtension
+        return UUID(uuidString: base) != nil
+    }
+
+    private func attachmentTokenUUID(from path: String) -> UUID? {
+        guard path.lowercased().hasPrefix("attachment:") else { return nil }
+        let raw = String(path.dropFirst("attachment:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return UUID(uuidString: raw)
+    }
+
+    private func extractUUID(from text: String) -> UUID? {
+        let pattern = #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        let matches = regex.matches(in: text, range: range)
+        guard let match = matches.last else { return nil }
+        let raw = nsText.substring(with: match.range)
+        return UUID(uuidString: raw.lowercased())
     }
     
     private func displayThumbnail(data: Data, type: AttachmentType) {
         if type == .image {
-            if let image = UIImage(data: data) {
+            if let image = AttachmentImage.image(data: data, fileName: fileName ?? "") {
                 thumbnailImageView.image = image
                 thumbnailImageView.contentMode = .scaleAspectFill
                 
@@ -354,6 +417,11 @@ final class AttachmentBlockCell: UITableViewCell {
                 thumbnailImageView.image = UIImage(systemName: "doc.text.fill")
                 thumbnailImageView.contentMode = .scaleAspectFit
             }
+        } else if type == .video {
+            thumbnailImageView.image = UIImage(systemName: "play.rectangle.fill")
+            thumbnailImageView.contentMode = .scaleAspectFit
+            thumbnailImageView.tintColor = .noteEditorSecondaryInk
+            thumbnailImageView.backgroundColor = .noteEditorPaper
         }
     }
 

@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import SwiftData
 #if canImport(UIKit)
 import WebKit
 
@@ -97,6 +98,10 @@ struct TipTapEditorView: UIViewRepresentable {
         
         /// Task for resolving attachment URLs - stored so we can cancel on new requests
         private var attachmentResolutionTask: Task<Void, Never>?
+        private lazy var fallbackModelContext: ModelContext? = {
+            guard let container = try? PersistenceController.makeContainer() else { return nil }
+            return ModelContext(container)
+        }()
 
         init(parent: TipTapEditorView) {
             self.parent = parent
@@ -220,14 +225,16 @@ struct TipTapEditorView: UIViewRepresentable {
                 for path in uniquePaths {
                     // Check for cancellation
                     if Task.isCancelled { return }
-                    
-                    // Try signed URL first
-                    if let url = try? await AttachmentStorage.shared.getSignedURL(storagePath: path) {
+
+                    let mappedPath = self.resolveStoragePath(for: path)
+
+                    // Try a CloudKit-backed local file URL first.
+                    if let url = try? await AttachmentStorage.shared.getSignedURL(storagePath: mappedPath) {
                         resolved[path] = url.absoluteString
                         continue
                     }
                     // Fallback to local cache
-                    if let dataURL = self.dataURLFromCache(storagePath: path) {
+                    if let dataURL = self.dataURLFromCache(storagePath: mappedPath) {
                         resolved[path] = dataURL
                     }
                 }
@@ -249,11 +256,55 @@ struct TipTapEditorView: UIViewRepresentable {
         private func dataURLFromCache(storagePath: String) -> String? {
             let fileName = (storagePath as NSString).lastPathComponent
             let base = (fileName as NSString).deletingPathExtension
-            guard let attachmentId = UUID(uuidString: base) else { return nil }
+            let attachmentId = UUID(uuidString: base) ?? extractUUID(from: storagePath)
+            guard let attachmentId else { return nil }
             guard let data = AttachmentCache.load(attachmentId: attachmentId, fileName: fileName) else { return nil }
             let mimeType = AttachmentStorage.mimeType(for: fileName)
             let base64 = data.base64EncodedString()
             return "data:\(mimeType);base64,\(base64)"
+        }
+
+        private func resolveStoragePath(for rawPath: String) -> String {
+            let path = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty else { return rawPath }
+            if isCanonicalStoragePath(path) {
+                return path
+            }
+            guard let attachmentId = extractUUID(from: path),
+                  let resolvedPath = localAttachmentStoragePath(for: attachmentId),
+                  isCanonicalStoragePath(resolvedPath) else {
+                return rawPath
+            }
+            return resolvedPath
+        }
+
+        private func localAttachmentStoragePath(for attachmentId: UUID) -> String? {
+            guard let context = fallbackModelContext else { return nil }
+            var fetch = FetchDescriptor<LocalAttachment>(
+                predicate: #Predicate<LocalAttachment> { $0.id == attachmentId }
+            )
+            fetch.fetchLimit = 1
+            return (try? context.fetch(fetch).first)?.storagePath
+        }
+
+        private func isCanonicalStoragePath(_ path: String) -> Bool {
+            guard !path.hasPrefix("attachment:") else { return false }
+            guard !path.hasPrefix("/") else { return false }
+            guard !path.contains("://") else { return false }
+            let comps = path.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
+            guard comps.count == 2 else { return false }
+            return UUID(uuidString: String(comps[0])) != nil
+        }
+
+        private func extractUUID(from text: String) -> UUID? {
+            let pattern = #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+            let nsText = text as NSString
+            let range = NSRange(location: 0, length: nsText.length)
+            let matches = regex.matches(in: text, range: range)
+            guard let match = matches.last else { return nil }
+            let raw = nsText.substring(with: match.range)
+            return UUID(uuidString: raw.lowercased())
         }
         
         private func escapeForJS(_ string: String) -> String {
@@ -302,23 +353,25 @@ struct TipTapEditorView: UIViewRepresentable {
     private static func editorCSS(hideTitle: Bool) -> String {
         """
         :root {
-          --ink: #1A1A1F;
-          --ink-secondary: #8E8E93;
-          --ink-tertiary: #C4C4C6;
-          --bg: #F8F8FA;
-          --bg-hover: #F2F2F7;
-          --accent: #007AFF;
-          --border: #E8E8EA;
+          --ink: #252D2D;
+          --ink-secondary: #767F7B;
+          --ink-tertiary: #9EA5A0;
+          --bg: #FCFAF5;
+          --bg-hover: #F3F4ED;
+          --accent: #22565A;
+          --accent-soft: #D9EEE5;
+          --border: #DFDED2;
         }
         @media (prefers-color-scheme: dark) {
           :root {
             --ink: #F5F5F7;
             --ink-secondary: #98989D;
             --ink-tertiary: #636366;
-            --bg: #1C1C1E;
-            --bg-hover: #2C2C2E;
-            --accent: #0A84FF;
-            --border: #38383A;
+            --bg: #202124;
+            --bg-hover: #2A2D2E;
+            --accent: #9CDCD1;
+            --accent-soft: #203936;
+            --border: #414547;
           }
         }
         * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -333,8 +386,9 @@ struct TipTapEditorView: UIViewRepresentable {
         #title-container { padding: 20px 18px 8px 18px; }
         #title-input {
           width: 100%; border: none; outline: none; background: transparent;
-          font-size: 28px; font-weight: 700; color: var(--ink);
-          padding: 0; margin: 0; letter-spacing: -0.3px;
+          font-family: "Songti SC", "STSong", "Iowan Old Style", Georgia, serif;
+          font-size: 38px; font-weight: 700; color: var(--ink);
+          padding: 0; margin: 0; letter-spacing: 0;
         }
         #title-input::placeholder { color: var(--ink-tertiary); }
         
@@ -342,8 +396,8 @@ struct TipTapEditorView: UIViewRepresentable {
           min-height: calc(100% - 80px);
           padding: 8px 18px 120px 18px;
           outline: none;
-          line-height: 1.65;
-          font-size: 16px;
+          line-height: 1.72;
+          font-size: 17px;
           caret-color: var(--accent);
           white-space: pre-wrap;
           word-wrap: break-word;
@@ -355,23 +409,28 @@ struct TipTapEditorView: UIViewRepresentable {
         }
         #editor > * + * { margin-top: 0.4em; }
         
-        #editor h1 { font-size: 26px; font-weight: 700; margin: 24px 0 8px 0; line-height: 1.25; }
-        #editor h2 { font-size: 22px; font-weight: 600; margin: 20px 0 6px 0; line-height: 1.3; }
-        #editor h3 { font-size: 18px; font-weight: 600; margin: 16px 0 4px 0; line-height: 1.35; }
+        #editor h1 {
+          font-family: "Songti SC", "STSong", "Iowan Old Style", Georgia, serif;
+          font-size: 32px; font-weight: 700; margin: 26px 0 10px 0; line-height: 1.12;
+        }
+        #editor h2 { font-size: 23px; font-weight: 750; margin: 22px 0 7px 0; line-height: 1.18; }
+        #editor h3 { font-size: 18px; font-weight: 750; margin: 18px 0 5px 0; line-height: 1.25; }
         #editor p { margin: 0 0 2px 0; }
         #editor strong { font-weight: 600; }
         #editor em { font-style: italic; }
         #editor code {
-          background: rgba(128,128,128,0.12); border-radius: 4px; padding: 2px 5px;
+          background: var(--bg-hover); color: var(--accent); border-radius: 5px; padding: 2px 5px;
           font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em;
         }
         #editor s { text-decoration: line-through; opacity: 0.6; }
         #editor blockquote {
-          border-left: 3px solid var(--border); padding-left: 16px;
-          margin: 12px 0; color: var(--ink-secondary);
+          margin: 12px 0; padding: 14px 15px; border-radius: 14px;
+          background: var(--bg-hover); color: var(--accent);
+          font-family: "Songti SC", "STSong", "Iowan Old Style", Georgia, serif;
+          font-size: 18px; line-height: 1.58;
         }
         #editor pre {
-          background: rgba(128,128,128,0.08); border-radius: 8px; padding: 16px 18px;
+          background: var(--bg-hover); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px;
           font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px;
           line-height: 1.55; overflow-x: auto; margin: 12px 0; white-space: pre-wrap;
         }
@@ -382,7 +441,7 @@ struct TipTapEditorView: UIViewRepresentable {
         #editor hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
         #editor img.attachment-image {
           max-width: 100%;
-          border-radius: 12px;
+          border-radius: 18px;
           display: block;
           margin: 12px 0;
           background: var(--bg-hover);
@@ -395,8 +454,8 @@ struct TipTapEditorView: UIViewRepresentable {
           border: 1px solid var(--border); padding: 10px 14px;
           text-align: left; vertical-align: top;
         }
-        #editor th { background: var(--bg-hover); font-weight: 600; }
-        #editor ::selection { background: rgba(0, 122, 255, 0.2); }
+        #editor th { background: var(--bg-hover); font-weight: 650; }
+        #editor ::selection { background: var(--accent-soft); }
         
         /* Task list styles */
         #editor .task-item {
@@ -771,12 +830,12 @@ struct TipTapEditorView: UIViewRepresentable {
                 return children + '\\n';
               case 'img':
                 // CRITICAL: Always prefer data-storage-path over src
-                // src may contain signed URLs or data URLs which should NOT be saved to markdown
+                // src may contain transient file URLs or data URLs which should NOT be saved to markdown
                 var storagePath = node.getAttribute('data-storage-path') || '';
                 var alt = node.getAttribute('alt') || 'Attachment';
                 
                 // Only use storagePath if available; otherwise skip this image
-                // We never want to persist signed URLs or data URLs to markdown
+                // We never want to persist transient file URLs or data URLs to markdown
                 if (storagePath) {
                   return '![' + alt + '](' + storagePath + ')\\n\\n';
                 }

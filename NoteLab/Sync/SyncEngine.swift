@@ -1,913 +1,290 @@
-import Foundation
+@preconcurrency import CloudKit
 import Combine
-import SwiftData
-import Supabase
+import CoreData
+import Foundation
 import os
 
-final class SyncEngine: ObservableObject {
-    @Published private(set) var isSyncing: Bool = false
-    @Published private(set) var lastSyncAt: Date?
-    @Published private(set) var lastError: String?
+protocol CloudSyncing: ObservableObject {
+    var isSyncing: Bool { get }
+    var lastSyncAt: Date? { get }
+    var lastPushAt: Date? { get }
+    var lastPullAt: Date? { get }
+    var lastError: String? { get }
+    var lastSummary: SyncSummary? { get }
+    var pendingItemCount: Int { get }
+    var lastLocalRecordCount: Int? { get }
+    var lastCloudRecordCount: Int? { get }
+    var canClearLocalData: Bool { get }
+    func configure(profileId: UUID)
+    func resetForSignOut()
+    func syncNow() async
+    func syncNow(reason: SyncReason) async -> SyncSummary
+    func refreshPendingCount()
+}
 
-    private var ownerId: UUID?
-    private var modelContext: ModelContext?
-    private let supabase: SupabaseClient
-    private let logger = Logger(subsystem: "NoteLab", category: "Sync")
+enum SyncReason: String, Equatable {
+    case launch
+    case sceneActive
+    case remoteNotification
+    case manual
+    case backgroundRefresh
 
-    init(supabase: SupabaseClient = SupabaseManager.shared) {
-        self.supabase = supabase
+    var shouldShowPaywall: Bool {
+        switch self {
+        case .launch, .sceneActive, .manual:
+            return true
+        case .remoteNotification, .backgroundRefresh:
+            return false
+        }
+    }
+}
+
+struct SyncSummary: Equatable {
+    var reason: SyncReason
+    var pushed: Int = 0
+    var pulled: Int = 0
+    var deleted: Int = 0
+    var failed: Int = 0
+    var skipped: Int = 0
+    var message: String?
+
+    var hasFailures: Bool {
+        failed > 0 || message != nil
     }
 
-    func configure(ownerId: UUID, context: ModelContext) {
-        self.ownerId = ownerId
-        self.modelContext = context
+    static func skipped(reason: SyncReason, message: String) -> SyncSummary {
+        SyncSummary(reason: reason, skipped: 1, message: message)
+    }
+
+    mutating func merge(_ other: SyncSummary) {
+        pushed += other.pushed
+        pulled += other.pulled
+        deleted += other.deleted
+        failed += other.failed
+        skipped += other.skipped
+        if message == nil {
+            message = other.message
+        }
+    }
+}
+
+@MainActor
+final class SyncEngine: ObservableObject, CloudSyncing {
+    @Published private(set) var isSyncing: Bool = false
+    @Published private(set) var lastSyncAt: Date?
+    @Published private(set) var lastPushAt: Date?
+    @Published private(set) var lastPullAt: Date?
+    @Published private(set) var lastError: String?
+    @Published private(set) var lastSummary: SyncSummary?
+    @Published private(set) var pendingItemCount: Int = 0
+    @Published private(set) var lastLocalRecordCount: Int?
+    @Published private(set) var lastCloudRecordCount: Int?
+
+    private var profileId: UUID?
+    private let notebookRepository = NotebookRepository()
+    private let attachmentRepository = AttachmentRepository()
+    private let syncStateRepository = SyncStateRepository()
+    private let transport: CloudKitTransporting
+    private let storage = StorageController.shared
+    private let logger = Logger(subsystem: "NoteLab", category: "CloudKitSync")
+
+    init(transport: CloudKitTransporting? = nil) {
+        self.transport = transport ?? CloudKitTransport()
+    }
+
+    func configure(profileId: UUID) {
+        self.profileId = profileId
+        refreshPendingCount()
+    }
+
+    var canClearLocalData: Bool {
+        pendingItemCount == 0 && lastSyncAt != nil
     }
 
     func resetForSignOut() {
-        ownerId = nil
-        modelContext = nil
+        profileId = nil
         isSyncing = false
         lastSyncAt = nil
+        lastPushAt = nil
+        lastPullAt = nil
         lastError = nil
+        lastSummary = nil
+        pendingItemCount = 0
+        lastLocalRecordCount = nil
+        lastCloudRecordCount = nil
     }
 
     func syncNow() async {
-        guard let ownerId, let modelContext else { return }
-        if await MainActor.run(resultType: Bool.self, body: { self.isSyncing }) { return }
-        if Task.isCancelled { return }
-        await MainActor.run(resultType: Void.self, body: { self.isSyncing = true })
-        defer { Task { @MainActor in self.isSyncing = false } }
+        _ = await syncNow(reason: .manual)
+    }
 
+    @discardableResult
+    func syncNow(reason: SyncReason) async -> SyncSummary {
+        guard let profileId else {
+            let summary = SyncSummary.skipped(reason: reason, message: "当前账号尚未准备好")
+            lastSummary = summary
+            return summary
+        }
+
+        guard !isSyncing else {
+            let summary = SyncSummary.skipped(reason: reason, message: "已有同步任务正在进行")
+            lastSummary = summary
+            return summary
+        }
+        isSyncing = true
+        defer { isSyncing = false }
+
+        var summary = SyncSummary(reason: reason)
         do {
-            let syncStart = DispatchTime.now()
-            let mark = { (label: StaticString, started: DispatchTime) in
-                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000_000
-                self.logger.debug("\(label, privacy: .public) in \(elapsed, privacy: .public)s")
+            let status = try await CloudKitSchema.container.accountStatus()
+            guard status == .available else {
+                let message = "当前设备未开启 iCloud，同步已暂停，本地数据仍可继续使用"
+                lastError = message
+                summary.message = message
+                lastSummary = summary
+                return summary
             }
 
-            let pushStart = DispatchTime.now()
-            try await pushDirty()
-            mark("pushDirty", pushStart)
-            if Task.isCancelled { return }
-            await Task.yield()
-            let pushAttStart = DispatchTime.now()
-            try await pushDirtyAttachments()
-            mark("pushDirtyAttachments", pushAttStart)
-            if Task.isCancelled { return }
-            await Task.yield()
-            let pullStart = DispatchTime.now()
-            try await pullIncremental()
-            mark("pullIncremental", pullStart)
-            if Task.isCancelled { return }
-            await Task.yield()
-            let pullAttStart = DispatchTime.now()
-            try await pullAttachments()
-            mark("pullAttachments", pullAttStart)
-            if Task.isCancelled { return }
-            await Task.yield()
-            let saveStart = DispatchTime.now()
-            let didSave = try await MainActor.run(resultType: Bool.self, body: { () throws -> Bool in
-                if modelContext.hasChanges {
-                    try modelContext.save()
-                    return true
-                }
-                return false
-            })
-            mark("modelContext.save", saveStart)
-            print(didSave ? "SyncEngine: modelContext saved" : "SyncEngine: modelContext has no changes")
-            await Task.yield()
-            await MainActor.run(resultType: Void.self, body: {
-                self.lastSyncAt = Date()
-                self.lastError = nil
-            })
-            mark("syncTotal", syncStart)
+            let iCloudAccountHash = try await transport.iCloudAccountHash()
+            try await transport.ensureInfrastructure()
+            lastLocalRecordCount = try localRecordCount(profileId: profileId)
+            if reason == .manual {
+                _ = try notebookRepository.enqueueFullUpload(profileId: profileId)
+                _ = try attachmentRepository.enqueueFullUpload(profileId: profileId)
+            }
+            summary.merge(try await pushOutbox(profileId: profileId))
+            summary.merge(try await pullChanges(profileId: profileId, iCloudAccountHash: iCloudAccountHash, reason: reason))
+            lastCloudRecordCount = try await transport.cloudRecordCount(profileId: profileId)
+            refreshPendingCount()
+
+            lastSyncAt = Date()
+            if summary.pushed > 0 { lastPushAt = lastSyncAt }
+            if summary.pulled > 0 || summary.deleted > 0 || lastCloudRecordCount != nil { lastPullAt = lastSyncAt }
+            lastError = summary.hasFailures ? summary.message ?? "部分内容同步失败，稍后会自动重试" : nil
+            lastSummary = summary
+            return summary
         } catch {
-            await MainActor.run(resultType: Void.self, body: {
-                self.lastError = error.localizedDescription
-            })
+            logger.error("sync failed: \(error.localizedDescription, privacy: .public)")
+            lastError = error.localizedDescription
+            summary.failed += 1
+            summary.message = error.localizedDescription
+            lastSummary = summary
+            refreshPendingCount()
+            return summary
         }
     }
 
-    // MARK: - Pull
-
-    private func pullIncremental() async throws {
-        try await pullNotebooks()
-        try await pullNotes()
-    }
-
-    private func pullNotebooks() async throws {
-        guard let ownerId, let modelContext else { return }
-        let watermark = try await MainActor.run(resultType: Date?.self, body: {
-            try getWatermark(entity: "notebooks", ownerId: ownerId, context: modelContext)
-        })
-
-        let rows: [RemoteNotebookRow]
-        if let watermark {
-            rows = try await supabase
-                .from("notebooks")
-                .select()
-                .gt("updated_at", value: iso(watermark))
-                .order("updated_at", ascending: true)
-                .execute()
-                .value
-        } else {
-            rows = try await supabase
-                .from("notebooks")
-                .select()
-                .order("updated_at", ascending: true)
-                .execute()
-                .value
-        }
-        guard !rows.isEmpty else { return }
-        print("SyncEngine: pullNotebooks count=\(rows.count) lastId=\(rows.last?.id.uuidString ?? "nil")")
-
-        try await MainActor.run(resultType: Void.self, body: {
-            for (index, row) in rows.enumerated() {
-                upsertLocalNotebook(from: row, ownerId: ownerId, context: modelContext)
-                if index % 10 == 0 {
-                    Task { await Task.yield() }
-                }
-            }
-
-            if let maxUpdatedAt = rows.compactMap({ $0.updatedAtDate }).max() {
-                try setWatermark(entity: "notebooks", ownerId: ownerId, context: modelContext, date: maxUpdatedAt)
-            }
-        })
-    }
-
-    private func pullNotes() async throws {
-        guard let ownerId, let modelContext else { return }
-        let watermark = try await MainActor.run(resultType: Date?.self, body: {
-            try getWatermark(entity: "notes", ownerId: ownerId, context: modelContext)
-        })
-
-        let rows: [RemoteNoteRow]
-        if let watermark {
-            rows = try await supabase
-                .from("notes")
-                .select()
-                .gt("updated_at", value: iso(watermark))
-                .order("updated_at", ascending: true)
-                .execute()
-                .value
-        } else {
-            rows = try await supabase
-                .from("notes")
-                .select()
-                .order("updated_at", ascending: true)
-                .execute()
-                .value
-        }
-        guard !rows.isEmpty else { return }
-        print("SyncEngine: pullNotes count=\(rows.count) lastId=\(rows.last?.id.uuidString ?? "nil")")
-
-        try await MainActor.run(resultType: Void.self, body: {
-            for (index, row) in rows.enumerated() {
-                upsertLocalNote(from: row, ownerId: ownerId, context: modelContext)
-                if index % 10 == 0 {
-                    Task { await Task.yield() }
-                }
-            }
-
-            if let maxUpdatedAt = rows.compactMap({ $0.updatedAtDate }).max() {
-                try setWatermark(entity: "notes", ownerId: ownerId, context: modelContext, date: maxUpdatedAt)
-            }
-        })
-    }
-
-    // MARK: - Push
-
-    private func pushDirty() async throws {
-        try await pushDirtyNotebooks()
-        try await pushDirtyNotes()
-    }
-
-    private func pushDirtyNotebooks() async throws {
-        guard let ownerId, let modelContext else { return }
-
-        let dirty = try await MainActor.run(resultType: [LocalNotebook].self, body: {
-            let pred = #Predicate<LocalNotebook> { nb in
-                nb.ownerId == ownerId && nb.isDirty == true
-            }
-            let fetch = FetchDescriptor<LocalNotebook>(predicate: pred)
-            return try modelContext.fetch(fetch)
-        })
-
-        for local in dirty {
-            let payload = NotebookUpsert(
-                id: local.id,
-                userId: ownerId,
-                title: local.title,
-                color: local.colorRaw,
-                iconName: local.iconName,
-                deletedAt: local.deletedAt
-            )
-            let returned: [RemoteNotebookRow] = try await supabase
-                .from("notebooks")
-                .upsert(payload)
-                .select()
-                .execute()
-                .value
-
-            await MainActor.run(resultType: Void.self, body: {
-                if let row = returned.first {
-                    local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
-                } else {
-                    local.remoteUpdatedAt = Date()
-                }
-                local.isDirty = false
-            })
-        }
-    }
-
-    private func pushDirtyNotes() async throws {
-        guard let ownerId, let modelContext else { return }
-
-        let dirty = try await MainActor.run(resultType: [LocalNote].self, body: {
-            let pred = #Predicate<LocalNote> { n in
-                n.ownerId == ownerId && n.isDirty == true
-            }
-            let fetch = FetchDescriptor<LocalNote>(predicate: pred)
-            return try modelContext.fetch(fetch)
-        })
-
-        for local in dirty {
-            guard let notebookId = local.notebook?.id else { continue }
-
-            // 1) Try optimistic-lock update: id + expected version.
-            let updatePayload = NoteUpdatePayload(
-                notebookId: notebookId,
-                title: local.title,
-                summary: local.summary,
-                content: local.content,
-                paragraphCount: local.paragraphCount,
-                bulletCount: local.bulletCount,
-                hasAdditionalContext: local.hasAdditionalContext,
-                deletedAt: local.deletedAt
-            )
-
-            let updated: [RemoteNoteRow] = try await supabase
-                .from("notes")
-                .update(updatePayload)
-                .eq("id", value: local.id.uuidString)
-                .eq("version", value: local.version)
-                .select()
-                .execute()
-                .value
-
-            if let row = updated.first {
-                await MainActor.run(resultType: Void.self, body: {
-                    local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
-                    local.version = row.version ?? local.version
-                    local.isDirty = false
-                })
-                continue
-            }
-
-            // 2) If nothing updated, distinguish between (a) not exists (create) vs (b) conflict (duplicate).
-            let remoteRows: [RemoteNoteRow] = try await supabase
-                .from("notes")
-                .select()
-                .eq("id", value: local.id.uuidString)
-                .limit(1)
-                .execute()
-                .value
-
-            if remoteRows.isEmpty {
-                // Not on server yet → create via upsert.
-                let payload = NoteUpsert(
-                    id: local.id,
-                    userId: ownerId,
-                    notebookId: notebookId,
-                    title: local.title,
-                    summary: local.summary,
-                    content: local.content,
-                    paragraphCount: local.paragraphCount,
-                    bulletCount: local.bulletCount,
-                    hasAdditionalContext: local.hasAdditionalContext,
-                    deletedAt: local.deletedAt
-                )
-
-                let inserted: [RemoteNoteRow] = try await supabase
-                    .from("notes")
-                    .upsert(payload)
-                    .select()
-                    .execute()
-                    .value
-
-                await MainActor.run(resultType: Void.self, body: {
-                    if let row = inserted.first {
-                        local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
-                        local.version = row.version ?? local.version
-                    } else {
-                        local.remoteUpdatedAt = Date()
-                    }
-                    local.isDirty = false
-                })
-                continue
-            }
-
-            // Conflict: server has a different version.
-            guard let remote = remoteRows.first else { continue }
-
-            // Snapshot local unsynced changes for conflict copy.
-            let snapshot = NoteSnapshot(
-                title: local.title,
-                summary: local.summary,
-                content: local.content,
-                paragraphCount: local.paragraphCount,
-                bulletCount: local.bulletCount,
-                hasAdditionalContext: local.hasAdditionalContext,
-                deletedAt: local.deletedAt
-            )
-
-            // Apply server version to original note (accept remote).
-            await MainActor.run(resultType: Void.self, body: {
-                local.title = remote.title
-                local.summary = remote.summary
-                local.content = remote.content
-                local.paragraphCount = remote.paragraphCount
-                local.bulletCount = remote.bulletCount
-                local.hasAdditionalContext = remote.hasAdditionalContext
-                local.deletedAt = remote.deletedAtDate
-                local.remoteUpdatedAt = remote.updatedAtDate ?? local.remoteUpdatedAt
-                local.version = remote.version ?? local.version
-                local.isDirty = false
-            })
-
-            // Create a "conflict copy" note with the local snapshot.
-            let conflictNote = LocalNote(
-                id: UUID(),
-                ownerId: ownerId,
-                title: snapshot.title + " (冲突副本)",
-                summary: snapshot.summary,
-                paragraphCount: snapshot.paragraphCount,
-                bulletCount: snapshot.bulletCount,
-                hasAdditionalContext: snapshot.hasAdditionalContext,
-                createdAt: Date(),
-                remoteUpdatedAt: Date(),
-                version: 1,
-                deletedAt: snapshot.deletedAt,
-                contentRTF: nil,
-                content: snapshot.content,
-                isDirty: true,
-                conflictParentId: local.id,
-                notebook: local.notebook
-            )
-            await MainActor.run(resultType: Void.self, body: {
-                modelContext.insert(conflictNote)
-            })
-            // Note: SwiftData automatically manages inverse relationships,
-            // no need to manually append to notebook.notes
-        }
-    }
-
-    // MARK: - Attachment Sync
-    
-    private func pushDirtyAttachments() async throws {
-        guard let ownerId, let modelContext else { return }
-        
-        // Upload pending attachments to Supabase Storage
-        try await AttachmentStorage.shared.uploadPendingAttachments(context: modelContext, ownerId: ownerId)
-        
-        // Now push metadata to attachments table
-        let dirty = try await MainActor.run(resultType: [LocalAttachment].self, body: {
-            let pred = #Predicate<LocalAttachment> { att in
-                att.ownerId == ownerId && att.isDirty == true && att.isUploaded == true
-            }
-            let fetch = FetchDescriptor<LocalAttachment>(predicate: pred)
-            return try modelContext.fetch(fetch)
-        })
-        
-        for local in dirty {
-            let payload = AttachmentUpsert(
-                id: local.id,
-                userId: ownerId,
-                noteId: local.noteId,
-                storagePath: local.storagePath,
-                fileName: local.fileName,
-                mimeType: local.mimeType,
-                fileSize: local.fileSize,
-                deletedAt: local.deletedAt
-            )
-            
-            let returned: [RemoteAttachmentRow] = try await supabase
-                .from("attachments")
-                .upsert(payload)
-                .select()
-                .execute()
-                .value
-            
-            await MainActor.run(resultType: Void.self, body: {
-                if let row = returned.first {
-                    local.remoteUpdatedAt = row.updatedAtDate ?? local.remoteUpdatedAt
-                } else {
-                    local.remoteUpdatedAt = Date()
-                }
-                local.isDirty = false
-            })
-        }
-    }
-    
-    private func pullAttachments() async throws {
-        guard let ownerId, let modelContext else { return }
-        let watermark = try await MainActor.run(resultType: Date?.self, body: {
-            try getWatermark(entity: "attachments", ownerId: ownerId, context: modelContext)
-        })
-        
-        let rows: [RemoteAttachmentRow]
-        if let watermark {
-            rows = try await supabase
-                .from("attachments")
-                .select()
-                .gt("updated_at", value: iso(watermark))
-                .order("updated_at", ascending: true)
-                .execute()
-                .value
-        } else {
-            rows = try await supabase
-                .from("attachments")
-                .select()
-                .order("updated_at", ascending: true)
-                .execute()
-                .value
-        }
-        guard !rows.isEmpty else { return }
-        print("SyncEngine: pullAttachments count=\(rows.count) lastId=\(rows.last?.id.uuidString ?? "nil")")
-        
-        try await MainActor.run(resultType: Void.self, body: {
-            for row in rows {
-                upsertLocalAttachment(from: row, ownerId: ownerId, context: modelContext)
-            }
-
-            if let maxUpdatedAt = rows.compactMap({ $0.updatedAtDate }).max() {
-                try setWatermark(entity: "attachments", ownerId: ownerId, context: modelContext, date: maxUpdatedAt)
-            }
-        })
-    }
-    
-    private func upsertLocalAttachment(from row: RemoteAttachmentRow, ownerId: UUID, context: ModelContext) {
-        guard row.isValid else {
-            print("SyncEngine: skipping attachment with invalid id")
+    func refreshPendingCount() {
+        guard let profileId else {
+            pendingItemCount = 0
+            lastLocalRecordCount = nil
             return
         }
-        let id = row.id
-        let pred = #Predicate<LocalAttachment> { att in
-            att.ownerId == ownerId && att.id == id
-        }
-        
-        do {
-            let fetch = FetchDescriptor<LocalAttachment>(predicate: pred)
-            if let existing = try context.fetch(fetch).first {
-                if existing.isDirty { return } // avoid overwriting local unsynced edits
-                existing.storagePath = row.storagePath
-                existing.fileName = row.fileName
-                existing.mimeType = row.mimeType
-                existing.fileSize = row.fileSize
-                existing.deletedAt = row.deletedAtDate
-                if let updatedAt = row.updatedAtDate { existing.remoteUpdatedAt = updatedAt }
-                return
-            }
-            
-            let createdAt = row.createdAtDate ?? Date()
-            let updatedAt = row.updatedAtDate ?? createdAt
-            let local = LocalAttachment(
-                id: id,
-                ownerId: ownerId,
-                noteId: row.noteId,
-                storagePath: row.storagePath,
-                fileName: row.fileName,
-                mimeType: row.mimeType,
-                fileSize: row.fileSize,
-                createdAt: createdAt,
-                remoteUpdatedAt: updatedAt,
-                deletedAt: row.deletedAtDate,
-                localCachePath: nil,
-                isDirty: false,
-                isUploaded: true
-            )
-            context.insert(local)
-        } catch {
-            // ignore
-        }
+        pendingItemCount = (try? notebookRepository.pendingOutbox(profileId: profileId, limit: 1_000).count) ?? 0
+        lastLocalRecordCount = try? localRecordCount(profileId: profileId)
     }
 
-    // MARK: - Local upsert helpers
+    private func localRecordCount(profileId: UUID) throws -> Int {
+        try notebookRepository.liveRecordCount(profileId: profileId)
+            + attachmentRepository.liveRecordCount(profileId: profileId)
+    }
 
-    private func upsertLocalNotebook(from row: RemoteNotebookRow, ownerId: UUID, context: ModelContext) {
-        guard row.isValid else {
-            print("SyncEngine: skipping notebook with invalid id")
-            return
-        }
-        let id = row.id
-        let pred = #Predicate<LocalNotebook> { nb in
-            nb.ownerId == ownerId && nb.id == id
-        }
-
-        do {
-            let fetch = FetchDescriptor<LocalNotebook>(predicate: pred)
-            if let existing = try context.fetch(fetch).first {
-                if existing.isDirty { return } // avoid overwriting local unsynced edits
-                
-                // Prevent "resurrection" of locally deleted items:
-                // If local is deleted but remote is not, preserve local deletion ONLY if local is dirty.
-                if existing.deletedAt != nil && row.deletedAtDate == nil {
-                    if existing.isDirty {
-                        return
+    private func pushOutbox(profileId: UUID) async throws -> SyncSummary {
+        var summary = SyncSummary(reason: .manual)
+        let items = try notebookRepository.pendingOutbox(profileId: profileId)
+        for item in items {
+            if Task.isCancelled { return summary }
+            do {
+                switch item.entityType {
+                case .notebook:
+                    if let entity = try notebookRepository.notebookEntity(profileId: profileId, id: item.entityId) {
+                        let hash = try await transport.pushNotebook(entity, profileId: profileId)
+                        entity.lastSyncedHash = hash
                     }
-                    existing.deletedAt = nil
-                }
-                
-                existing.title = row.title
-                existing.colorRaw = row.color
-                existing.iconName = row.iconName
-                existing.deletedAt = row.deletedAtDate
-                if let updatedAt = row.updatedAtDate { existing.remoteUpdatedAt = updatedAt }
-                return
-            }
-
-            let createdAt = row.createdAtDate ?? Date()
-            let updatedAt = row.updatedAtDate ?? createdAt
-            let local = LocalNotebook(
-                id: id,
-                ownerId: ownerId,
-                title: row.title,
-                colorRaw: row.color,
-                iconName: row.iconName,
-                createdAt: createdAt,
-                remoteUpdatedAt: updatedAt,
-                deletedAt: row.deletedAtDate,
-                isDirty: false,
-                notes: []
-            )
-            context.insert(local)
-        } catch {
-            // ignore
-        }
-    }
-
-    private func upsertLocalNote(from row: RemoteNoteRow, ownerId: UUID, context: ModelContext) {
-        guard row.isValid else {
-            print("SyncEngine: skipping note with invalid id or notebookId")
-            return
-        }
-        let id = row.id
-        let notebookId = row.notebookId
-
-        do {
-            // Ensure notebook exists (notes may arrive before notebooks on fresh sync).
-            let nbPred = #Predicate<LocalNotebook> { nb in
-                nb.ownerId == ownerId && nb.id == notebookId
-            }
-            let nbFetch = FetchDescriptor<LocalNotebook>(predicate: nbPred)
-            let notebook = try context.fetch(nbFetch).first
-
-            let pred = #Predicate<LocalNote> { n in
-                n.ownerId == ownerId && n.id == id
-            }
-            let fetch = FetchDescriptor<LocalNote>(predicate: pred)
-
-            if let existing = try context.fetch(fetch).first {
-                if existing.isDirty { return } // avoid overwriting local unsynced edits
-                
-                // Prevent "resurrection" of locally deleted items:
-                // If local is deleted but remote is not, preserve local deletion ONLY if local is dirty.
-                if existing.deletedAt != nil && row.deletedAtDate == nil {
-                    if existing.isDirty {
-                        return
+                case .note:
+                    if let entity = try notebookRepository.noteEntity(profileId: profileId, id: item.entityId) {
+                        let hash = try await transport.pushNote(entity, profileId: profileId)
+                        entity.lastSyncedHash = hash
                     }
-                    existing.deletedAt = nil
+                case .attachment:
+                    let request = AttachmentEntity.fetchRequest()
+                    request.predicate = NSPredicate(
+                        format: "profileId == %@ AND id == %@",
+                        profileId.uuidString.lowercased(),
+                        item.entityId.uuidString.lowercased()
+                    )
+                    request.fetchLimit = 1
+                    if let entity = try storage.mainContext.fetch(request).first {
+                        let hash = try await transport.pushAttachment(entity, profileId: profileId)
+                        entity.lastSyncedHash = hash
+                        entity.isUploaded = true
+                    }
                 }
-                
-                existing.title = row.title
-                existing.summary = row.summary
-                existing.content = row.content
-                existing.paragraphCount = row.paragraphCount
-                existing.bulletCount = row.bulletCount
-                existing.hasAdditionalContext = row.hasAdditionalContext
-                existing.deletedAt = row.deletedAtDate
-                if let updatedAt = row.updatedAtDate { existing.remoteUpdatedAt = updatedAt }
-                if let version = row.version { existing.version = version }
-                existing.notebook = notebook
-                return
+
+                try storage.saveMainContext()
+                try notebookRepository.markOutboxDone(item)
+                summary.pushed += 1
+            } catch {
+                try? notebookRepository.markOutboxFailed(item, error: error)
+                summary.failed += 1
+                if summary.message == nil {
+                    summary.message = "部分内容同步失败，稍后会自动重试"
+                }
+                logger.error("outbox item failed \(item.entityType.rawValue, privacy: .public)/\(item.entityId.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
-
-            let createdAt = row.createdAtDate ?? Date()
-            let updatedAt = row.updatedAtDate ?? createdAt
-            let local = LocalNote(
-                id: id,
-                ownerId: ownerId,
-                title: row.title,
-                summary: row.summary,
-                paragraphCount: row.paragraphCount,
-                bulletCount: row.bulletCount,
-                hasAdditionalContext: row.hasAdditionalContext,
-                createdAt: createdAt,
-                remoteUpdatedAt: updatedAt,
-                version: row.version ?? 1,
-                deletedAt: row.deletedAtDate,
-                contentRTF: nil,
-                content: row.content,
-                isDirty: false,
-                conflictParentId: nil,
-                notebook: notebook
-            )
-            context.insert(local)
-            // Note: SwiftData automatically manages inverse relationships,
-            // no need to manually append to notebook.notes
-        } catch {
-            // ignore
         }
+        return summary
     }
 
-    // MARK: - Watermark
-
-    private func getWatermark(entity: String, ownerId: UUID, context: ModelContext) throws -> Date? {
-        let key = "\(ownerId.uuidString):\(entity)"
-        let pred = #Predicate<SyncMetadata> { meta in
-            meta.key == key
+    private func pullChanges(profileId: UUID, iCloudAccountHash: String, reason: SyncReason) async throws -> SyncSummary {
+        let tokenData = try syncStateRepository.changeToken(
+            profileId: profileId,
+            iCloudAccountHash: iCloudAccountHash,
+            zoneName: CloudKitSchema.zoneName
+        )
+        // ponytail: manual sync is a full reconcile; optimize when data volume proves it needs paging UI.
+        let previousToken = reason == .manual ? nil : CloudKitTransport.decodeToken(tokenData)
+        let changes: CloudKitChangeBatch
+        var summary = SyncSummary(reason: .manual)
+        do {
+            changes = try await transport.fetchChanges(since: previousToken)
+        } catch let error as CKError where error.code == .changeTokenExpired {
+            logger.warning("change token expired; running full reconciliation")
+            changes = try await transport.fetchChanges(since: nil)
         }
-        let fetch = FetchDescriptor<SyncMetadata>(predicate: pred)
-        return try context.fetch(fetch).first?.lastPulledAt
-    }
 
-    private func setWatermark(entity: String, ownerId: UUID, context: ModelContext, date: Date) throws {
-        let key = "\(ownerId.uuidString):\(entity)"
-        let pred = #Predicate<SyncMetadata> { meta in
-            meta.key == key
+        let expectedProfileHash = CloudKitTransport.hash(profileId.uuidString.lowercased())
+        for notebook in changes.notebooks where notebook.profileIdHash == expectedProfileHash {
+            try notebookRepository.applyRemoteNotebook(profileId: profileId, record: notebook)
+            summary.pulled += 1
         }
-        let fetch = FetchDescriptor<SyncMetadata>(predicate: pred)
-        if let existing = try context.fetch(fetch).first {
-            existing.lastPulledAt = date
-        } else {
-            context.insert(SyncMetadata(ownerId: ownerId, entity: entity, lastPulledAt: date))
+        for note in changes.notes where note.profileIdHash == expectedProfileHash {
+            try notebookRepository.applyRemoteNote(profileId: profileId, record: note)
+            summary.pulled += 1
         }
-    }
+        for attachment in changes.attachments where attachment.profileIdHash == expectedProfileHash {
+            try attachmentRepository.applyRemote(profileId: profileId, record: attachment)
+            summary.pulled += 1
+        }
+        for deleted in changes.deletedRecords where deleted.profileId == profileId {
+            switch deleted.entityType {
+            case .notebook:
+                try notebookRepository.applyRemoteHardDelete(profileId: profileId, entityType: .notebook, id: deleted.id)
+            case .note:
+                try notebookRepository.applyRemoteHardDelete(profileId: profileId, entityType: .note, id: deleted.id)
+            case .attachment:
+                try attachmentRepository.applyRemoteHardDelete(profileId: profileId, id: deleted.id)
+            }
+            summary.deleted += 1
+        }
+        try storage.saveMainContext()
 
-    // MARK: - ISO8601
-
-    private func iso(_ date: Date) -> String {
-        // Use a stable format for PostgREST filters.
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f.string(from: date)
-    }
-}
-
-// MARK: - Remote types
-
-private struct RemoteNotebookRow: Decodable {
-    let id: UUID
-    let title: String
-    let color: String
-    let iconName: String
-    let createdAt: String?
-    let updatedAt: String?
-    let deletedAt: String?
-    let isValid: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case title
-        case color
-        case iconName = "icon_name"
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-        case deletedAt = "deleted_at"
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let decodedId = try container.decodeIfPresent(UUID.self, forKey: .id)
-        let title = (try container.decodeIfPresent(String.self, forKey: .title))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let color = (try container.decodeIfPresent(String.self, forKey: .color))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let iconName = (try container.decodeIfPresent(String.self, forKey: .iconName))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
-        self.updatedAt = try container.decodeIfPresent(String.self, forKey: .updatedAt)
-        self.deletedAt = try container.decodeIfPresent(String.self, forKey: .deletedAt)
-        self.id = decodedId ?? UUID()
-        self.title = title?.isEmpty == false ? title! : "未命名笔记本"
-        self.color = color?.isEmpty == false ? color! : NotebookColor.lime.rawValue
-        self.iconName = iconName?.isEmpty == false ? iconName! : "book"
-        self.isValid = decodedId != nil
-    }
-
-    var createdAtDate: Date? { parseISO(createdAt) }
-    var updatedAtDate: Date? { parseISO(updatedAt) }
-    var deletedAtDate: Date? { parseISO(deletedAt) }
-}
-
-private struct RemoteNoteRow: Decodable {
-    let id: UUID
-    let notebookId: UUID
-    let title: String
-    let summary: String
-    let content: String
-    let paragraphCount: Int
-    let bulletCount: Int
-    let hasAdditionalContext: Bool
-    let version: Int?
-    let createdAt: String?
-    let updatedAt: String?
-    let deletedAt: String?
-    let isValid: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case notebookId = "notebook_id"
-        case title
-        case summary
-        case content
-        case paragraphCount = "paragraph_count"
-        case bulletCount = "bullet_count"
-        case hasAdditionalContext = "has_additional_context"
-        case version
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-        case deletedAt = "deleted_at"
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let decodedId = try container.decodeIfPresent(UUID.self, forKey: .id)
-        let decodedNotebookId = try container.decodeIfPresent(UUID.self, forKey: .notebookId)
-        let title = (try container.decodeIfPresent(String.self, forKey: .title))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let summary = (try container.decodeIfPresent(String.self, forKey: .summary))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let content = (try container.decodeIfPresent(String.self, forKey: .content))
-        self.paragraphCount = try container.decodeIfPresent(Int.self, forKey: .paragraphCount) ?? 0
-        self.bulletCount = try container.decodeIfPresent(Int.self, forKey: .bulletCount) ?? 0
-        self.hasAdditionalContext = try container.decodeIfPresent(Bool.self, forKey: .hasAdditionalContext) ?? false
-        self.version = try container.decodeIfPresent(Int.self, forKey: .version)
-        self.createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
-        self.updatedAt = try container.decodeIfPresent(String.self, forKey: .updatedAt)
-        self.deletedAt = try container.decodeIfPresent(String.self, forKey: .deletedAt)
-        self.id = decodedId ?? UUID()
-        self.notebookId = decodedNotebookId ?? UUID()
-        self.title = title?.isEmpty == false ? title! : "未命名笔记"
-        self.summary = summary ?? ""
-        self.content = content ?? ""
-        self.isValid = decodedId != nil && decodedNotebookId != nil
-    }
-
-    var createdAtDate: Date? { parseISO(createdAt) }
-    var updatedAtDate: Date? { parseISO(updatedAt) }
-    var deletedAtDate: Date? { parseISO(deletedAt) }
-}
-
-private struct NotebookUpsert: Encodable {
-    let id: UUID
-    let userId: UUID
-    let title: String
-    let color: String
-    let iconName: String
-    let deletedAt: Date?
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case userId = "user_id"
-        case title
-        case color
-        case iconName = "icon_name"
-        case deletedAt = "deleted_at"
+        try syncStateRepository.setChangeToken(
+            CloudKitTransport.encodeToken(changes.serverChangeToken),
+            profileId: profileId,
+            iCloudAccountHash: iCloudAccountHash,
+            zoneName: CloudKitSchema.zoneName
+        )
+        return summary
     }
 }
-
-private struct NoteUpsert: Encodable {
-    let id: UUID
-    let userId: UUID
-    let notebookId: UUID
-    let title: String
-    let summary: String
-    let content: String
-    let paragraphCount: Int
-    let bulletCount: Int
-    let hasAdditionalContext: Bool
-    let deletedAt: Date?
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case userId = "user_id"
-        case notebookId = "notebook_id"
-        case title
-        case summary
-        case content
-        case paragraphCount = "paragraph_count"
-        case bulletCount = "bullet_count"
-        case hasAdditionalContext = "has_additional_context"
-        case deletedAt = "deleted_at"
-    }
-}
-
-private struct NoteUpdatePayload: Encodable {
-    let notebookId: UUID
-    let title: String
-    let summary: String
-    let content: String
-    let paragraphCount: Int
-    let bulletCount: Int
-    let hasAdditionalContext: Bool
-    let deletedAt: Date?
-
-    enum CodingKeys: String, CodingKey {
-        case notebookId = "notebook_id"
-        case title
-        case summary
-        case content
-        case paragraphCount = "paragraph_count"
-        case bulletCount = "bullet_count"
-        case hasAdditionalContext = "has_additional_context"
-        case deletedAt = "deleted_at"
-    }
-}
-
-private struct NoteSnapshot {
-    let title: String
-    let summary: String
-    let content: String
-    let paragraphCount: Int
-    let bulletCount: Int
-    let hasAdditionalContext: Bool
-    let deletedAt: Date?
-}
-
-// MARK: - Attachment Remote Types
-
-private struct RemoteAttachmentRow: Decodable {
-    let id: UUID
-    let noteId: UUID
-    let storagePath: String
-    let fileName: String
-    let mimeType: String
-    let fileSize: Int64
-    let createdAt: String?
-    let updatedAt: String?
-    let deletedAt: String?
-    let isValid: Bool
-    
-    enum CodingKeys: String, CodingKey {
-        case id
-        case noteId = "note_id"
-        case storagePath = "storage_path"
-        case fileName = "file_name"
-        case mimeType = "mime_type"
-        case fileSize = "file_size"
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-        case deletedAt = "deleted_at"
-    }
-    
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let decodedId = try container.decodeIfPresent(UUID.self, forKey: .id)
-        let decodedNoteId = try container.decodeIfPresent(UUID.self, forKey: .noteId)
-        let storagePath = (try container.decodeIfPresent(String.self, forKey: .storagePath))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fileName = (try container.decodeIfPresent(String.self, forKey: .fileName))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let mimeType = (try container.decodeIfPresent(String.self, forKey: .mimeType))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.fileSize = try container.decodeIfPresent(Int64.self, forKey: .fileSize) ?? 0
-        self.createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
-        self.updatedAt = try container.decodeIfPresent(String.self, forKey: .updatedAt)
-        self.deletedAt = try container.decodeIfPresent(String.self, forKey: .deletedAt)
-        self.id = decodedId ?? UUID()
-        self.noteId = decodedNoteId ?? UUID()
-        self.storagePath = storagePath ?? ""
-        self.fileName = fileName ?? ""
-        self.mimeType = mimeType ?? "application/octet-stream"
-        self.isValid = decodedId != nil && decodedNoteId != nil
-    }
-    
-    var createdAtDate: Date? { parseISO(createdAt) }
-    var updatedAtDate: Date? { parseISO(updatedAt) }
-    var deletedAtDate: Date? { parseISO(deletedAt) }
-}
-
-private struct AttachmentUpsert: Encodable {
-    let id: UUID
-    let userId: UUID
-    let noteId: UUID
-    let storagePath: String
-    let fileName: String
-    let mimeType: String
-    let fileSize: Int64
-    let deletedAt: Date?
-    
-    enum CodingKeys: String, CodingKey {
-        case id
-        case userId = "user_id"
-        case noteId = "note_id"
-        case storagePath = "storage_path"
-        case fileName = "file_name"
-        case mimeType = "mime_type"
-        case fileSize = "file_size"
-        case deletedAt = "deleted_at"
-    }
-}
-
-private func parseISO(_ value: String?) -> Date? {
-    guard let value, !value.isEmpty else { return nil }
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let d = f.date(from: value) { return d }
-    f.formatOptions = [.withInternetDateTime]
-    return f.date(from: value)
-}
-

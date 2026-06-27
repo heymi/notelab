@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		34E8D3B32F28B2330059F6AA /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = 7B8A3E9C1F4D4A2B9C0A1B2D /* Supabase */; };
+		34A766B72F34774900970835 /* StoreKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 34A766B62F34774900970835 /* StoreKit.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -28,14 +28,28 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		34A766B62F34774900970835 /* StoreKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = StoreKit.framework; path = System/Library/Frameworks/StoreKit.framework; sourceTree = SDKROOT; };
 		34E8D3262F262E5A0059F6AA /* NoteLab.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NoteLab.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		34E8D3332F262E5B0059F6AA /* NoteLabTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NoteLabTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		34E8D33D2F262E5B0059F6AA /* NoteLabUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NoteLabUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		34E8D3502F2630000059F6AA /* Exceptions for "NoteLab" folder in "NoteLab" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				"NoteLab-iOS-Info.plist",
+			);
+			target = 34E8D3252F262E590059F6AA /* NoteLab */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		34E8D3282F262E5A0059F6AA /* NoteLab */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				34E8D3502F2630000059F6AA /* Exceptions for "NoteLab" folder in "NoteLab" target */,
+			);
 			path = NoteLab;
 			sourceTree = "<group>";
 		};
@@ -56,7 +70,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				34E8D3B32F28B2330059F6AA /* Supabase in Frameworks */,
+				34A766B72F34774900970835 /* StoreKit.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -77,12 +91,21 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		34A766B52F34774900970835 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				34A766B62F34774900970835 /* StoreKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		34E8D31D2F262E590059F6AA = {
 			isa = PBXGroup;
 			children = (
 				34E8D3282F262E5A0059F6AA /* NoteLab */,
 				34E8D3362F262E5B0059F6AA /* NoteLabTests */,
 				34E8D3402F262E5B0059F6AA /* NoteLabUITests */,
+				34A766B52F34774900970835 /* Frameworks */,
 				34E8D3272F262E5A0059F6AA /* Products */,
 			);
 			sourceTree = "<group>";
@@ -117,7 +140,6 @@
 			);
 			name = NoteLab;
 			packageProductDependencies = (
-				7B8A3E9C1F4D4A2B9C0A1B2D /* Supabase */,
 			);
 			productName = NoteLab;
 			productReference = 34E8D3262F262E5A0059F6AA /* NoteLab.app */;
@@ -202,7 +224,6 @@
 			mainGroup = 34E8D31D2F262E590059F6AA;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				7B8A3E9C1F4D4A2B9C0A1B2C /* XCRemoteSwiftPackageReference "supabase-swift" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 34E8D3272F262E5A0059F6AA /* Products */;
@@ -399,17 +420,26 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				APS_ENVIRONMENT = development;
+				"CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = "NoteLab/NoteLab-iOS.entitlements";
+				"CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]" = "NoteLab/NoteLab-iOS.entitlements";
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = NoteLab/NoteLab.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2026062501;
 				DEVELOPMENT_TEAM = 2HV6W3W4M4;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				"GENERATE_INFOPLIST_FILE[sdk=iphoneos*]" = NO;
+				"GENERATE_INFOPLIST_FILE[sdk=iphonesimulator*]" = NO;
+				"INFOPLIST_FILE[sdk=iphoneos*]" = "NoteLab/NoteLab-iOS-Info.plist";
+				"INFOPLIST_FILE[sdk=iphonesimulator*]" = "NoteLab/NoteLab-iOS-Info.plist";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIBackgroundModes[sdk=iphoneos*]" = "remote-notification";
+				"INFOPLIST_KEY_UIBackgroundModes[sdk=iphonesimulator*]" = "remote-notification";
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = YES;
@@ -445,17 +475,26 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				APS_ENVIRONMENT = production;
+				"CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = "NoteLab/NoteLab-iOS.entitlements";
+				"CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]" = "NoteLab/NoteLab-iOS.entitlements";
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = NoteLab/NoteLab.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2026062501;
 				DEVELOPMENT_TEAM = 2HV6W3W4M4;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				"GENERATE_INFOPLIST_FILE[sdk=iphoneos*]" = NO;
+				"GENERATE_INFOPLIST_FILE[sdk=iphonesimulator*]" = NO;
+				"INFOPLIST_FILE[sdk=iphoneos*]" = "NoteLab/NoteLab-iOS-Info.plist";
+				"INFOPLIST_FILE[sdk=iphonesimulator*]" = "NoteLab/NoteLab-iOS-Info.plist";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIBackgroundModes[sdk=iphoneos*]" = "remote-notification";
+				"INFOPLIST_KEY_UIBackgroundModes[sdk=iphonesimulator*]" = "remote-notification";
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = YES;
@@ -491,7 +530,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2026062501;
 				DEVELOPMENT_TEAM = 2HV6W3W4M4;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
@@ -517,7 +556,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2026062501;
 				DEVELOPMENT_TEAM = 2HV6W3W4M4;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
@@ -542,7 +581,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2026062501;
 				DEVELOPMENT_TEAM = 2HV6W3W4M4;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
@@ -567,7 +606,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2026062501;
 				DEVELOPMENT_TEAM = 2HV6W3W4M4;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
@@ -629,24 +668,6 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		7B8A3E9C1F4D4A2B9C0A1B2C /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/supabase/supabase-swift.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.0.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		7B8A3E9C1F4D4A2B9C0A1B2D /* Supabase */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 7B8A3E9C1F4D4A2B9C0A1B2C /* XCRemoteSwiftPackageReference "supabase-swift" */;
-			productName = Supabase;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 34E8D31E2F262E590059F6AA /* Project object */;
 }
