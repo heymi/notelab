@@ -26,4 +26,4 @@ Packages/
 
 # Logs / misc
 *.log
-
+.superpowers/
