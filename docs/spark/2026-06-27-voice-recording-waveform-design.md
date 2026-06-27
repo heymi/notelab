@@ -25,7 +25,7 @@ This keeps the implementation local to the visual layer while preserving the rea
 
 When recording starts, the overlay continues to show the cancel button, recording label, elapsed timer, and stop button. The meter area becomes the waveform. Quiet input should settle close to the center line. Louder input should expand the colored lobes outward, with mild flowing motion so it feels alive without looking noisy.
 
-The palette should echo the reference image: teal/green as the main accent, with smaller blue, rose, and violet highlights. Colors should sit inside the existing dark material overlay instead of changing the surrounding app theme.
+The palette should echo the reference image: teal/green as the main accent, with smaller blue, rose, and violet highlights. Colors should sit inside the existing material overlay and keep enough contrast in both light and dark appearances instead of changing the surrounding app theme.
 
 ## Accessibility
 
@@ -39,7 +39,13 @@ No data models, persistence, audio recording logic, AI paths, or navigation file
 
 ## Verification
 
-Run the smallest reliable build check for the iOS target. Then verify on simulator or device:
+Run the smallest reliable iOS build check with the current scheme:
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -project NoteLab.xcodeproj -scheme "NoteLab Local StoreKit" -destination 'generic/platform=iOS' build
+```
+
+Then verify on simulator or device:
 
 - Starting voice input shows the recording overlay.
 - Speaking changes the waveform amplitude.
