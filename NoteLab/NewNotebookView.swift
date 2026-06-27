@@ -8,6 +8,8 @@ struct NewNotebookView: View {
     @State private var title: String = ""
     @State private var selectedColor: NotebookColor = .lime
     @State private var selectedIcon: String = "scribble"
+    @State private var selectedBackground: NotebookBackground = .default
+    @State private var showCreateError = false
     
     @State private var isAnimating = false
     @FocusState private var isTitleFocused: Bool
@@ -25,7 +27,8 @@ struct NewNotebookView: View {
             color: selectedColor,
             iconName: selectedIcon,
             createdAt: Date(),
-            notes: []
+            notes: [],
+            backgroundId: selectedBackground.id
         )
     }
     
@@ -125,6 +128,18 @@ struct NewNotebookView: View {
                         }
                         .offset(y: isAnimating ? 0 : 50)
                         .opacity(isAnimating ? 1 : 0)
+
+                        // Editor Background Selection
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("编辑背景")
+                                .font(.system(size: 14, weight: .medium, design: .rounded))
+                                .foregroundStyle(Theme.secondaryInk)
+                                .padding(.leading, 4)
+
+                            NotebookBackgroundPicker(selection: $selectedBackground)
+                        }
+                        .offset(y: isAnimating ? 0 : 60)
+                        .opacity(isAnimating ? 1 : 0)
                     }
                     .padding(.horizontal, 24)
                     
@@ -178,6 +193,11 @@ struct NewNotebookView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 isTitleFocused = true
             }
+        }
+        .alert("创建失败", isPresented: $showCreateError) {
+            Button("好", role: .cancel) { }
+        } message: {
+            Text("笔记本没有保存成功，请稍后再试。")
         }
     }
     
@@ -256,19 +276,9 @@ struct NewNotebookView: View {
         
         Haptics.shared.play(.success)
         
-        if store.addNotebook(title: name, color: selectedColor, iconName: selectedIcon) == nil {
-            // Fallback
-            store.notebooks.insert(
-                Notebook(
-                    id: UUID(),
-                    title: name,
-                    color: selectedColor,
-                    iconName: selectedIcon,
-                    createdAt: Date(),
-                    notes: []
-                ),
-                at: 0
-            )
+        guard store.addNotebook(title: name, color: selectedColor, iconName: selectedIcon, backgroundId: selectedBackground.id) != nil else {
+            showCreateError = true
+            return
         }
         
         dismiss()

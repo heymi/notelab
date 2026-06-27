@@ -1,6 +1,5 @@
 import SwiftUI
 import Combine
-import SwiftData
 import Foundation
 import os
 import UniformTypeIdentifiers
@@ -10,7 +9,6 @@ import AppKit
 
 struct NoteEditorView: View {
     @Binding var note: Note
-    @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var aiClient: AIClient
     @EnvironmentObject private var store: NotebookStore
     @EnvironmentObject private var router: AppRouter
@@ -48,6 +46,9 @@ struct NoteEditorView: View {
     @State private var showMoreMenu = false
     @State private var showMoveSheet = false
     @State private var showFormatMenu = false
+    @State private var flushNextDocumentChange = false
+    @State private var detailPresentationMode: NoteDetailPresentationMode = .reading
+    @State private var bodyFocusToken = UUID()
     
     // Undo
     @State private var undoSnapshot: NoteUndoSnapshot?
@@ -58,10 +59,25 @@ struct NoteEditorView: View {
     
     var body: some View {
         editorContent
-            .background(Theme.background)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(editorDetailBackground)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                editorBottomBar
+                    .padding(.horizontal, 18)
+                    .padding(.top, 4)
+                    .padding(.bottom, 8)
+            }
             .toolbar { toolbarContent }
-            .onAppear { loadDocumentIfNeeded() }
-            .onChange(of: note.id) { _, _ in loadDocumentIfNeeded() }
+            .onAppear {
+                loadDocumentIfNeeded()
+                applyInitialPresentationMode()
+            }
+            .onDisappear { store.flushPendingNotePersistence(noteId: note.id) }
+            .onChange(of: note.id) { oldValue, _ in
+                store.flushPendingNotePersistence(noteId: oldValue)
+                loadDocumentIfNeeded()
+                applyInitialPresentationMode()
+            }
             .confirmationDialog("询问 AI", isPresented: $showAIAction) {
                 Button("整理笔记") { runFormat() }
                 Button("提取待办") { runExtractTasks() }
@@ -93,11 +109,35 @@ struct NoteEditorView: View {
                         .keyboardShortcut("/", modifiers: .command)
                     Button("") { showAIAction = true }
                         .keyboardShortcut("j", modifiers: .command)
-                    Button("") { pendingCommand = EditorCommandRequest(command: .requestAttachment) }
+                    Button("") {
+                        flushNextDocumentChange = true
+                        pendingCommand = EditorCommandRequest(command: .requestAttachment)
+                    }
                         .keyboardShortcut("p", modifiers: [.command, .shift])
                 }
                 .opacity(0)
             }
+    }
+
+    private var editorDetailBackground: some View {
+        ZStack(alignment: .top) {
+            Theme.editorBackground
+
+            if currentNotebookBackground == .default {
+                LinearGradient(
+                    colors: [
+                        Theme.editorTopWash.opacity(0.65),
+                        Theme.editorTopWash.opacity(0.22),
+                        Theme.editorBackground.opacity(0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 230)
+                .ignoresSafeArea()
+            }
+        }
+        .ignoresSafeArea()
     }
     
     // MARK: - Editor Content
@@ -111,11 +151,15 @@ struct NoteEditorView: View {
             selectedBlockIds: $selectedBlockIds,
             pendingCommand: $pendingCommand,
             exitMultiSelectToken: $exitMultiSelectToken,
+            bodyFocusToken: $bodyFocusToken,
             title: $note.title,
             titleFocusBridge: titleFocusBridge,
+            headerMetadata: headerMetadata,
             linkBlocks: store.linkBlocks(for: note.id),
+            presentationMode: detailPresentationMode,
             sentHighlightBlockIds: sentHighlightBlockIds,
             isWhiteboard: isWhiteboard,
+            background: isWhiteboard ? .default : currentNotebookBackground,
             onOpenNote: { noteId in
                 router.path.append(AppRoute.note(noteId))
             },
@@ -124,35 +168,172 @@ struct NoteEditorView: View {
                 note.content = newDoc.flattenMarkdown()
                 note.updateMetrics()
                 store.updateDocument(noteId: note.id, document: newDoc)
+                if flushNextDocumentChange {
+                    flushNextDocumentChange = false
+                    store.flushPendingNotePersistence(noteId: note.id)
+                }
             },
-            modelContext: modelContext,
-            ownerId: auth.userId,
+            ownerId: activeProfileId,
             noteId: note.id
+        )
+    }
+
+    private var activeProfileId: UUID? {
+        store.currentProfileId ?? auth.userId
+    }
+
+    private var headerMetadata: NoteEditorHeaderMetadata {
+        let todoCount = document.blocks.filter { $0.kind == .todo && ($0.isChecked ?? false) == false }.count
+        let visibleText = document.blocks
+            .filter { $0.kind != .attachment && $0.kind != .table }
+            .map(\.text)
+            .joined(separator: " ")
+        let readingMinutes = max(1, Int(ceil(Double(visibleText.count) / 420.0)))
+        let summary = note.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        return NoteEditorHeaderMetadata(
+            updatedAt: note.updatedAt,
+            summary: summary.isEmpty ? "继续记录想法、线索和下一步动作。" : summary,
+            readingMinutes: readingMinutes,
+            todoCount: todoCount,
+            notebookLabel: "本地优先",
+            preview: headerContentPreview,
+            hasBodyContent: hasHeaderBodyContent
+        )
+    }
+
+    private var hasHeaderBodyContent: Bool {
+        let title = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return document.blocks.enumerated().contains { index, block in
+            if block.kind == .attachment || block.kind == .table {
+                return true
+            }
+            let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return false }
+            if index == 0 && NoteTitleDeriver.cleanedTitleLine(text) == title {
+                return false
+            }
+            return true
+        }
+    }
+
+    private var headerContentPreview: NoteEditorHeaderMetadata.Preview? {
+        let summary = note.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard AISummaryRegistry.isGenerated(noteId: note.id, summary: summary) else { return nil }
+        let displaySummary = AISummaryText.normalized(summary)
+        return NoteEditorHeaderMetadata.Preview(
+            title: "AI 摘要",
+            detail: "已分析",
+            style: .excerpt,
+            items: [displaySummary]
         )
     }
     
     // MARK: - Toolbar
+
+    private var editorBottomBar: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 0) {
+                Button {
+                    enterReadingMode()
+                } label: {
+                    Text("阅读")
+                        .font(.system(size: 15, weight: .black, design: .rounded))
+                        .foregroundStyle(detailPresentationMode.isEditing ? Theme.secondaryInk : Theme.ink)
+                        .frame(width: 58, height: 50)
+                        .background(detailPresentationMode.isEditing ? Color.clear : Theme.editorPaper, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("阅读模式")
+
+                Button {
+                    enterEditingMode()
+                } label: {
+                    Text("编辑")
+                        .font(.system(size: 15, weight: detailPresentationMode.isEditing ? .black : .bold, design: .rounded))
+                        .foregroundStyle(detailPresentationMode.isEditing ? Theme.ink : Theme.secondaryInk)
+                        .frame(width: 58, height: 50)
+                        .background(detailPresentationMode.isEditing ? Theme.editorPaper : Color.clear, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("编辑模式")
+            }
+            .padding(5)
+            .background(Theme.editorPaperSoft.opacity(0.54), in: Capsule())
+
+            Spacer(minLength: 0)
+
+            bottomToolButton(title: "Aa") {
+                enterEditingMode(focusBody: false)
+                showFormatMenu = true
+            }
+            bottomToolButton(systemName: "paperclip") {
+                enterEditingMode(focusBody: false)
+                flushNextDocumentChange = true
+                pendingCommand = EditorCommandRequest(command: .requestAttachment)
+            }
+            bottomToolButton(systemName: "checkmark") {
+                enterEditingMode()
+                pendingCommand = EditorCommandRequest(command: .todo)
+            }
+            Button {
+                showAIAction = true
+            } label: {
+                Text("NL")
+                    .font(.system(size: 18, weight: .black, design: .rounded))
+                    .foregroundStyle(Theme.editorAccentDeep)
+                    .frame(width: 52, height: 52)
+                    .background(Theme.editorAccent.opacity(0.14), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("AI 功能")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 36, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 36, style: .continuous)
+                .stroke(Theme.editorLine.opacity(0.32), lineWidth: 0.7)
+        )
+        .shadow(color: Theme.softShadow.opacity(0.75), radius: 24, x: 0, y: 12)
+    }
+
+    private func bottomToolButton(systemName: String? = nil, title: String? = nil, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Group {
+                if let systemName {
+                    Image(systemName: systemName)
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                } else if let title {
+                    Text(title)
+                        .font(.system(size: 18, weight: .black, design: .rounded))
+                }
+            }
+            .foregroundStyle(Theme.secondaryInk)
+            .frame(width: 34, height: 50)
+        }
+        .buttonStyle(.plain)
+    }
     
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
-            // Format menu
             Button {
+                enterEditingMode(focusBody: false)
                 showFormatMenu = true
             } label: {
                 Image(systemName: "textformat")
             }
             .help("格式化")
-            
-            // Attachment
+
             Button {
+                enterEditingMode(focusBody: false)
+                flushNextDocumentChange = true
                 pendingCommand = EditorCommandRequest(command: .requestAttachment)
             } label: {
                 Image(systemName: "paperclip")
             }
             .help("插入附件")
             
-            // AI actions
             Button {
                 showAIAction = true
             } label: {
@@ -160,12 +341,12 @@ struct NoteEditorView: View {
             }
             .help("AI 功能")
             
-            // More menu
             Menu {
                 if canMoveNote {
                     Button("移动笔记") { showMoveSheet = true }
                 }
                 Button("分享") { shareContent() }
+                Button("复制为 Markdown") { copyMarkdownContent() }
                 Button("导出 PDF") { exportPDF() }
                 Divider()
                 if isWhiteboard {
@@ -211,6 +392,7 @@ struct NoteEditorView: View {
                     note.content = restored
                         note.updateMetrics()
                         store.updateDocument(noteId: note.id, document: document)
+                        store.flushPendingNotePersistence(noteId: note.id)
                         showAISheet = false
                     }
                     .buttonStyle(.borderedProminent)
@@ -283,6 +465,10 @@ struct NoteEditorView: View {
     private var currentNotebookId: UUID? {
         store.notebookId(for: note.id)
     }
+
+    private var currentNotebookBackground: NotebookBackground {
+        isWhiteboard ? .default : store.notebookBackground(for: note.id)
+    }
     
     private var sentHighlightBlockIds: Set<UUID> {
         Set(store.linkBlocks(for: note.id).compactMap { $0.sourceBlockIds }.flatMap { $0 })
@@ -295,6 +481,30 @@ struct NoteEditorView: View {
         if document != currentDoc {
             document = currentDoc
         }
+    }
+
+    private func enterReadingMode() {
+        detailPresentationMode = .reading
+        NSApp.keyWindow?.makeFirstResponder(nil)
+    }
+
+    private func enterEditingMode(focusBody: Bool = true) {
+        detailPresentationMode = .editing
+        if focusBody {
+            bodyFocusToken = UUID()
+        }
+    }
+
+    private func applyInitialPresentationMode() {
+        let mode = initialPresentationMode
+        detailPresentationMode = mode
+        if mode.isEditing {
+            bodyFocusToken = UUID()
+        }
+    }
+
+    private var initialPresentationMode: NoteDetailPresentationMode {
+        isWhiteboard || !hasHeaderBodyContent ? .editing : .reading
     }
     
     private func triggerSend() {
@@ -313,12 +523,22 @@ struct NoteEditorView: View {
         }
         showSendSheet = true
     }
+
+    private func noteTitleForExport() -> String {
+        let derived = NoteTitleDeriver.title(from: document, fallback: note.title)
+        let trimmed = derived.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "无标题" : trimmed
+    }
     
     private func runFormat() {
         aiMode = .format
-        aiLoading = true
+        aiLoading = !document.isPureImageOnly
         aiError = nil
         showAISheet = true
+        guard !document.isPureImageOnly else {
+            aiError = "暂不支持纯图片笔记的 AI 分析，请先添加文字说明。"
+            return
+        }
         
         Task {
             do {
@@ -340,9 +560,13 @@ struct NoteEditorView: View {
     
     private func runExtractTasks() {
         aiMode = .tasks
-        aiLoading = true
+        aiLoading = !document.isPureImageOnly
         aiError = nil
         showAISheet = true
+        guard !document.isPureImageOnly else {
+            aiError = "暂不支持纯图片笔记的 AI 分析，请先添加文字说明。"
+            return
+        }
         
         Task {
             do {
@@ -366,6 +590,7 @@ struct NoteEditorView: View {
         note.content = snapshot.content
         document = NoteDocument.fromMarkdown(snapshot.content)
         store.updateDocument(noteId: note.id, document: document)
+        store.flushPendingNotePersistence(noteId: note.id)
         undoSnapshot = nil
     }
     
@@ -400,6 +625,17 @@ struct NoteEditorView: View {
            let contentView = window.contentView {
             picker.show(relativeTo: .zero, of: contentView, preferredEdge: .minY)
         }
+    }
+
+    private func copyMarkdownContent() {
+        let markdown = NoteShareBuilder.markdown(
+            title: noteTitleForExport(),
+            document: document,
+            fallbackMarkdown: note.content
+        )
+        guard !markdown.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(markdown, forType: .string)
     }
     
     // MARK: - PDF Export

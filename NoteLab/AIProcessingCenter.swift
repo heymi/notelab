@@ -3,6 +3,8 @@ import Combine
 
 @MainActor
 final class AIProcessingCenter: ObservableObject {
+    private static let pureImageUnsupportedMessage = "暂不支持纯图片笔记的 AI 分析，请先添加文字说明。"
+
     enum AIMode {
         case autoOrganize
         case extractTodos
@@ -89,6 +91,7 @@ final class AIProcessingCenter: ObservableObject {
         aiClient: AIClient,
         store: NotebookStore
     ) {
+        guard canAnalyze(content: content, noteId: noteId, mode: .autoOrganize) else { return }
         // 检查配额
         guard checkQuota(for: .organize) else { return }
         
@@ -114,14 +117,21 @@ final class AIProcessingCenter: ObservableObject {
                     fallbackTitle: newTitle
                 )
                 let restored = AttachmentPreserver.restoreAndEnsure(markdown: combined, tokens: attachmentTokens)
-                let highlighted = try await AIHighlightInjector.applyHighlightsIfNeeded(
-                    markdown: restored,
-                    aiClient: aiClient
-                )
+                let highlighted: String
+                if subscriptionManager.canUseAIFeature(.highlight) {
+                    highlighted = try await AIHighlightInjector.applyHighlightsIfNeeded(
+                        markdown: restored,
+                        aiClient: aiClient,
+                        didUseAI: { self.recordUsage(for: .highlight) }
+                    )
+                } else {
+                    highlighted = restored
+                }
                 applyFormattedResult(
                     noteId: noteId,
                     title: newTitle,
                     markdown: highlighted,
+                    aiSummary: payload.report?.summary,
                     store: store
                 )
                 // 记录用量
@@ -131,10 +141,7 @@ final class AIProcessingCenter: ObservableObject {
             } catch {
                 if Task.isCancelled { return }
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                self.error = message
-                completeProgress(success: false)
-                isLoading = false
-                isVisible = true
+                fail(with: message)
             }
         }
     }
@@ -145,6 +152,7 @@ final class AIProcessingCenter: ObservableObject {
         aiClient: AIClient,
         store: NotebookStore
     ) {
+        guard canAnalyze(content: content, noteId: noteId, mode: .extractTodos) else { return }
         // 检查配额
         guard checkQuota(for: .extractTasks) else { return }
         
@@ -165,10 +173,7 @@ final class AIProcessingCenter: ObservableObject {
             } catch {
                 if Task.isCancelled { return }
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                self.error = message
-                completeProgress(success: false)
-                isLoading = false
-                isVisible = true
+                fail(with: message)
             }
         }
     }
@@ -182,9 +187,6 @@ final class AIProcessingCenter: ObservableObject {
         aiClient: AIClient,
         store: NotebookStore
     ) {
-        // 检查配额
-        guard checkQuota(for: .rewrite) else { return }
-        
         let mappedMode: AIMode
         switch mode {
         case .optimize:
@@ -194,6 +196,9 @@ final class AIProcessingCenter: ObservableObject {
         case .expand:
             mappedMode = .expand
         }
+        guard canAnalyze(content: content, noteId: noteId, mode: mappedMode) else { return }
+        // 检查配额
+        guard checkQuota(for: .rewrite) else { return }
         resetForNewRun(noteId: noteId, mode: mappedMode)
         startProgressFlow()
         aiTask?.cancel()
@@ -211,10 +216,16 @@ final class AIProcessingCenter: ObservableObject {
                 )
                 let resolvedTitle = AIInsightComposer.resolvedTitle(from: rewrite.title, fallback: title)
                 let restored = AttachmentPreserver.restoreAndEnsure(markdown: rewrite.markdown, tokens: attachmentTokens)
-                let highlighted = try await AIHighlightInjector.applyHighlightsIfNeeded(
-                    markdown: restored,
-                    aiClient: aiClient
-                )
+                let highlighted: String
+                if subscriptionManager.canUseAIFeature(.highlight) {
+                    highlighted = try await AIHighlightInjector.applyHighlightsIfNeeded(
+                        markdown: restored,
+                        aiClient: aiClient,
+                        didUseAI: { self.recordUsage(for: .highlight) }
+                    )
+                } else {
+                    highlighted = restored
+                }
                 applyFormattedResult(
                     noteId: noteId,
                     title: resolvedTitle,
@@ -228,10 +239,7 @@ final class AIProcessingCenter: ObservableObject {
             } catch {
                 if Task.isCancelled { return }
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                self.error = message
-                completeProgress(success: false)
-                isLoading = false
-                isVisible = true
+                fail(with: message)
             }
         }
     }
@@ -249,6 +257,7 @@ final class AIProcessingCenter: ObservableObject {
 
     func dismiss() {
         dismissTask?.cancel()
+        error = nil
         isCompleted = false
         isVisible = false
     }
@@ -263,6 +272,24 @@ final class AIProcessingCenter: ObservableObject {
         lastTaskCount = 0
         activeNoteId = noteId
         self.mode = mode
+    }
+
+    private func canAnalyze(content: String, noteId: UUID, mode: AIMode) -> Bool {
+        guard NoteDocument.fromMarkdown(content).isPureImageOnly else { return true }
+        aiTask?.cancel()
+        progressTask?.cancel()
+        dismissTask?.cancel()
+        activeNoteId = noteId
+        self.mode = mode
+        error = Self.pureImageUnsupportedMessage
+        isLoading = false
+        isCompleted = false
+        isVisible = true
+        stageIndex = 0
+        lastTaskCount = 0
+        Haptics.shared.play(.error)
+        scheduleDismiss(after: 8.0)
+        return false
     }
 
     private func startProgressFlow() {
@@ -295,25 +322,46 @@ final class AIProcessingCenter: ObservableObject {
         scheduleDismiss(after: 3.0)
     }
 
+    private func fail(with message: String) {
+        error = message
+        completeProgress(success: false)
+        isLoading = false
+        isVisible = true
+        scheduleDismiss(after: 8.0)
+    }
+
     private func scheduleDismiss(after delay: TimeInterval) {
         dismissTask?.cancel()
         dismissTask = Task {
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
+            error = nil
             isCompleted = false
             isVisible = false
         }
     }
 
-    private func applyFormattedResult(noteId: UUID, title: String, markdown: String, store: NotebookStore) {
+    private func applyFormattedResult(noteId: UUID, title: String, markdown: String, aiSummary: String? = nil, store: NotebookStore) {
         guard let binding = store.noteBinding(noteId: noteId) else { return }
         var updated = binding.wrappedValue
         NoteUndoSnapshotStore.save(noteId: updated.id, title: updated.title, content: updated.content)
-        if !title.isEmpty { updated.title = title }
-        updated.content = markdown
+        let resolvedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalTitle = resolvedTitle.isEmpty ? NoteTitleDeriver.title(fromMarkdown: markdown, fallback: title) : resolvedTitle
+        let persistedMarkdown = AIInsightComposer.markdownWithLeadingTitle(finalTitle, body: markdown)
+        updated.title = finalTitle
+        if let aiSummary {
+            let summary = AISummaryText.normalized(aiSummary)
+            updated.summary = summary
+            AISummaryRegistry.mark(noteId: updated.id, summary: summary)
+        } else {
+            updated.summary = ""
+            AISummaryRegistry.clear(noteId: updated.id)
+        }
+        updated.content = persistedMarkdown
         updated.updateMetrics()
         binding.wrappedValue = updated
-        store.updateDocument(noteId: updated.id, document: NoteDocument.fromMarkdown(markdown))
+        store.updateDocument(noteId: updated.id, document: NoteDocument.fromMarkdown(persistedMarkdown))
+        store.flushPendingNotePersistence(noteId: updated.id)
         lastAppliedNoteId = updated.id
     }
 
@@ -330,9 +378,11 @@ final class AIProcessingCenter: ObservableObject {
         let merged = NoteDocument(version: 1, blocks: blocks + doc.blocks)
         let markdown = merged.flattenMarkdown()
         updated.content = markdown
+        updated.title = NoteTitleDeriver.title(from: merged, fallback: updated.title)
         updated.updateMetrics()
         binding.wrappedValue = updated
         store.updateDocument(noteId: updated.id, document: merged)
+        store.flushPendingNotePersistence(noteId: updated.id)
         lastAppliedNoteId = updated.id
     }
 }

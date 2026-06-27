@@ -14,11 +14,11 @@ enum SubscriptionTier: Int, Comparable, Codable, CaseIterable {
     case free = 0
     case standard = 1
     case pro = 2
-    
+
     static func < (lhs: SubscriptionTier, rhs: SubscriptionTier) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
-    
+
     var displayName: String {
         switch self {
         case .free: return "免费版"
@@ -61,6 +61,23 @@ enum SubscriptionProductID {
         default:
             return .free
         }
+    }
+
+    static func activeTier(
+        for productId: String,
+        expiration: Date?,
+        revocationDate: Date?,
+        now: Date = Date()
+    ) -> SubscriptionTier {
+        guard revocationDate == nil else {
+            return .free
+        }
+
+        if let expiration, expiration < now {
+            return .free
+        }
+
+        return tier(for: productId)
     }
     
     static func isYearly(_ productId: String) -> Bool {
@@ -110,6 +127,7 @@ enum AIFeature: String, CaseIterable, Codable {
     case highlight = "ai.highlight"
     case recentFocus = "ai.recentFocus"
     case semanticConnections = "ai.semanticConnections"
+    case plan = "ai.plan"
     
     var displayName: String {
         switch self {
@@ -119,42 +137,58 @@ enum AIFeature: String, CaseIterable, Codable {
         case .highlight: return "智能高亮"
         case .recentFocus: return "最近重点"
         case .semanticConnections: return "语义关联"
+        case .plan: return "AI 计划"
         }
     }
-    
-    /// 根据订阅等级返回用量限制
-    func limit(for tier: SubscriptionTier) -> UsageLimit {
-        switch (self, tier) {
-        // organize - 笔记整理
-        case (.organize, .free): return .limited(3)
-        case (.organize, .standard): return .limited(15)
-        case (.organize, .pro): return .unlimited
-        
-        // extractTasks - 任务提取
-        case (.extractTasks, .free): return .limited(3)
-        case (.extractTasks, .standard): return .limited(15)
-        case (.extractTasks, .pro): return .unlimited
-        
-        // rewrite - 笔记重写
-        case (.rewrite, .free): return .disabled
-        case (.rewrite, .standard): return .limited(10)
-        case (.rewrite, .pro): return .unlimited
-        
-        // highlight - 智能高亮
-        case (.highlight, .free): return .disabled
-        case (.highlight, .standard): return .limited(10)
-        case (.highlight, .pro): return .unlimited
-        
-        // recentFocus - 最近重点报告
-        case (.recentFocus, .free): return .disabled
-        case (.recentFocus, .standard): return .limited(4) // 每周1次
-        case (.recentFocus, .pro): return .unlimited
-        
-        // semanticConnections - 语义关联发现
-        case (.semanticConnections, .free): return .disabled
-        case (.semanticConnections, .standard): return .disabled
-        case (.semanticConnections, .pro): return .unlimited
+
+    var creditCost: Int {
+        switch self {
+        case .highlight:
+            return 2
+        case .extractTasks:
+            return 3
+        case .organize, .plan:
+            return 6
+        case .rewrite:
+            return 8
+        case .semanticConnections:
+            return 10
+        case .recentFocus:
+            return 12
         }
+    }
+
+    func isAvailable(for tier: SubscriptionTier) -> Bool {
+        switch (self, tier) {
+        case (.organize, _), (.extractTasks, _):
+            return true
+        case (.rewrite, .free), (.highlight, .free), (.recentFocus, .free), (.semanticConnections, .free), (.plan, .free):
+            return false
+        case (.semanticConnections, .standard):
+            return false
+        default:
+            return true
+        }
+    }
+
+    /// 根据订阅等级返回按点数折算后的可用次数
+    func limit(for tier: SubscriptionTier) -> UsageLimit {
+        guard isAvailable(for: tier) else { return .disabled }
+        return .limited(SubscriptionTier.monthlyAICredits(for: tier) / creditCost)
+    }
+}
+
+extension SubscriptionTier {
+    static func monthlyAICredits(for tier: SubscriptionTier) -> Int {
+        switch tier {
+        case .free: return 12
+        case .standard: return 180
+        case .pro: return 900
+        }
+    }
+
+    var monthlyAICredits: Int {
+        Self.monthlyAICredits(for: self)
     }
 }
 
@@ -178,7 +212,7 @@ struct FeatureFlags {
     
     /// 是否可以使用云同步
     var canSync: Bool {
-        tier >= .standard
+        true
     }
     
     /// 附件云存储限制 (bytes)
@@ -245,7 +279,7 @@ enum SubscriptionError: LocalizedError {
         case .productNotFound:
             return "未找到订阅产品"
         case .quotaExceeded(let feature, let remaining):
-            return "\(feature.displayName)本月配额已用完，剩余 \(remaining) 次"
+            return "\(feature.displayName)本月点数不足，剩余 \(remaining) 点"
         case .featureNotAvailable(let feature):
             return "\(feature.displayName)为付费功能，请升级订阅"
         case .notebookLimitReached(let limit):
@@ -282,4 +316,8 @@ extension Notification.Name {
     static let showPaywall = Notification.Name("showPaywall")
     /// 订阅状态变更通知
     static let subscriptionStatusChanged = Notification.Name("subscriptionStatusChanged")
+    /// CloudKit 静默推送触发同步
+    static let cloudKitRemoteNotification = Notification.Name("cloudKitRemoteNotification")
+    /// 本地变更入队后触发防抖上传
+    static let localSyncRequested = Notification.Name("localSyncRequested")
 }

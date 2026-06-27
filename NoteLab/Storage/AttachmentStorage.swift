@@ -68,6 +68,53 @@ final class AttachmentStorage: ObservableObject {
 
     private init() {}
 
+    @MainActor
+    func saveNewAttachmentV3(
+        data: Data,
+        attachmentId: UUID,
+        ownerId: UUID,
+        noteId: UUID,
+        fileName: String,
+        mimeType: String
+    ) throws -> AttachmentRecord {
+        try AttachmentRepository().saveAttachment(
+            data: data,
+            attachmentId: attachmentId,
+            profileId: ownerId,
+            noteId: noteId,
+            fileName: fileName,
+            mimeType: mimeType
+        )
+    }
+
+    @MainActor
+    func uploadAndUpsertMetadataV3(attachment: AttachmentRecord) async {
+        guard attachment.deletedAt == nil,
+              let data = AttachmentFileStore.loadOriginal(
+                attachmentId: attachment.id,
+                fileName: attachment.fileName,
+                originalPath: attachment.originalPath
+              ) else { return }
+        do {
+            try await uploadToCloudKit(
+                snapshot: AttachmentSnapshot(
+                    id: attachment.id,
+                    ownerId: attachment.profileId,
+                    noteId: attachment.noteId,
+                    storagePath: attachment.storagePath,
+                    fileName: attachment.fileName,
+                    mimeType: attachment.mimeType,
+                    fileSize: attachment.fileSize,
+                    deletedAt: attachment.deletedAt
+                ),
+                data: data
+            )
+            try AttachmentRepository().markUploaded(profileId: attachment.profileId, id: attachment.id, syncedHash: nil)
+        } catch {
+            print("Failed to upload iCloud attachment \(attachment.id): \(error)")
+        }
+    }
+
     nonisolated func localCacheURL(for attachmentId: UUID, fileName: String) -> URL {
         AttachmentCache.localCacheURL(for: attachmentId, fileName: fileName)
     }
@@ -98,7 +145,7 @@ final class AttachmentStorage: ObservableObject {
         fileName: String,
         mimeType: String
     ) async throws -> String {
-        let storagePath = CloudKitSchema.storagePath(ownerId: ownerId, attachmentId: attachmentId, fileName: fileName)
+        let storagePath = AttachmentPathFactory.storagePath(ownerId: ownerId, attachmentId: attachmentId, fileName: fileName)
         try await uploadToCloudKit(
             snapshot: AttachmentSnapshot(
                 id: attachmentId,
@@ -154,6 +201,19 @@ final class AttachmentStorage: ObservableObject {
         storagePath: String,
         fileName: String
     ) async throws -> Data {
+        if let ownerId = CloudKitSchema.ownerId(from: storagePath),
+           let attachment = try? await MainActor.run(body: {
+               try AttachmentRepository().find(profileId: ownerId, id: attachmentId)
+           }),
+           let original = AttachmentFileStore.loadOriginal(
+               attachmentId: attachmentId,
+               fileName: fileName,
+               originalPath: attachment.originalPath
+           ) {
+            print("[AttachmentStorage] source=original attachmentId=\(attachmentId.uuidString.lowercased()) fileName=\(fileName)")
+            return original
+        }
+
         if let cached = AttachmentCache.load(attachmentId: attachmentId, fileName: fileName) {
             print("[AttachmentStorage] source=cache attachmentId=\(attachmentId.uuidString.lowercased()) fileName=\(fileName)")
             return cached
@@ -188,7 +248,7 @@ final class AttachmentStorage: ObservableObject {
             throw NSError(domain: "AttachmentStorage", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to save to cache"])
         }
 
-        let storagePath = CloudKitSchema.storagePath(ownerId: ownerId, attachmentId: attachmentId, fileName: fileName)
+        let storagePath = AttachmentPathFactory.storagePath(ownerId: ownerId, attachmentId: attachmentId, fileName: fileName)
         let attachment = LocalAttachment(
             id: attachmentId,
             ownerId: ownerId,
@@ -284,7 +344,7 @@ final class AttachmentStorage: ObservableObject {
 }
 
 extension AttachmentStorage {
-    static func mimeType(for fileName: String) -> String {
+    nonisolated static func mimeType(for fileName: String) -> String {
         let ext = (fileName as NSString).pathExtension.lowercased()
         switch ext {
         case "jpg", "jpeg":
@@ -299,18 +359,23 @@ extension AttachmentStorage {
             return "image/heic"
         case "pdf":
             return "application/pdf"
+        case "m4a":
+            return "audio/mp4"
+        case "mp4", "m4v":
+            return "video/mp4"
+        case "mov":
+            return "video/quicktime"
+        case "wav":
+            return "audio/wav"
+        case "mp3":
+            return "audio/mpeg"
         default:
             return "application/octet-stream"
         }
     }
 
     static func attachmentType(from mimeType: String) -> AttachmentType {
-        if mimeType.hasPrefix("image/") {
-            return .image
-        } else if mimeType == "application/pdf" {
-            return .pdf
-        }
-        return .image
+        AttachmentType.from(mimeType: mimeType)
     }
 }
 

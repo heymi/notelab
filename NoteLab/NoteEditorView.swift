@@ -1,7 +1,6 @@
 #if os(iOS)
 import SwiftUI
 import Combine
-import SwiftData
 import Foundation
 import os
 #if canImport(UIKit)
@@ -13,12 +12,13 @@ import CoreText
 struct NoteEditorView: View {
     @Binding var note: Note
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var aiClient: AIClient
     @EnvironmentObject private var aiCenter: AIProcessingCenter
+    @EnvironmentObject private var voiceCoordinator: VoiceNoteCoordinator
     @EnvironmentObject private var store: NotebookStore
     @EnvironmentObject private var router: AppRouter
     @EnvironmentObject private var auth: AuthManager
+    @Environment(\.colorScheme) private var colorScheme
 
     private let logger = Logger(subsystem: "NoteLab", category: "NoteEditor")
 
@@ -59,22 +59,54 @@ struct NoteEditorView: View {
     @State private var showDocumentPicker = false
     @State private var showWhiteboardLinks = false
     @State private var showClearWhiteboardConfirm = false
+    @State private var flushNextDocumentChange = false
+    @State private var detailPresentationMode: NoteDetailPresentationMode = .reading
+    @State private var bodyFocusToken = UUID()
+    @State private var keyboardOverlap: CGFloat = 0
     @State private var whiteboardLinkDrag: CGSize = .zero
     @AppStorage("whiteboard.link.offset.x") private var whiteboardLinkOffsetX: Double = 0
     @AppStorage("whiteboard.link.offset.y") private var whiteboardLinkOffsetY: Double = 0
     @State private var whiteboardLinkSize: CGSize = .zero
     @State private var isDraggingWhiteboardLink = false
+    @State private var voiceNoteRecord: VoiceNoteRecord?
     @StateObject private var titleFocusBridge = TitleFocusBridge()
     @State private var exitMultiSelectToken: UUID = UUID()
 
     var body: some View {
         editorScaffold
-            .onAppear { loadDocumentIfNeeded() }
-            .onChange(of: note.id) { _, _ in loadDocumentIfNeeded() }
+            .onAppear {
+                loadDocumentIfNeeded()
+                applyInitialPresentationMode()
+                refreshVoiceNoteRecord()
+            }
+            .onDisappear { store.flushPendingNotePersistence(noteId: note.id) }
+            .onChange(of: note.id) { oldValue, _ in
+                store.flushPendingNotePersistence(noteId: oldValue)
+                loadDocumentIfNeeded()
+                applyInitialPresentationMode()
+                refreshVoiceNoteRecord()
+            }
             .onChange(of: aiCenter.lastAppliedNoteId) { _, newValue in
                 if newValue == note.id {
                     loadDocumentIfNeeded()
                 }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .voiceNoteDidUpdate)) { notification in
+                guard let updatedNoteId = notification.object as? UUID, updatedNoteId == note.id else { return }
+                loadDocumentIfNeeded()
+                refreshVoiceNoteRecord()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .voiceNoteRetryRequested)) { notification in
+                guard let recordId = notification.object as? UUID,
+                      let record = voiceNoteRecord,
+                      record.id == recordId else { return }
+                voiceCoordinator.retry(recordId: record.id, profileId: record.profileId, store: store, aiClient: aiClient)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
+                updateKeyboardOverlap(from: notification)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                keyboardOverlap = 0
             }
             .sheet(isPresented: $showAIAction) {
                 AIMenuSheet(
@@ -99,6 +131,7 @@ struct NoteEditorView: View {
                         }
                     },
                     onShare: { prepareShare() },
+                    onCopyMarkdown: { copyMarkdownToPasteboard() },
                     onExport: { showPDFSizeSheet = true },
                     onClear: { showClearWhiteboardConfirm = true }
                 )
@@ -194,12 +227,41 @@ struct NoteEditorView: View {
         mainEditor
     }
 
+    private var editorDetailBackground: some View {
+        ZStack(alignment: .top) {
+            if let style = currentNotebookBackground.generatedStyle(for: colorScheme) {
+                LinearGradient(
+                    colors: [Color(hex: style.washHex), Color(hex: style.baseHex)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            } else {
+                Theme.editorBackground
+                LinearGradient(
+                    colors: [
+                        Theme.editorTopWash.opacity(0.65),
+                        Theme.editorTopWash.opacity(0.22),
+                        Theme.editorBackground.opacity(0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 230)
+                .ignoresSafeArea()
+            }
+        }
+        .ignoresSafeArea()
+    }
+
     private var mainEditor: some View {
         GeometryReader { proxy in
             let safeTop = proxy.safeAreaInsets.top
             let contentTopInset = max(0, safeTop - 44)
-            let topInset = contentTopInset + 52
+            let topInset = contentTopInset + 34
             let toolbarTopInset = max(0, safeTop - 56)
+            let systemKeyboardOverlap = max(0, UIScreen.main.bounds.maxY - proxy.frame(in: .global).maxY)
+            let keyboardPadding = max(0, keyboardOverlap - systemKeyboardOverlap)
+            let bottomInset: CGFloat = 130 + keyboardPadding
 
             Group {
                 if AppConfig.useWebEditor {
@@ -208,19 +270,16 @@ struct NoteEditorView: View {
                         selectedText: $selectedText,
                         selectedRange: $selectedRange,
                         pendingCommand: $pendingTipTapCommand,
-                        title: isWhiteboard ? "" : note.title,
-                        showsTitle: !isWhiteboard,
+                        title: "",
+                        showsTitle: false,
                         topInset: topInset,
-                        bottomInset: 24,
+                        bottomInset: bottomInset,
                         onMarkdownChange: { markdown in
                             let doc = NoteDocument.fromMarkdown(markdown)
                             document = doc
                             syncNoteFromDocument(doc)
                         },
-                        onTitleChange: { newTitle in
-                            guard !isWhiteboard else { return }
-                            note.title = newTitle
-                        }
+                        onTitleChange: { _ in }
                     )
                 } else {
                     BlockEditorRepresentable(
@@ -230,25 +289,33 @@ struct NoteEditorView: View {
                         selectedBlockIds: $selectedBlockIds,
                         pendingCommand: $pendingCommand,
                         exitMultiSelectToken: $exitMultiSelectToken,
+                        bodyFocusToken: $bodyFocusToken,
                         title: $note.title,
                         titleFocusBridge: titleFocusBridge,
+                        headerMetadata: headerMetadata,
                         linkBlocks: linkBlocks,
+                        presentationMode: detailPresentationMode,
                         sentHighlightBlockIds: sentHighlightBlockIds,
                         isWhiteboard: isWhiteboard,
+                        background: isWhiteboard ? .default : currentNotebookBackground,
                         topInset: topInset,
-                        bottomInset: 24,
+                        bottomInset: bottomInset,
                         onOpenNote: { router.push(.note($0)) },
                         onDocumentChange: { doc in
                             document = doc
                             syncNoteFromDocument(doc)
+                            if flushNextDocumentChange {
+                                flushNextDocumentChange = false
+                                store.flushPendingNotePersistence(noteId: note.id)
+                            }
                         },
-                        modelContext: modelContext,
-                        ownerId: auth.userId,
+                        ownerId: activeProfileId,
                         noteId: note.id
                     )
                 }
             }
-            .background(Theme.background)
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .background(editorDetailBackground)
             .background(InteractivePopGestureEnabler())
             .overlay(alignment: .top) {
                 editorTopBar
@@ -265,16 +332,25 @@ struct NoteEditorView: View {
                     whiteboardLinkFloater(topInset: toolbarTopInset)
                 }
             }
+            .overlay(alignment: .bottom) {
+                if !detailPresentationMode.isEditing {
+                    editorBottomBar
+                        .padding(.horizontal, 18)
+                        .padding(.top, 4)
+                        .padding(.bottom, max(proxy.safeAreaInsets.bottom, 8))
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                } else {
+                    editorBottomBar
+                        .padding(.horizontal, 18)
+                        .padding(.top, 4)
+                        .padding(.bottom, keyboardOverlap > 0 ? keyboardPadding + 8 : max(proxy.safeAreaInsets.bottom, 8))
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            }
         }
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button("完成") { hideKeyboard() }
-            }
-        }
     }
 
     @ViewBuilder
@@ -304,8 +380,9 @@ struct NoteEditorView: View {
             isPresented: $showSendSheet,
             selectedText: sendDraftText,
             onSend: { notebookId, title in
+                let linkTitle = NoteTitleDeriver.title(fromMarkdown: sendDraftText, fallback: title)
                 if let newId = store.addNote(to: notebookId, title: title, content: sendDraftText) {
-                    insertLinkBlock(noteId: newId, notebookId: notebookId, title: title)
+                    insertLinkBlock(noteId: newId, notebookId: notebookId, title: linkTitle)
                     sendToast = SendToast(noteId: newId, message: "已发送到笔记本")
                     exitMultiSelectToken = UUID()
                     Haptics.shared.play(.success)
@@ -317,25 +394,24 @@ struct NoteEditorView: View {
     }
 
     private func noteTitleForExport() -> String {
-        let trimmed = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let derived = NoteTitleDeriver.title(from: document, fallback: note.title)
+        let trimmed = derived.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "无标题" : trimmed
-    }
-
-    private func notePlainTextForExport() -> String {
-        let text = document.flattenPlainText().trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.isEmpty {
-            return text
-        }
-        let fallback = NoteDocument.fromMarkdown(note.content).flattenPlainText()
-        return fallback.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func prepareShare() {
         let title = noteTitleForExport()
-        let body = notePlainTextForExport()
-        let content = body.isEmpty ? title : "\(title)\n\n\(body)"
-        shareItems = [content]
+        shareItems = [NoteShareBuilder.plainText(title: title, document: document, fallbackMarkdown: note.content)]
         showShareSheet = true
+    }
+
+    private func copyMarkdownToPasteboard() {
+        let title = noteTitleForExport()
+        let markdown = NoteShareBuilder.markdown(title: title, document: document, fallbackMarkdown: note.content)
+        guard !markdown.isEmpty else { return }
+        UIPasteboard.general.string = markdown
+        sendToast = SendToast(noteId: nil, message: "已复制 Markdown")
+        Haptics.shared.play(.success)
     }
 
     private func exportPDF() {
@@ -347,335 +423,19 @@ struct NoteEditorView: View {
     @MainActor
     private func exportPDFAsync() async {
         let title = noteTitleForExport()
-        let items = await buildPDFItems(title: title, document: document)
-        guard let data = renderPDFData(items: items, pageSize: selectedPDFSize) else {
-            exportErrorMessage = "无法生成 PDF，请稍后再试。"
-            showExportError = true
-            return
-        }
-
-        let safeName = sanitizeFileName(title.isEmpty ? "Note" : title)
-        let fileName = "\(safeName).pdf"
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
         do {
-            try data.write(to: url, options: .atomic)
-            exportPDFURL = url
+            exportPDFURL = try await NotePDFExporter.export(
+                title: title,
+                document: document,
+                pageSize: selectedPDFSize,
+                noteId: note.id
+            )
             showPDFPreview = true
         } catch {
-            exportErrorMessage = "保存 PDF 失败，请稍后再试。"
+            exportErrorMessage = (error as? NotePDFExportError) == .renderFailed
+                ? "无法生成 PDF，请稍后再试。"
+                : "保存 PDF 失败，请稍后再试。"
             showExportError = true
-        }
-    }
-
-    private func sanitizeFileName(_ name: String) -> String {
-        let invalid = CharacterSet(charactersIn: "/\\?%*|\"<>:")
-        let components = name.components(separatedBy: invalid)
-        let cleaned = components.joined(separator: "_").trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleaned.isEmpty {
-            return "Note-\(note.id.uuidString.prefix(6))"
-        }
-        return cleaned
-    }
-
-    private enum PDFItem {
-        case text(NSAttributedString)
-        case image(UIImage)
-    }
-
-    @MainActor
-    private func buildPDFItems(title: String, document: NoteDocument) async -> [PDFItem] {
-        var items: [PDFItem] = []
-
-        let titleText = parseMarkdownText(
-            title,
-            font: .systemFont(ofSize: 24, weight: .bold),
-            alignment: .center,
-            lineSpacing: 6,
-            trailingNewlines: "\n\n"
-        )
-        items.append(.text(titleText))
-
-        for (index, block) in document.blocks.enumerated() {
-            let nextBlock = index + 1 < document.blocks.count ? document.blocks[index + 1] : nil
-            let isNextParagraph = nextBlock?.kind == .paragraph || nextBlock?.kind == .bullet || nextBlock?.kind == .numbered || nextBlock?.kind == .todo
-
-            switch block.kind {
-            case .heading:
-                let level = max(1, min(block.level ?? 1, 6))
-                let fontSize: CGFloat = level == 1 ? 20 : level == 2 ? 18 : 16
-                let trailingNewlines = isNextParagraph ? "\n" : "\n\n"
-                let headingText = parseMarkdownText(
-                    block.text,
-                    font: .systemFont(ofSize: fontSize, weight: .semibold),
-                    lineSpacing: 4,
-                    trailingNewlines: trailingNewlines
-                )
-                items.append(.text(headingText))
-            case .paragraph:
-                if !block.text.isEmpty {
-                    let bodyText = parseMarkdownText(
-                        block.text,
-                        font: .systemFont(ofSize: 14),
-                        lineSpacing: 5,
-                        trailingNewlines: "\n"
-                    )
-                    items.append(.text(bodyText))
-                }
-            case .bullet:
-                let bulletText = "• " + block.text
-                let bodyText = parseMarkdownText(
-                    bulletText,
-                    font: .systemFont(ofSize: 14),
-                    lineSpacing: 5,
-                    trailingNewlines: "\n"
-                )
-                items.append(.text(bodyText))
-            case .numbered:
-                let numberedText = "1. " + block.text
-                let bodyText = parseMarkdownText(
-                    numberedText,
-                    font: .systemFont(ofSize: 14),
-                    lineSpacing: 5,
-                    trailingNewlines: "\n"
-                )
-                items.append(.text(bodyText))
-            case .todo:
-                let checked = block.isChecked ?? false
-                let todoPrefix = checked ? "☑ " : "☐ "
-                let todoText = todoPrefix + block.text
-                let bodyText = parseMarkdownText(
-                    todoText,
-                    font: .systemFont(ofSize: 14),
-                    color: checked ? .secondaryLabel : .label,
-                    lineSpacing: 5,
-                    trailingNewlines: "\n"
-                )
-                items.append(.text(bodyText))
-            case .quote:
-                let quoteText = parseMarkdownText(
-                    block.text,
-                    font: .italicSystemFont(ofSize: 14),
-                    color: .secondaryLabel,
-                    lineSpacing: 5,
-                    trailingNewlines: "\n"
-                )
-                items.append(.text(quoteText))
-            case .code:
-                let codeText = NSMutableAttributedString()
-                let codeFont = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-                let codeStyle = NSMutableParagraphStyle()
-                codeStyle.lineSpacing = 3
-                let codeAttributes: [NSAttributedString.Key: Any] = [
-                    .font: codeFont,
-                    .foregroundColor: UIColor.label,
-                    .backgroundColor: UIColor.systemGray6,
-                    .paragraphStyle: codeStyle
-                ]
-                codeText.append(NSAttributedString(string: block.text + "\n\n", attributes: codeAttributes))
-                items.append(.text(codeText))
-            case .table:
-                let tableText = block.table?.plainText ?? ""
-                if !tableText.isEmpty {
-                    let bodyText = parseMarkdownText(
-                        tableText,
-                        font: .systemFont(ofSize: 14),
-                        lineSpacing: 5,
-                        trailingNewlines: "\n\n"
-                    )
-                    items.append(.text(bodyText))
-                }
-            case .attachment:
-                if let attachment = block.attachment, attachment.type == .image {
-                    if let image = await loadImageAttachment(attachment) {
-                        items.append(.image(image))
-                    } else {
-                        let fallbackText = parseMarkdownText(
-                            "[图片未加载: \(attachment.fileName)]",
-                            font: .systemFont(ofSize: 12),
-                            color: .secondaryLabel,
-                            lineSpacing: 5,
-                            trailingNewlines: "\n"
-                        )
-                        items.append(.text(fallbackText))
-                    }
-                }
-            }
-        }
-        return items
-    }
-
-    private func parseMarkdownText(_ text: String, font: UIFont, color: UIColor = .label, alignment: NSTextAlignment = .left, lineSpacing: CGFloat = 0, trailingNewlines: String = "\n") -> NSAttributedString {
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.alignment = alignment
-        paragraphStyle.lineSpacing = lineSpacing
-
-        let baseAttributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: color,
-            .paragraphStyle: paragraphStyle
-        ]
-
-        let attributedString = NSMutableAttributedString(string: text, attributes: baseAttributes)
-
-        typealias PatternHandler = (NSMutableAttributedString, NSTextCheckingResult, UIFont, UIColor, NSMutableParagraphStyle) -> Void
-
-        let patterns: [(pattern: String, handler: PatternHandler)] = [
-            ("\\*\\*(.*?)\\*\\*", { attrStr, match, baseFont, textColor, paraStyle in
-                let fullRange = match.range
-                let contentRange = match.range(at: 1)
-                guard let range = Range(contentRange, in: attrStr.string) else { return }
-                let content = String(attrStr.string[range])
-                let descriptor = baseFont.fontDescriptor.withSymbolicTraits(.traitBold)
-                let boldFont = descriptor.map { UIFont(descriptor: $0, size: baseFont.pointSize) } ?? baseFont
-                let boldAttributes: [NSAttributedString.Key: Any] = [
-                    .font: boldFont,
-                    .foregroundColor: textColor,
-                    .paragraphStyle: paraStyle
-                ]
-                let replacement = NSAttributedString(string: content, attributes: boldAttributes)
-                attrStr.replaceCharacters(in: fullRange, with: replacement)
-            }),
-            ("(?<!\\*)\\*([^\\*]+)\\*(?!\\*)", { attrStr, match, baseFont, textColor, paraStyle in
-                let fullRange = match.range
-                let contentRange = match.range(at: 1)
-                guard let range = Range(contentRange, in: attrStr.string) else { return }
-                let content = String(attrStr.string[range])
-                let descriptor = baseFont.fontDescriptor.withSymbolicTraits(.traitItalic)
-                let italicFont = descriptor.map { UIFont(descriptor: $0, size: baseFont.pointSize) } ?? baseFont
-                let italicAttributes: [NSAttributedString.Key: Any] = [
-                    .font: italicFont,
-                    .foregroundColor: textColor,
-                    .paragraphStyle: paraStyle
-                ]
-                let replacement = NSAttributedString(string: content, attributes: italicAttributes)
-                attrStr.replaceCharacters(in: fullRange, with: replacement)
-            }),
-            ("`([^`]+)`", { attrStr, match, baseFont, textColor, paraStyle in
-                let fullRange = match.range
-                let contentRange = match.range(at: 1)
-                guard let range = Range(contentRange, in: attrStr.string) else { return }
-                let content = String(attrStr.string[range])
-                let monoFont = UIFont.monospacedSystemFont(ofSize: baseFont.pointSize * 0.9, weight: .regular)
-                let codeAttributes: [NSAttributedString.Key: Any] = [
-                    .font: monoFont,
-                    .foregroundColor: UIColor.systemRed,
-                    .backgroundColor: UIColor.systemGray6,
-                    .paragraphStyle: paraStyle
-                ]
-                let replacement = NSAttributedString(string: content, attributes: codeAttributes)
-                attrStr.replaceCharacters(in: fullRange, with: replacement)
-            }),
-            ("==(\\w+):([^=]+)==", { attrStr, match, baseFont, textColor, paraStyle in
-                let fullRange = match.range
-                let colorKeyRange = match.range(at: 1)
-                let contentRange = match.range(at: 2)
-                guard let colorKeyRng = Range(colorKeyRange, in: attrStr.string),
-                      let contentRng = Range(contentRange, in: attrStr.string) else { return }
-                let colorKey = String(attrStr.string[colorKeyRng])
-                let content = String(attrStr.string[contentRng])
-                let bgColor: UIColor
-                switch colorKey {
-                case "yellow": bgColor = UIColor.systemYellow.withAlphaComponent(0.4)
-                case "green": bgColor = UIColor.systemGreen.withAlphaComponent(0.4)
-                case "blue": bgColor = UIColor.systemBlue.withAlphaComponent(0.3)
-                case "pink": bgColor = UIColor.systemPink.withAlphaComponent(0.4)
-                case "orange": bgColor = UIColor.systemOrange.withAlphaComponent(0.4)
-                case "purple": bgColor = UIColor.systemPurple.withAlphaComponent(0.4)
-                default: bgColor = UIColor.systemYellow.withAlphaComponent(0.4)
-                }
-                let highlightAttributes: [NSAttributedString.Key: Any] = [
-                    .font: baseFont,
-                    .foregroundColor: textColor,
-                    .backgroundColor: bgColor,
-                    .paragraphStyle: paraStyle
-                ]
-                let replacement = NSAttributedString(string: content, attributes: highlightAttributes)
-                attrStr.replaceCharacters(in: fullRange, with: replacement)
-            })
-        ]
-
-        for (pattern, handler) in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
-            let matches = regex.matches(in: attributedString.string, options: [], range: NSRange(location: 0, length: attributedString.length))
-            for match in matches.reversed() {
-                handler(attributedString, match, font, color, paragraphStyle)
-            }
-        }
-
-        if !trailingNewlines.isEmpty {
-            attributedString.append(NSAttributedString(string: trailingNewlines, attributes: baseAttributes))
-        }
-
-        return attributedString
-    }
-
-    @MainActor
-    private func loadImageAttachment(_ attachment: AttachmentModel) async -> UIImage? {
-        if let data = attachment.data, let image = UIImage(data: data) {
-            return image
-        }
-        let attachmentId = attachment.id
-        let fileName = attachment.fileName
-        if let cached = AttachmentStorage.shared.loadFromCache(attachmentId: attachmentId, fileName: fileName),
-           let image = UIImage(data: cached) {
-            return image
-        }
-        if let storagePath = attachment.storagePath, !storagePath.isEmpty {
-            if let data = try? await AttachmentStorage.shared.loadAttachmentData(
-                attachmentId: attachmentId,
-                storagePath: storagePath,
-                fileName: fileName
-            ),
-               let image = UIImage(data: data) {
-                return image
-            }
-        }
-        return nil
-    }
-
-    private func renderPDFData(items: [PDFItem], pageSize: PDFPageSize) -> Data? {
-        let pageRect = pageSize.pageRect
-        let margin: CGFloat = pageSize.margin
-        let renderer = UIGraphicsPDFRenderer(bounds: pageRect)
-        let contentWidth = pageRect.width - margin * 2
-        let contentHeight = pageRect.height - margin * 2
-
-        return renderer.pdfData { context in
-            var currentY: CGFloat = 0
-
-            func beginPage() {
-                context.beginPage()
-                currentY = 0
-            }
-
-            beginPage()
-
-            for item in items {
-                switch item {
-                case .image(let image):
-                    let imageSize = image.size
-                    let maxWidth = contentWidth
-                    let maxHeight = contentHeight
-                    let scale = min(maxWidth / imageSize.width, maxHeight / imageSize.height, 1)
-                    let targetSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
-                    if currentY + targetSize.height > contentHeight {
-                        beginPage()
-                    }
-                    let rect = CGRect(x: margin, y: margin + currentY, width: targetSize.width, height: targetSize.height)
-                    image.draw(in: rect)
-                    currentY += targetSize.height + 12
-                case .text(let text):
-                    let boundingSize = CGSize(width: contentWidth, height: .greatestFiniteMagnitude)
-                    let textRect = text.boundingRect(with: boundingSize, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
-                    let textHeight = ceil(textRect.height)
-                    if currentY + textHeight > contentHeight {
-                        beginPage()
-                    }
-                    let drawRect = CGRect(x: margin, y: margin + currentY, width: contentWidth, height: textHeight)
-                    text.draw(with: drawRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
-                    currentY += textHeight + 12
-                }
-            }
         }
     }
 
@@ -701,12 +461,10 @@ struct NoteEditorView: View {
 
     private func restoreUndoSnapshot() {
         guard let snapshot = undoSnapshot else { return }
-        if let title = snapshot.title, !title.isEmpty, !isWhiteboard {
-            note.title = title
-        }
         let doc = NoteDocument.fromMarkdown(snapshot.content)
         document = doc
         syncNoteFromDocument(doc)
+        store.flushPendingNotePersistence(noteId: note.id)
         undoSnapshot = nil
         NoteUndoSnapshotStore.clear(noteId: note.id)
         Haptics.shared.play(.success)
@@ -769,10 +527,42 @@ struct NoteEditorView: View {
         #if canImport(UIKit)
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         #endif
+        detailPresentationMode = .reading
+    }
+
+    private func enterEditingMode(focusBody: Bool = true) {
+        guard !detailPresentationMode.isEditing || focusBody else { return }
+        detailPresentationMode = .editing
+        if focusBody {
+            bodyFocusToken = UUID()
+        }
+    }
+
+    private func updateKeyboardOverlap(from notification: Notification) {
+        guard let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+        let overlap = max(0, UIScreen.main.bounds.maxY - frame.minY)
+        let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+        withAnimation(.easeOut(duration: duration)) {
+            keyboardOverlap = overlap
+        }
+    }
+
+    private func applyInitialPresentationMode() {
+        let mode = initialPresentationMode
+        detailPresentationMode = mode
+        if mode.isEditing {
+            bodyFocusToken = UUID()
+        }
+    }
+
+    private var initialPresentationMode: NoteDetailPresentationMode {
+        isWhiteboard || !hasHeaderBodyContent ? .editing : .reading
     }
 
     private func loadDocumentIfNeeded() {
-        document = store.document(for: note.id, fallbackText: note.content)
+        let loadedDocument = store.document(for: note.id, fallbackText: note.content)
+        document = loadedDocument
+        syncDerivedTitle(from: loadedDocument)
         undoSnapshot = NoteUndoSnapshotStore.load(noteId: note.id)
         selectedText = ""
         selectedRange = NSRange(location: 0, length: 0)
@@ -782,12 +572,20 @@ struct NoteEditorView: View {
     }
 
     private func syncNoteFromDocument(_ doc: NoteDocument) {
-        note.content = doc.flattenMarkdown()
+        let markdown = doc.flattenMarkdown()
+        note.content = markdown
+        syncDerivedTitle(from: doc)
         note.updateMetrics()
         if note.id == store.whiteboard.id {
             store.persistWhiteboard()
         }
         store.updateDocument(noteId: note.id, document: doc)
+    }
+
+    private func syncDerivedTitle(from doc: NoteDocument) {
+        guard !isWhiteboard else { return }
+        let generatedSummary = AISummaryRegistry.isGenerated(noteId: note.id, summary: note.summary) ? note.summary : nil
+        note.title = NoteTitleDeriver.title(from: doc, fallback: "", ignoringGeneratedSummary: generatedSummary)
     }
 
     private func appendPlainText(_ text: String) {
@@ -799,74 +597,49 @@ struct NoteEditorView: View {
     }
 
     private func insertImageAttachment(_ image: UIImage) {
-        guard let data = image.jpegData(compressionQuality: 0.8) else {
+        guard let payload = NoteAttachmentInserter.imagePayload(from: image) else {
             logger.error("Failed to convert image to JPEG data")
             return
         }
-
-        let attachmentId = UUID()
-        let fileName = "\(attachmentId.uuidString).jpg"
-
-        insertAttachmentData(data: data, attachmentId: attachmentId, fileName: fileName, type: .image)
+        insertAttachmentPayload(payload)
     }
 
     private func insertDocumentAttachment(_ url: URL) {
-        guard let data = try? Data(contentsOf: url) else {
+        guard let payload = NoteAttachmentInserter.documentPayload(from: url) else {
             logger.error("Failed to read document data")
             return
         }
-
-        let attachmentId = UUID()
-        let fileName = url.lastPathComponent
-        let type: AttachmentType = fileName.lowercased().hasSuffix(".pdf") ? .pdf : .image
-
-        insertAttachmentData(data: data, attachmentId: attachmentId, fileName: fileName, type: type)
+        insertAttachmentPayload(payload)
     }
 
-    private func insertAttachmentData(data: Data, attachmentId: UUID, fileName: String, type: AttachmentType) {
+    private func insertAttachmentPayload(_ payload: NoteAttachmentPayload) {
         if !AppConfig.useWebEditor {
-            pendingCommand = EditorCommandRequest(command: .insertAttachment(data: data, type: type, fileName: fileName))
+            flushNextDocumentChange = true
+            pendingCommand = EditorCommandRequest(command: NoteAttachmentInserter.nativeCommand(for: payload))
             return
         }
 
-        guard let ownerId = auth.userId else {
+        guard let ownerId = activeProfileId else {
             logger.error("No owner ID available for attachment upload")
             return
         }
 
-        AttachmentCache.save(data: data, attachmentId: attachmentId, fileName: fileName)
-
-        let ext = (fileName as NSString).pathExtension
-        let storageName = ext.isEmpty ? attachmentId.uuidString : "\(attachmentId.uuidString).\(ext)"
-        let storagePath = "\(ownerId.uuidString)/\(storageName)"
-
-        let markdown = "\n![Attachment](\(storagePath))\n"
-        appendPlainText(markdown)
+        appendPlainText(NoteAttachmentInserter.webMarkdown(for: payload, ownerId: ownerId))
+        store.flushPendingNotePersistence(noteId: note.id)
         Haptics.shared.play(.success)
 
         Task { @MainActor in
             do {
-                let mimeType = AttachmentStorage.mimeType(for: fileName)
-                let localAttachment = try await AttachmentStorage.shared.saveNewAttachment(
-                    data: data,
-                    attachmentId: attachmentId,
-                    ownerId: ownerId,
-                    noteId: note.id,
-                    fileName: fileName,
-                    mimeType: mimeType,
-                    context: modelContext
-                )
-                try? modelContext.save()
-
-                await AttachmentStorage.shared.uploadAndUpsertMetadata(
-                    attachment: localAttachment,
-                    context: modelContext
-                )
-                logger.info("Attachment uploaded successfully: \(attachmentId)")
+                try await NoteAttachmentInserter.upload(payload: payload, ownerId: ownerId, noteId: note.id)
+                logger.info("Attachment uploaded successfully: \(payload.attachmentId)")
             } catch {
                 logger.error("Failed to upload attachment: \(error.localizedDescription)")
             }
         }
+    }
+
+    private var activeProfileId: UUID? {
+        store.currentProfileId ?? auth.userId
     }
 
     private func clearWhiteboard() {
@@ -896,6 +669,7 @@ struct NoteEditorView: View {
     }
 
     private func handleClose() {
+        store.flushPendingNotePersistence(noteId: note.id)
         onClose?()
         if !router.path.isEmpty {
             router.pop()
@@ -905,44 +679,155 @@ struct NoteEditorView: View {
     }
 
     private var editorTopBar: some View {
-        GlassEffectContainer(spacing: 12) {
-            HStack(spacing: 10) {
-                toolbarButton(systemName: "chevron.left") {
-                    handleClose()
+        HStack(spacing: 8) {
+            toolbarButton(systemName: "chevron.left") {
+                handleClose()
+            }
+            Spacer(minLength: 0)
+            toolbarButton(systemName: "textformat") {
+                enterEditingMode(focusBody: false)
+                showFormatMenu = true
+            }
+            toolbarButton(systemName: "paperclip") {
+                enterEditingMode(focusBody: false)
+                showAttachmentPicker = true
+            }
+            toolbarButton(systemName: "sparkles") {
+                showAIAction = true
+            }
+            toolbarButton(systemName: "paperplane") {
+                triggerSend()
+            }
+            toolbarButton(systemName: "ellipsis") {
+                showMoreMenu = true
+            }
+        }
+        .foregroundStyle(editorInk)
+    }
+
+    private var editorBottomBar: some View {
+        ZStack(alignment: .trailing) {
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture {}
+            editorBottomBarContent
+        }
+        .frame(width: 248, height: 78)
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private var editorBottomBarContent: some View {
+        GlassEffectContainer(spacing: 0) {
+            HStack(spacing: 0) {
+                editorModeButton("阅读", isSelected: !detailPresentationMode.isEditing) {
+                    hideKeyboard()
                 }
-                Spacer(minLength: 0)
-                toolbarButton(systemName: "textformat") {
-                    showFormatMenu = true
-                }
-                toolbarButton(systemName: "paperclip") {
-                    showAttachmentPicker = true
-                }
-                toolbarButton(systemName: "checkmark.circle") {
-                    sendFormatCommand(.todo, tipTap: .taskList)
-                }
-                toolbarButton(systemName: "paperplane") {
-                    triggerSend()
-                }
-                toolbarButton(systemName: "sparkles") {
-                    showAIAction = true
-                }
-                toolbarButton(systemName: "ellipsis") {
-                    showMoreMenu = true
+                editorModeButton("编辑", isSelected: detailPresentationMode.isEditing) {
+                    enterEditingMode()
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(5)
+            .frame(width: 188, height: 62)
             .glassEffect(.regular, in: Capsule())
-            .shadow(color: Theme.softShadow, radius: 14, x: 0, y: 8)
         }
+    }
+
+    private func editorModeButton(_ title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.shared.play(.selection)
+            action()
+        } label: {
+            Text(title)
+                .font(.system(size: 15, weight: .black, design: .rounded))
+                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .glassEffect(isSelected ? .regular : .identity, in: Capsule())
+                .overlay {
+                    if isSelected {
+                        Capsule()
+                            .strokeBorder(.white.opacity(0.5), lineWidth: 1)
+                    }
+                }
+                .shadow(color: isSelected ? .black.opacity(0.14) : .clear, radius: 8, x: 0, y: 4)
+        }
+        .buttonStyle(.plain)
     }
 
     private var linkBlocks: [LinkedNoteBlock] {
         store.linkBlocks(for: note.id)
     }
 
+    private var headerMetadata: NoteEditorHeaderMetadata {
+        let todoCount = document.blocks.filter { $0.kind == .todo && ($0.isChecked ?? false) == false }.count
+        let visibleText = document.blocks
+            .filter { $0.kind != .attachment && $0.kind != .table }
+            .map(\.text)
+            .joined(separator: " ")
+        let readingMinutes = max(1, Int(ceil(Double(visibleText.count) / 420.0)))
+        let summary = note.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        return NoteEditorHeaderMetadata(
+            updatedAt: note.updatedAt,
+            summary: summary,
+            readingMinutes: readingMinutes,
+            todoCount: todoCount,
+            notebookLabel: "本地优先",
+            preview: headerContentPreview,
+            hasBodyContent: hasHeaderBodyContent,
+            voiceNote: voiceNoteRecord
+        )
+    }
+
+    private func refreshVoiceNoteRecord() {
+        voiceNoteRecord = voiceCoordinator.record(for: note.id)
+    }
+
+    private var hasHeaderBodyContent: Bool {
+        let title = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return document.blocks.enumerated().contains { index, block in
+            if block.kind == .attachment || block.kind == .table {
+                return true
+            }
+            let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return false }
+            if index == 0 && NoteTitleDeriver.cleanedTitleLine(text) == title {
+                return false
+            }
+            return true
+        }
+    }
+
+    private var headerContentPreview: NoteEditorHeaderMetadata.Preview? {
+        let summary = note.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard AISummaryRegistry.isGenerated(noteId: note.id, summary: summary) else { return nil }
+        let displaySummary = AISummaryText.normalized(summary)
+        return NoteEditorHeaderMetadata.Preview(
+            title: "AI 摘要",
+            detail: "已分析",
+            style: .excerpt,
+            items: [displaySummary]
+        )
+    }
+
     private var currentNotebookId: UUID? {
         store.notebookId(for: note.id)
+    }
+
+    private var currentNotebookBackground: NotebookBackground {
+        isWhiteboard ? .default : store.notebookBackground(for: note.id)
+    }
+
+    private var editorUsesLightForeground: Bool {
+        currentNotebookBackground.usesLightForeground(isDarkMode: colorScheme == .dark)
+    }
+
+    private var editorInk: Color {
+        currentNotebookBackground.generatedStyle(for: colorScheme) == nil ? Theme.ink : currentNotebookBackground.swiftUIInk(for: colorScheme).opacity(0.92)
+    }
+
+    private var editorSecondaryInk: Color {
+        currentNotebookBackground.generatedStyle(for: colorScheme) == nil ? Theme.secondaryInk : currentNotebookBackground.swiftUISecondaryInk(for: colorScheme).opacity(0.88)
     }
 
     private func currentNotebookContext() -> String? {
@@ -952,7 +837,7 @@ struct NoteEditorView: View {
     private func triggerAutoOrganize() {
         aiCenter.startAutoOrganize(
             noteId: note.id,
-            title: note.title,
+            title: noteTitleForExport(),
             content: note.content,
             notebookContext: currentNotebookContext(),
             aiClient: aiClient,
@@ -972,7 +857,7 @@ struct NoteEditorView: View {
     private func triggerRewriteCommand(mode: AIRewriteMode) {
         aiCenter.startRewrite(
             noteId: note.id,
-            title: note.title,
+            title: noteTitleForExport(),
             content: note.content,
             notebookContext: currentNotebookContext(),
             mode: mode,
@@ -1090,7 +975,7 @@ private struct UndoToastView: View {
 
 private struct SendToast: Identifiable, Equatable {
     let id = UUID()
-    let noteId: UUID
+    let noteId: UUID?
     let message: String
 }
 
@@ -1127,7 +1012,9 @@ private struct EditorToastOverlay: View {
             }
         } else if let toast = sendToast {
             SendToastView(text: toast.message) {
-                onSend(toast.noteId)
+                if let noteId = toast.noteId {
+                    onSend(noteId)
+                }
                 sendToast = nil
             }
         }
@@ -1205,7 +1092,7 @@ struct DocumentPickerView: UIViewControllerRepresentable {
     @Environment(\.dismiss) private var dismiss
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let types: [UTType] = [.pdf, .image, .data]
+        let types: [UTType] = [.pdf, .image, .movie, .mpeg4Movie, .quickTimeMovie, .data]
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
         picker.delegate = context.coordinator
         picker.allowsMultipleSelection = false
@@ -1700,6 +1587,7 @@ struct MoreMenuSheet: View {
     let canMoveNote: Bool
     let onMove: () -> Void
     let onShare: () -> Void
+    let onCopyMarkdown: () -> Void
     let onExport: () -> Void
     let onClear: () -> Void
     @Environment(\.dismiss) private var dismiss
@@ -1727,6 +1615,11 @@ struct MoreMenuSheet: View {
                     onShare()
                 }
 
+                MenuButton(title: "复制为 Markdown", icon: "doc.on.clipboard", color: .primary) {
+                    dismiss()
+                    onCopyMarkdown()
+                }
+
                 MenuButton(title: "导出 PDF", icon: "doc.text", color: .primary) {
                     dismiss()
                     onExport()
@@ -1747,7 +1640,7 @@ struct MoreMenuSheet: View {
             .padding(.bottom, 20)
         }
         .background(Color.systemBackgroundAdaptive)
-        .presentationDetents([.height(isWhiteboard ? 360 : 300)])
+        .presentationDetents([.height(isWhiteboard ? 420 : 360)])
     }
 }
 

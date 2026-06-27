@@ -2,7 +2,6 @@ import Foundation
 #if canImport(UIKit)
 import UIKit
 import SwiftUI
-import SwiftData
 import UniformTypeIdentifiers
 
 final class BlockEditorViewController: UIViewController, UIGestureRecognizerDelegate {
@@ -11,12 +10,13 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     var onSelectionChange: ((String, NSRange) -> Void)?
     var onSelectedBlockIdsChange: (([UUID]) -> Void)?
     
-    /// Context and IDs needed for attachment storage
-    var modelContext: ModelContext?
+    /// IDs needed for attachment storage
     var ownerId: UUID?
     var noteId: UUID?
 
     private let tableView = UITableView(frame: .zero, style: .plain)
+    private let notebookBackgroundView = ScrollingNotebookBackgroundView()
+    private let bodyPaperView = UIView()
     private var activeIndexPath: IndexPath?
     private var activeTableIndexPath: IndexPath?
     private var headerHost: UIHostingController<NoteEditorHeaderView>?
@@ -30,9 +30,14 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     private var isMultiSelecting: Bool = false
     private var multiSelectedBlockIds: Set<UUID> = []
     private var sentHighlightBlockIds: Set<UUID> = []
+    private var currentTitle: String = ""
+    private var currentAISummary: String = ""
+    private var currentBackground: NotebookBackground = .default
+    private var presentationMode: NoteDetailPresentationMode = .reading
     private lazy var multiSelectLongPress = UILongPressGestureRecognizer(target: self, action: #selector(handleMultiSelectLongPress(_:)))
     private lazy var multiSelectTap = UITapGestureRecognizer(target: self, action: #selector(handleMultiSelectTap(_:)))
     private lazy var tableDismissTap = UITapGestureRecognizer(target: self, action: #selector(handleTableDismissTap(_:)))
+    private lazy var gapInsertTap = UITapGestureRecognizer(target: self, action: #selector(handleGapInsertTap(_:)))
     
 
     init(document: NoteDocument) {
@@ -47,16 +52,28 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
+        bodyPaperView.backgroundColor = .noteEditorPaper
+        bodyPaperView.layer.cornerRadius = 28
+        bodyPaperView.layer.cornerCurve = .continuous
+        bodyPaperView.layer.shadowColor = UIColor.black.cgColor
+        bodyPaperView.layer.shadowOpacity = 0.04
+        bodyPaperView.layer.shadowRadius = 24
+        bodyPaperView.layer.shadowOffset = CGSize(width: 0, height: 10)
+        bodyPaperView.isUserInteractionEnabled = false
+
         tableView.separatorStyle = .none
         tableView.backgroundColor = .clear
+        tableView.contentInsetAdjustmentBehavior = .never
         tableView.rowHeight = UITableView.automaticDimension
-        tableView.estimatedRowHeight = 120
+        tableView.estimatedRowHeight = 132
         tableView.dataSource = self
         tableView.delegate = self
         tableView.keyboardDismissMode = .interactive
         tableView.register(TextBlockCell.self, forCellReuseIdentifier: TextBlockCell.reuseIdentifier)
         tableView.register(TableBlockCell.self, forCellReuseIdentifier: TableBlockCell.reuseIdentifier)
         tableView.register(AttachmentBlockCell.self, forCellReuseIdentifier: AttachmentBlockCell.reuseIdentifier)
+        tableView.insertSubview(notebookBackgroundView, at: 0)
+        tableView.insertSubview(bodyPaperView, at: 0)
 
         setupNavigationBar()
 
@@ -72,6 +89,10 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
         tableDismissTap.delegate = self
         tableView.addGestureRecognizer(tableDismissTap)
 
+        gapInsertTap.cancelsTouchesInView = false
+        gapInsertTap.delegate = self
+        tableView.addGestureRecognizer(gapInsertTap)
+
         view.addSubview(tableView)
         tableView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -85,12 +106,14 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateHeaderLayoutIfNeeded()
+        updateNotebookBackgroundLayout()
+        updateBodyPaperLayout()
     }
     
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         // Auto-focus on empty note
-        if shouldAutoFocusOnAppear {
+        if shouldAutoFocusOnAppear && presentationMode.isEditing {
             shouldAutoFocusOnAppear = false
             focusFirstBlockIfEmpty()
         }
@@ -118,15 +141,46 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     
 
     func updateContentInsets(top: CGFloat, bottom: CGFloat) {
+        let wasAtTop = tableView.contentOffset.y <= -tableView.contentInset.top + 1
         tableView.contentInset.top = top
         tableView.contentInset.bottom = bottom
         tableView.scrollIndicatorInsets.top = top
         tableView.scrollIndicatorInsets.bottom = bottom
+        if wasAtTop {
+            tableView.setContentOffset(CGPoint(x: tableView.contentOffset.x, y: -top), animated: false)
+        }
+        updateNotebookBackgroundLayout()
     }
 
-    func updateHeader(title: Binding<String>, linkBlocks: [LinkedNoteBlock], isWhiteboard: Bool, focusBridge: TitleFocusBridge, onOpenNote: @escaping (UUID) -> Void) {
+    func updateNotebookBackground(_ background: NotebookBackground) {
+        let changed = currentBackground != background
+        currentBackground = background
+        notebookBackgroundView.background = background
+        updateNotebookBackgroundLayout()
+        if changed {
+            reloadVisibleRowsWithoutAnimation()
+            updateBodyPaperLayout()
+        }
+    }
+
+    func updatePresentationMode(_ mode: NoteDetailPresentationMode) {
+        guard presentationMode != mode else { return }
+        let oldHiddenRows = hiddenReadingRowsInVisibleRange()
+        presentationMode = mode
+        if !mode.isEditing {
+            view.endEditing(true)
+            hideActiveTableControls()
+        }
+        let needsHeightUpdate = oldHiddenRows != hiddenReadingRowsInVisibleRange()
+        refreshVisibleRowsForPresentationMode(updateHeights: needsHeightUpdate)
+        updateBodyPaperLayout()
+    }
+
+    func updateHeader(title: Binding<String>, metadata: NoteEditorHeaderMetadata, linkBlocks: [LinkedNoteBlock], presentationMode: NoteDetailPresentationMode, isWhiteboard: Bool, focusBridge: TitleFocusBridge, onOpenNote: @escaping (UUID) -> Void) {
         titleFocusBridge = focusBridge
-        let root = NoteEditorHeaderView(title: title, focusBridge: focusBridge, linkBlocks: linkBlocks, isWhiteboard: isWhiteboard, onOpenNote: onOpenNote)
+        currentTitle = title.wrappedValue
+        currentAISummary = metadata.preview?.style == .excerpt ? (metadata.preview?.items.first ?? "") : ""
+        let root = NoteEditorHeaderView(title: title, focusBridge: focusBridge, metadata: metadata, linkBlocks: linkBlocks, presentationMode: presentationMode, isWhiteboard: isWhiteboard, background: isWhiteboard ? .default : currentBackground, onOpenNote: onOpenNote)
         if let host = headerHost {
             host.rootView = root
         } else {
@@ -136,6 +190,8 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
             tableView.tableHeaderView = host.view
         }
         updateHeaderLayoutIfNeeded()
+        updateNotebookBackgroundLayout()
+        updateBodyPaperLayout()
     }
 
     private func updateHeaderLayoutIfNeeded() {
@@ -149,12 +205,57 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
         if headerView.frame.size.height != size.height {
             headerView.frame = CGRect(x: 0, y: 0, width: width, height: size.height)
             tableView.tableHeaderView = headerView
+            updateBodyPaperLayout()
+        }
+    }
+
+    private func updateBodyPaperLayout() {
+        bodyPaperView.isHidden = true
+        guard !bodyPaperView.isHidden else { return }
+        let headerHeight = tableView.tableHeaderView?.frame.height ?? 0
+        let y = headerHeight + 8
+        let horizontalInset: CGFloat = 18
+        let contentHeight = max(tableView.contentSize.height - headerHeight + 30, 0)
+        bodyPaperView.frame = CGRect(
+            x: horizontalInset,
+            y: y,
+            width: max(0, tableView.bounds.width - horizontalInset * 2),
+            height: contentHeight
+        )
+        tableView.sendSubviewToBack(notebookBackgroundView)
+        tableView.sendSubviewToBack(bodyPaperView)
+    }
+
+    private func updateNotebookBackgroundLayout() {
+        notebookBackgroundView.isHidden = !notebookBackgroundView.hasGeneratedStyle
+        guard !notebookBackgroundView.isHidden else { return }
+        let insets = tableView.contentInset
+        notebookBackgroundView.frame = CGRect(
+            x: 0,
+            y: -insets.top,
+            width: tableView.bounds.width,
+            height: max(tableView.bounds.height + insets.top + insets.bottom, tableView.contentSize.height + insets.top + insets.bottom)
+        )
+        tableView.sendSubviewToBack(notebookBackgroundView)
+    }
+
+    private func hasBodyPaperContent() -> Bool {
+        document.blocks.enumerated().contains { index, block in
+            if isHiddenReadingBlock(at: index) {
+                return false
+            }
+            if block.kind == .attachment || block.kind == .table {
+                return true
+            }
+            return !block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
 
     func updateDocument(_ newDocument: NoteDocument) {
         document = newDocument
         tableView.reloadData()
+        updateNotebookBackgroundLayout()
+        updateBodyPaperLayout()
         if isMultiSelecting {
             pruneMultiSelection()
             notifyMultiSelectionChanged()
@@ -166,12 +267,29 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
 
     func updateSentHighlightBlockIds(_ ids: Set<UUID>) {
         sentHighlightBlockIds = ids
-        tableView.reloadData()
+        reloadVisibleRowsWithoutAnimation()
     }
 
     func exitMultiSelectModeIfNeeded() {
         if isMultiSelecting {
             exitMultiSelectMode()
+        }
+    }
+
+    func focusPreferredTextBlock() {
+        let target = activeIndexPath.flatMap { indexPath -> IndexPath? in
+            guard indexPath.row < document.blocks.count else { return nil }
+            let block = document.blocks[indexPath.row]
+            return block.kind == .table || block.kind == .attachment ? nil : indexPath
+        } ?? firstEditableTextIndexPath()
+
+        guard let target else { return }
+        tableView.scrollToRow(at: target, at: .none, animated: false)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if let cell = self.tableView.cellForRow(at: target) as? TextBlockCell {
+                cell.beginEditing(atEnd: true)
+            }
         }
     }
 
@@ -244,7 +362,57 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     }
 
     private func firstVisibleTextIndexPath() -> IndexPath? {
-        return tableView.indexPathsForVisibleRows?.first
+        return tableView.indexPathsForVisibleRows?.first { !isHiddenReadingBlock(at: $0.row) }
+    }
+
+    private func firstEditableTextIndexPath() -> IndexPath? {
+        document.blocks.indices.first { index in
+            let block = document.blocks[index]
+            return block.kind != .table && block.kind != .attachment && !isHiddenReadingBlock(at: index)
+        }.map { IndexPath(row: $0, section: 0) }
+    }
+
+    private func isHiddenReadingBlock(at index: Int) -> Bool {
+        isDuplicateTitleBlock(at: index) || isDuplicateAISummaryBlock(at: index)
+    }
+
+    private func isDuplicateTitleBlock(at index: Int) -> Bool {
+        guard presentationMode == .reading else { return false }
+        guard index == 0, index < document.blocks.count else { return false }
+        let block = document.blocks[index]
+        guard block.kind != .attachment, block.kind != .table else { return false }
+        let title = currentTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let blockTitle = NoteTitleDeriver.cleanedTitleLine(block.text)
+        return !title.isEmpty && title == blockTitle
+    }
+
+    private func isDuplicateAISummaryBlock(at index: Int) -> Bool {
+        guard presentationMode == .reading, index < document.blocks.count else { return false }
+        let summary = currentAISummary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !summary.isEmpty else { return false }
+        let block = document.blocks[index]
+        guard block.kind != .attachment, block.kind != .table else { return false }
+        let blockTitle = NoteTitleDeriver.cleanedTitleLine(block.text)
+        if block.kind == .heading && blockTitle == "摘要" {
+            return index <= 1 && nextTextBlockMatchesSummary(after: index, summary: summary)
+        }
+        return index <= 2 &&
+            previousTextBlockIsSummaryHeading(before: index) &&
+            block.text.trimmingCharacters(in: .whitespacesAndNewlines) == summary
+    }
+
+    private func nextTextBlockMatchesSummary(after index: Int, summary: String) -> Bool {
+        guard index + 1 < document.blocks.count else { return false }
+        let next = document.blocks[index + 1]
+        guard next.kind != .attachment, next.kind != .table else { return false }
+        return next.text.trimmingCharacters(in: .whitespacesAndNewlines) == summary
+    }
+
+    private func previousTextBlockIsSummaryHeading(before index: Int) -> Bool {
+        guard index > 0 else { return false }
+        let previous = document.blocks[index - 1]
+        guard previous.kind == .heading else { return false }
+        return NoteTitleDeriver.cleanedTitleLine(previous.text) == "摘要"
     }
     
     private func setupNavigationBar() {
@@ -283,7 +451,7 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
     }
     
     private func presentDocumentPicker() {
-        let types: [UTType] = [.pdf, .image]
+        let types: [UTType] = [.pdf, .image, .movie, .mpeg4Movie, .quickTimeMovie]
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
         picker.delegate = self
         picker.allowsMultipleSelection = false
@@ -298,39 +466,29 @@ final class BlockEditorViewController: UIViewController, UIGestureRecognizerDele
         let attachmentBlock: Block
         let attachmentId = UUID()
         
-        // If we have context, use the new storage system
-        if let context = modelContext, let ownerId = ownerId, let noteId = noteId {
+        if let ownerId = ownerId, let noteId = noteId {
             // Save to local cache immediately for display (using AttachmentCache directly)
             AttachmentCache.save(data: data, attachmentId: attachmentId, fileName: fileName)
             
-            // Create LocalAttachment record async
             let mimeType = AttachmentStorage.mimeType(for: fileName)
             Task { @MainActor in
                 do {
-                    let localAttachment = try await AttachmentStorage.shared.saveNewAttachment(
+                    let localAttachment = try AttachmentStorage.shared.saveNewAttachmentV3(
                         data: data,
                         attachmentId: attachmentId,
                         ownerId: ownerId,
                         noteId: noteId,
                         fileName: fileName,
-                        mimeType: mimeType,
-                        context: context
+                        mimeType: mimeType
                     )
-                    try? context.save()
-                    // Upload immediately so other devices can fetch it without waiting for sync.
-                    await AttachmentStorage.shared.uploadAndUpsertMetadata(
-                        attachment: localAttachment,
-                        context: context
-                    )
+                    await AttachmentStorage.shared.uploadAndUpsertMetadataV3(attachment: localAttachment)
                 } catch {
                     print("Failed to save attachment record: \(error)")
                 }
             }
             
             // Create block with storage path reference
-            let ext = (fileName as NSString).pathExtension
-            let storageName = ext.isEmpty ? attachmentId.uuidString : "\(attachmentId.uuidString).\(ext)"
-            let storagePath = "\(ownerId.uuidString)/\(storageName)"
+            let storagePath = AttachmentPathFactory.storagePath(ownerId: ownerId, attachmentId: attachmentId, fileName: fileName)
             attachmentBlock = Block.attachment(type: type, fileName: fileName, storagePath: storagePath, attachmentId: attachmentId)
         } else {
             // Fallback: use legacy embedded data (for when context is not available)
@@ -412,6 +570,19 @@ extension BlockEditorViewController: UITableViewDataSource, UITableViewDelegate 
         document.blocks.count
     }
 
+    func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+        isHiddenReadingBlock(at: indexPath.row) ? 0.01 : UITableView.automaticDimension
+    }
+
+    func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
+        isHiddenReadingBlock(at: indexPath.row) ? 0.01 : 132
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        updateNotebookBackgroundLayout()
+        updateBodyPaperLayout()
+    }
+
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let block = document.blocks[indexPath.row]
         switch block.kind {
@@ -420,8 +591,8 @@ extension BlockEditorViewController: UITableViewDataSource, UITableViewDelegate 
             cell.delegate = self
             cell.configure(with: block.table ?? TableModel(rows: 3, cols: 3), blockId: block.id)
             cell.setMultiSelected(isMultiSelecting && multiSelectedBlockIds.contains(block.id))
-            cell.setContentInteractionEnabled(!isMultiSelecting)
-            cell.setControlsVisible(!isMultiSelecting && activeTableIndexPath == indexPath)
+            cell.setContentInteraction(editable: presentationMode.isEditing && !isMultiSelecting, selectable: !isMultiSelecting)
+            cell.setControlsVisible(presentationMode.isEditing && !isMultiSelecting && activeTableIndexPath == indexPath)
             cell.setSentHighlight(sentHighlightBlockIds.contains(block.id))
             return cell
         case .attachment:
@@ -435,9 +606,10 @@ extension BlockEditorViewController: UITableViewDataSource, UITableViewDelegate 
             let cell = tableView.dequeueReusableCell(withIdentifier: TextBlockCell.reuseIdentifier, for: indexPath) as! TextBlockCell
             cell.delegate = self
             let numberIndex = numberIndexForBlock(at: indexPath.row)
-            cell.configure(with: block, numberIndex: numberIndex)
+            cell.configure(with: block, numberIndex: numberIndex, presentationMode: presentationMode, background: currentBackground)
+            cell.setVisuallyCollapsed(isHiddenReadingBlock(at: indexPath.row))
             cell.setMultiSelected(isMultiSelecting && multiSelectedBlockIds.contains(block.id))
-            cell.setContentInteractionEnabled(!isMultiSelecting)
+            cell.setContentInteraction(editable: presentationMode.isEditing && !isMultiSelecting, selectable: !isMultiSelecting)
             cell.setSentHighlight(sentHighlightBlockIds.contains(block.id))
             return cell
         }
@@ -481,14 +653,10 @@ extension BlockEditorViewController: TextBlockCellDelegate {
         }
         
         // Split the text
-        let fullText = current.text
-        let safeLocation = min(max(0, location), fullText.count)
-        
-        let prefix = String(fullText.prefix(safeLocation))
-        let suffix = String(fullText.dropFirst(safeLocation))
+        let split = current.text.splitAtUTF16Offset(location)
         
         // Update current block
-        document.blocks[indexPath.row].text = prefix
+        document.blocks[indexPath.row].text = split.prefix
         
         // Determine new block kind
         let newKind: BlockKind
@@ -498,7 +666,7 @@ extension BlockEditorViewController: TextBlockCellDelegate {
             newKind = (current.kind == .bullet || current.kind == .numbered || current.kind == .todo || current.kind == .quote) ? current.kind : .paragraph
         }
         
-        let newBlock = Block(id: UUID(), kind: newKind, text: suffix, level: nil, isChecked: false, table: nil, attachment: nil, fontSizeOffset: current.fontSizeOffset)
+        let newBlock = Block(id: UUID(), kind: newKind, text: split.suffix, level: nil, isChecked: false, table: nil, attachment: nil, fontSizeOffset: current.fontSizeOffset)
         document.blocks.insert(newBlock, at: indexPath.row + 1)
         onDocumentChange?(document)
         
@@ -596,12 +764,12 @@ extension BlockEditorViewController: TextBlockCellDelegate {
     func textBlockCellDidRequestBackspaceAtStart(_ cell: TextBlockCell) {
         guard let indexPath = tableView.indexPath(for: cell) else { return }
         if indexPath.row == 0 {
-            titleFocusBridge?.requestFocus = true
             return
         }
         let previousIndex = IndexPath(row: indexPath.row - 1, section: 0)
         let currentText = document.blocks[indexPath.row].text
         let previousText = document.blocks[previousIndex.row].text
+        let mergedCursorLocation = previousText.utf16.count
         document.blocks[previousIndex.row].text = previousText + currentText
         document.blocks.remove(at: indexPath.row)
         onDocumentChange?(document)
@@ -609,7 +777,7 @@ extension BlockEditorViewController: TextBlockCellDelegate {
         tableView.reloadRows(at: [previousIndex], with: .none)
         DispatchQueue.main.async {
             self.tableView.scrollToRow(at: previousIndex, at: .none, animated: true)
-            (self.tableView.cellForRow(at: previousIndex) as? TextBlockCell)?.beginEditing(atEnd: true)
+            (self.tableView.cellForRow(at: previousIndex) as? TextBlockCell)?.beginEditing(atUTF16Location: mergedCursorLocation)
         }
     }
 
@@ -710,6 +878,7 @@ extension BlockEditorViewController: TableBlockCellDelegate {
     }
 
     func tableBlockCellDidBeginEditing(_ cell: TableBlockCell) {
+        guard presentationMode.isEditing else { return }
         guard !isMultiSelecting else { return }
         guard let indexPath = tableView.indexPath(for: cell) else { return }
         let previous = activeTableIndexPath
@@ -733,6 +902,10 @@ extension BlockEditorViewController: TableBlockCellDelegate {
             onSelectedBlockIdsChange?([])
         }
     }
+
+    func tableBlockCellDidRequestLayoutUpdate(_ cell: TableBlockCell) {
+        refreshTableLayoutForControls()
+    }
 }
 
 extension BlockEditorViewController {
@@ -749,7 +922,22 @@ extension BlockEditorViewController {
         hideActiveTableControls()
     }
 
+    @objc private func handleGapInsertTap(_ gesture: UITapGestureRecognizer) {
+        guard gesture.state == .ended, presentationMode.isEditing, !isMultiSelecting else { return }
+        let point = gesture.location(in: tableView)
+        guard let insertionIndex = gapInsertionIndex(at: point) else { return }
+        insertEmptyParagraph(at: insertionIndex)
+    }
+
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if gestureRecognizer === gapInsertTap {
+            guard presentationMode.isEditing, !isMultiSelecting else { return false }
+            let point = touch.location(in: tableView)
+            if let hit = tableView.hitTest(point, with: nil), hit is UITextView || hit is UIControl {
+                return false
+            }
+            return gapInsertionIndex(at: point) != nil
+        }
         if gestureRecognizer === tableDismissTap {
             if isMultiSelecting {
                 return false
@@ -763,6 +951,41 @@ extension BlockEditorViewController {
             return activeTableIndexPath != nil
         }
         return true
+    }
+
+    private func gapInsertionIndex(at point: CGPoint) -> Int? {
+        guard !document.blocks.isEmpty else { return 0 }
+        if let indexPath = tableView.indexPathForRow(at: point) {
+            let rect = tableView.rectForRow(at: indexPath)
+            let gap: CGFloat = 18
+            if point.y <= rect.minY + gap {
+                return indexPath.row
+            }
+            if point.y >= rect.maxY - gap {
+                return indexPath.row + 1
+            }
+            return nil
+        }
+
+        for row in 0..<tableView.numberOfRows(inSection: 0) {
+            if point.y < tableView.rectForRow(at: IndexPath(row: row, section: 0)).minY {
+                return row
+            }
+        }
+        return document.blocks.count
+    }
+
+    private func insertEmptyParagraph(at rawIndex: Int) {
+        let index = min(max(rawIndex, 0), document.blocks.count)
+        let block = Block.paragraph("")
+        document.blocks.insert(block, at: index)
+        onDocumentChange?(document)
+        let indexPath = IndexPath(row: index, section: 0)
+        tableView.insertRows(at: [indexPath], with: .automatic)
+        DispatchQueue.main.async {
+            self.tableView.scrollToRow(at: indexPath, at: .none, animated: true)
+            (self.tableView.cellForRow(at: indexPath) as? TextBlockCell)?.beginEditing()
+        }
     }
 
     @objc func handleMultiSelectLongPress(_ gesture: UILongPressGestureRecognizer) {
@@ -791,7 +1014,7 @@ extension BlockEditorViewController {
         multiSelectTap.isEnabled = true
         view.endEditing(true)
         hideActiveTableControls()
-        tableView.reloadData()
+        reloadVisibleRowsWithoutAnimation()
     }
 
     func exitMultiSelectMode() {
@@ -799,7 +1022,7 @@ extension BlockEditorViewController {
         multiSelectedBlockIds.removeAll()
         multiSelectTap.isEnabled = false
         activeTableIndexPath = nil
-        tableView.reloadData()
+        reloadVisibleRowsWithoutAnimation()
         onSelectionChange?("", NSRange(location: 0, length: 0))
         onSelectedBlockIdsChange?([])
     }
@@ -838,6 +1061,7 @@ extension BlockEditorViewController {
     }
 
     private func restoreTableFocusIfNeeded(indexPath: IndexPath, focus: (row: Int, col: Int)?) {
+        guard presentationMode.isEditing else { return }
         guard let focus = focus else { return }
         DispatchQueue.main.async {
             guard let cell = self.tableView.cellForRow(at: indexPath) as? TableBlockCell else { return }
@@ -855,6 +1079,48 @@ extension BlockEditorViewController {
         UIView.performWithoutAnimation {
             self.tableView.beginUpdates()
             self.tableView.endUpdates()
+        }
+    }
+
+    private func reloadVisibleRowsWithoutAnimation() {
+        guard let visibleRows = tableView.indexPathsForVisibleRows, !visibleRows.isEmpty else { return }
+        UIView.performWithoutAnimation {
+            tableView.reloadRows(at: visibleRows, with: .none)
+        }
+    }
+
+    private func hiddenReadingRowsInVisibleRange() -> Set<Int> {
+        Set((tableView.indexPathsForVisibleRows ?? []).map(\.row).filter { isHiddenReadingBlock(at: $0) })
+    }
+
+    private func refreshVisibleRowsForPresentationMode(updateHeights: Bool) {
+        guard let visibleRows = tableView.indexPathsForVisibleRows, !visibleRows.isEmpty else { return }
+        UIView.performWithoutAnimation {
+            for indexPath in visibleRows where indexPath.row < document.blocks.count {
+                let block = document.blocks[indexPath.row]
+                switch tableView.cellForRow(at: indexPath) {
+                case let cell as TextBlockCell:
+                    cell.updatePresentationMode(presentationMode, numberIndex: numberIndexForBlock(at: indexPath.row))
+                    cell.setVisuallyCollapsed(isHiddenReadingBlock(at: indexPath.row))
+                    cell.setMultiSelected(isMultiSelecting && multiSelectedBlockIds.contains(block.id))
+                    cell.setContentInteraction(editable: presentationMode.isEditing && !isMultiSelecting, selectable: !isMultiSelecting)
+                    cell.setSentHighlight(sentHighlightBlockIds.contains(block.id))
+                case let cell as TableBlockCell:
+                    cell.setMultiSelected(isMultiSelecting && multiSelectedBlockIds.contains(block.id))
+                    cell.setContentInteraction(editable: presentationMode.isEditing && !isMultiSelecting, selectable: !isMultiSelecting)
+                    cell.setControlsVisible(presentationMode.isEditing && !isMultiSelecting && activeTableIndexPath == indexPath)
+                    cell.setSentHighlight(sentHighlightBlockIds.contains(block.id))
+                case let cell as AttachmentBlockCell:
+                    cell.setMultiSelected(isMultiSelecting && multiSelectedBlockIds.contains(block.id))
+                    cell.setSentHighlight(sentHighlightBlockIds.contains(block.id))
+                default:
+                    break
+                }
+            }
+            if updateHeights {
+                tableView.beginUpdates()
+                tableView.endUpdates()
+            }
         }
     }
 
@@ -989,10 +1255,10 @@ extension BlockEditorViewController: AttachmentBlockCellDelegate {
 extension BlockEditorViewController: UIImagePickerControllerDelegate, UINavigationControllerDelegate {
     func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]) {
         picker.dismiss(animated: true)
-        
+
         guard let image = info[.originalImage] as? UIImage,
               let data = image.jpegData(compressionQuality: 0.8) else { return }
-        
+
         let fileName = "Image_\(Date().timeIntervalSince1970).jpg"
         insertAttachment(data: data, type: .image, fileName: fileName)
     }
@@ -1009,11 +1275,133 @@ extension BlockEditorViewController: UIDocumentPickerDelegate {
         do {
             let data = try Data(contentsOf: url)
             let fileName = url.lastPathComponent
-            let type: AttachmentType = url.pathExtension.lowercased() == "pdf" ? .pdf : .image
+            let type = AttachmentType.from(fileName: fileName)
             insertAttachment(data: data, type: type, fileName: fileName)
         } catch {
             print("Failed to read document data: \(error)")
         }
+    }
+}
+
+private final class ScrollingNotebookBackgroundView: UIView {
+    private let gradientLayer = CAGradientLayer()
+    private let patternLayer = CAShapeLayer()
+
+    var background: NotebookBackground = .default {
+        didSet {
+            isHidden = !hasGeneratedStyle
+            updateLayers()
+        }
+    }
+
+    var hasGeneratedStyle: Bool {
+        currentStyle != nil
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isOpaque = false
+        layer.addSublayer(gradientLayer)
+        layer.addSublayer(patternLayer)
+        patternLayer.fillColor = UIColor.clear.cgColor
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        updateLayers()
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        guard previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle else { return }
+        isHidden = !hasGeneratedStyle
+        updateLayers()
+    }
+
+    private var currentStyle: NotebookBackgroundStyle? {
+        background.generatedStyle(isDarkMode: traitCollection.userInterfaceStyle == .dark)
+    }
+
+    private func updateLayers() {
+        guard let style = currentStyle else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        gradientLayer.frame = bounds
+        gradientLayer.colors = [
+            UIColor.notebookBackground(hex: style.washHex).cgColor,
+            UIColor.notebookBackground(hex: style.baseHex).cgColor
+        ]
+        gradientLayer.startPoint = CGPoint(x: 0, y: 0)
+        gradientLayer.endPoint = CGPoint(x: 1, y: 1)
+
+        patternLayer.frame = bounds
+        patternLayer.masksToBounds = true
+        patternLayer.strokeColor = UIColor.notebookBackground(hex: style.markHex).withAlphaComponent(style.opacity).cgColor
+        patternLayer.fillColor = style.pattern == .dots
+            ? UIColor.notebookBackground(hex: style.markHex).withAlphaComponent(style.opacity).cgColor
+            : UIColor.clear.cgColor
+        patternLayer.lineWidth = style.pattern == .softGrid ? 0.7 : 1
+        patternLayer.path = patternPath(style: style).cgPath
+        patternLayer.transform = CATransform3DIdentity
+
+        CATransaction.commit()
+    }
+
+    private func patternPath(style: NotebookBackgroundStyle) -> UIBezierPath {
+        let path = UIBezierPath()
+        let spacing = max(24, style.spacing)
+
+        switch style.pattern {
+        case .ruled:
+            var y: CGFloat = 0
+            while y < bounds.height + spacing {
+                path.move(to: CGPoint(x: 0, y: y))
+                path.addLine(to: CGPoint(x: bounds.width, y: y))
+                y += spacing
+            }
+        case .grid, .softGrid:
+            var x: CGFloat = 0
+            while x < bounds.width {
+                path.move(to: CGPoint(x: x, y: 0))
+                path.addLine(to: CGPoint(x: x, y: bounds.height))
+                x += spacing
+            }
+            var y: CGFloat = 0
+            while y < bounds.height + spacing {
+                path.move(to: CGPoint(x: 0, y: y))
+                path.addLine(to: CGPoint(x: bounds.width, y: y))
+                y += spacing
+            }
+        case .dots:
+            let radius: CGFloat = 1.15
+            var y: CGFloat = 0
+            while y < bounds.height + spacing {
+                var x: CGFloat = spacing * 0.5
+                while x < bounds.width {
+                    path.append(UIBezierPath(ovalIn: CGRect(x: x, y: y, width: radius * 2, height: radius * 2)))
+                    x += spacing
+                }
+                y += spacing
+            }
+        }
+        return path
+    }
+}
+
+private extension UIColor {
+    static func notebookBackground(hex: String) -> UIColor {
+        let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&int)
+        let r = CGFloat((int >> 16) & 0xFF) / 255
+        let g = CGFloat((int >> 8) & 0xFF) / 255
+        let b = CGFloat(int & 0xFF) / 255
+        return UIColor(red: r, green: g, blue: b, alpha: 1)
     }
 }
 #endif

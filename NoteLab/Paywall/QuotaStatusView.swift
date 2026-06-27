@@ -32,9 +32,9 @@ struct QuotaStatusView: View {
             // 功能不可用
             disabledView
             
-        case .limited(let max):
+        case .limited:
             // 显示配额使用情况
-            limitedView(max: max)
+            limitedView()
         }
     }
     
@@ -59,9 +59,9 @@ struct QuotaStatusView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
     
-    private func limitedView(max: Int) -> some View {
-        let used = usageTracker.usedCount(feature)
-        let remaining = Swift.max(0, max - used)
+    private func limitedView() -> some View {
+        let remaining = usageTracker.remainingCredits(tier: tier)
+        let allowance = usageTracker.monthlyAllowance(tier: tier)
         let percentage = usageTracker.usagePercentage(feature, tier: tier)
         
         return HStack(spacing: 12) {
@@ -85,7 +85,7 @@ struct QuotaStatusView: View {
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Theme.ink)
                 
-                Text("本月剩余 \(remaining) 次")
+                Text("本次消耗 \(feature.creditCost) 点 · 本月剩余 \(remaining) 点")
                     .font(.system(size: 11, weight: .regular))
                     .foregroundStyle(remaining == 0 ? .orange : Theme.secondaryInk)
             }
@@ -97,7 +97,7 @@ struct QuotaStatusView: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(Color(hex: "FFD700"))
             } else {
-                Text("\(remaining)/\(max)")
+                Text("\(remaining)/\(allowance)")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .foregroundStyle(percentage > 0.8 ? .orange : .green)
             }
@@ -126,7 +126,7 @@ struct QuotaExhaustedView: View {
                 .font(.system(size: 18, weight: .bold))
                 .foregroundStyle(Theme.ink)
             
-            Text("本月配额已耗尽，升级订阅获取更多次数或等待下月重置")
+            Text("本月 AI 点数已用完，升级订阅获取更多点数或等待下月重置")
                 .font(.system(size: 14))
                 .foregroundStyle(Theme.secondaryInk)
                 .multilineTextAlignment(.center)

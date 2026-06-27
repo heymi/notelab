@@ -40,6 +40,10 @@ struct AppleAccount: Codable, Equatable {
     let email: String?
     let displayName: String?
     let localUserId: UUID
+
+    var isSimulatorLocalAccount: Bool {
+        appleUserId.hasPrefix("simulator-local-")
+    }
 }
 
 @MainActor
@@ -66,7 +70,18 @@ final class AuthManager: ObservableObject {
     }
 
     init() {
-        account = Self.loadStoredAccount()
+        let storedAccount = Self.loadStoredAccount()
+        if Self.shouldDiscardStoredAccountOnLaunch(
+            hasStoredAccount: storedAccount != nil,
+            hasInstallMarker: Self.hasInstallMarker,
+            hasLocalInstallData: Self.hasLocalInstallData()
+        ) {
+            Self.deleteStoredAccount()
+            account = nil
+        } else {
+            account = storedAccount
+        }
+        Self.markInstalled()
         Task {
             await refreshAppleCredentialState()
             await refreshICloudAccountState()
@@ -142,6 +157,7 @@ final class AuthManager: ObservableObject {
 
     private func refreshAppleCredentialState() async {
         guard let account else { return }
+        if account.isSimulatorLocalAccount { return }
         let state = await Self.credentialState(for: account.appleUserId)
         switch state {
         case .authorized, .transferred:
@@ -155,7 +171,7 @@ final class AuthManager: ObservableObject {
 
     private static func currentICloudAccountState() async -> ICloudAccountState {
         await withCheckedContinuation { continuation in
-            CKContainer.default().accountStatus { status, _ in
+            CloudKitSchema.container.accountStatus { status, _ in
                 switch status {
                 case .available:
                     continuation.resume(returning: .available)
@@ -189,22 +205,14 @@ final class AuthManager: ObservableObject {
     }
 
     private static func stableUUID(for appleUserId: String) -> UUID {
-        let digest = SHA256.hash(data: Data(appleUserId.utf8))
-        var bytes = Array(digest.prefix(16))
-        bytes[6] = (bytes[6] & 0x0f) | 0x40
-        bytes[8] = (bytes[8] & 0x3f) | 0x80
-        return UUID(uuid: (
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7],
-            bytes[8], bytes[9], bytes[10], bytes[11],
-            bytes[12], bytes[13], bytes[14], bytes[15]
-        ))
+        StableIdentity.uuid(for: appleUserId)
     }
 }
 
 private extension AuthManager {
     static let keychainService = "com.psg.NoteLab.apple-auth"
     static let keychainAccount = "current-account"
+    static let installMarkerKey = "AuthManager.didRecordInstall"
 
     static func loadStoredAccount() -> AppleAccount? {
         var query = baseKeychainQuery()
@@ -238,5 +246,33 @@ private extension AuthManager {
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: keychainAccount
         ]
+    }
+
+    static var hasInstallMarker: Bool {
+        UserDefaults.standard.bool(forKey: installMarkerKey)
+    }
+
+    static func markInstalled() {
+        UserDefaults.standard.set(true, forKey: installMarkerKey)
+    }
+
+    static func hasLocalInstallData() -> Bool {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: StorageController.appSupportURL,
+            includingPropertiesForKeys: nil
+        ) else {
+            return false
+        }
+        return entries.contains { $0.lastPathComponent != ".DS_Store" }
+    }
+}
+
+extension AuthManager {
+    nonisolated static func shouldDiscardStoredAccountOnLaunch(
+        hasStoredAccount: Bool,
+        hasInstallMarker: Bool,
+        hasLocalInstallData: Bool
+    ) -> Bool {
+        hasStoredAccount && !hasInstallMarker && !hasLocalInstallData
     }
 }

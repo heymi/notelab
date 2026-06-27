@@ -1,27 +1,12 @@
 import SwiftUI
 import Combine
-import SwiftData
 import PDFKit
 
 struct MaterialsLibraryView: View {
     @EnvironmentObject private var router: AppRouter
     @EnvironmentObject private var auth: AuthManager
+    @EnvironmentObject private var store: NotebookStore
     @ObservedObject var model: MaterialsLibraryModel
-
-    @Query(
-        filter: #Predicate<LocalAttachment> { att in
-            att.deletedAt == nil
-        },
-        sort: [SortDescriptor(\LocalAttachment.createdAt, order: .reverse)]
-    )
-    private var attachments: [LocalAttachment]
-
-    @Query(
-        filter: #Predicate<LocalNote> { note in
-            note.deletedAt == nil
-        }
-    )
-    private var notes: [LocalNote]
 
     var body: some View {
         Group {
@@ -57,13 +42,27 @@ struct MaterialsLibraryView: View {
             }
         }
         .task(id: refreshKey) {
-            model.refresh(ownerId: auth.userId, attachments: attachments, notes: notes)
+            model.refresh(
+                profileId: store.currentProfileId,
+                legacyProfileId: auth.userId,
+                notebooks: store.notebooks
+            )
         }
     }
 
     private var refreshKey: String {
-        let ownerId = auth.userId?.uuidString ?? "none"
-        return "\(ownerId)-\(attachments.count)-\(notes.count)"
+        let profileId = store.currentProfileId?.uuidString ?? "none"
+        let legacyProfileId = auth.userId?.uuidString ?? "none"
+        let notebookFingerprint = store.notebooks
+            .map { notebook in
+                let notes = notebook.notes.map { note in
+                    "\(note.id.uuidString):\(note.title):\(note.updatedAt.timeIntervalSince1970):\(note.content.hashValue)"
+                }
+                .joined(separator: ",")
+                return "\(notebook.id.uuidString):\(notes)"
+            }
+            .joined(separator: "|")
+        return "\(profileId)-\(legacyProfileId)-\(notebookFingerprint)"
     }
 
     private var skeletonGrid: some View {
@@ -91,7 +90,7 @@ struct MaterialGroup: Identifiable {
     let id: UUID
     let noteId: UUID
     let noteTitle: String
-    let attachments: [LocalAttachment]
+    let attachments: [AttachmentRecord]
     let newestAt: Date
 }
 
@@ -192,11 +191,11 @@ private struct MaterialGroupCard: View {
 }
 
 private struct StackedThumbnailsView: View {
-    let attachments: [LocalAttachment]
+    let attachments: [AttachmentRecord]
     let previewMaxHeight: CGFloat
     private let maxStackCount = 3
 
-    private var displayedAttachments: [LocalAttachment] {
+    private var displayedAttachments: [AttachmentRecord] {
         Array(attachments.prefix(maxStackCount))
     }
     
@@ -238,7 +237,7 @@ private struct StackedThumbnailsView: View {
 }
 
 private struct AttachmentThumbView: View {
-    let attachment: LocalAttachment
+    let attachment: AttachmentRecord
 
     @State private var thumbnail: PlatformImage?
     @State private var isLoading = false
@@ -247,7 +246,7 @@ private struct AttachmentThumbView: View {
         FileType(fileName: attachment.fileName, mimeType: attachment.mimeType)
     }
 
-    init(attachment: LocalAttachment) {
+    init(attachment: AttachmentRecord) {
         self.attachment = attachment
         _thumbnail = State(initialValue: AttachmentThumbnailMemoryCache.get(
             attachmentId: attachment.id,
@@ -311,12 +310,8 @@ private struct AttachmentThumbView: View {
         guard fileType == .image || fileType == .pdf else { return }
         
         guard thumbnail == nil else { return }
-        if let cached = await Task.detached(priority: .utility, operation: { () -> PlatformImage? in
-            guard let data = AttachmentCache.load(attachmentId: attachment.id, fileName: attachment.fileName) else {
-                return nil
-            }
-            return makeThumbnail(from: data)
-        }).value {
+        if let data = AttachmentCache.load(attachmentId: attachment.id, fileName: attachment.fileName),
+           let cached = makeThumbnail(from: data) {
             AttachmentThumbnailMemoryCache.set(cached, attachmentId: attachment.id, fileName: attachment.fileName)
             thumbnail = cached
             return

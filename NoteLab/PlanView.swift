@@ -117,9 +117,8 @@ struct PlanView: View {
 
     private func requestRecentFocus(force: Bool) {
         if recentDigests.isEmpty { return }
-        let provider = AISettings.shared.currentProvider
-        let providerId = provider.rawValue
-        let modelName = provider.modelName
+        let providerId = "notelab-cloud"
+        let modelName = "server"
         if !force {
             if planStore.hasCachedRecentFocus {
                 let newNotes = store.countNotesCreated(after: planStore.lastRecentFocusUpdatedAt)
@@ -165,11 +164,10 @@ struct PlanView: View {
             isLoadingConnections = false
             return
         }
-        let provider = AISettings.shared.currentProvider
         let inputHash = connectionInputHash(
             for: digests,
-            providerId: provider.rawValue,
-            modelName: provider.modelName,
+            providerId: "notelab-cloud",
+            modelName: "server",
             limit: connectionLimit
         )
         if !force,
@@ -178,6 +176,13 @@ struct PlanView: View {
             connections = cached.connections
             connectionErrorMessage = nil
             isLoadingConnections = false
+            return
+        }
+
+        let subscriptionManager = SubscriptionManager.shared
+        guard subscriptionManager.canUseAIFeature(.semanticConnections) else {
+            connectionErrorMessage = "AI 点数不足"
+            NotificationCenter.default.post(name: .showPaywall, object: PaywallTrigger.aiQuotaExceeded)
             return
         }
 
@@ -190,6 +195,7 @@ struct PlanView: View {
                 connections = mapped
                 connectionCache.save(key: connectionCacheKey, value: ConnectionCachePayload(connections: mapped))
                 persistConnectionInputHash(inputHash)
+                subscriptionManager.recordAIUsage(.semanticConnections)
             } catch {
                 connectionErrorMessage = "关联生成失败"
                 connections = []

@@ -1,7 +1,6 @@
 import Foundation
 #if os(macOS)
 import SwiftUI
-import SwiftData
 import AppKit
 
 struct BlockEditorRepresentableMac: NSViewControllerRepresentable {
@@ -11,22 +10,25 @@ struct BlockEditorRepresentableMac: NSViewControllerRepresentable {
     @Binding var selectedBlockIds: [UUID]
     @Binding var pendingCommand: EditorCommandRequest?
     @Binding var exitMultiSelectToken: UUID
+    @Binding var bodyFocusToken: UUID
     @Binding var title: String
     var titleFocusBridge: TitleFocusBridge
+    var headerMetadata: NoteEditorHeaderMetadata
     var linkBlocks: [LinkedNoteBlock]
+    var presentationMode: NoteDetailPresentationMode
     var sentHighlightBlockIds: Set<UUID>
     var isWhiteboard: Bool
+    var background: NotebookBackground
     var onOpenNote: (UUID) -> Void
     var onDocumentChange: (NoteDocument) -> Void
     
-    // Attachment storage context
-    var modelContext: ModelContext?
     var ownerId: UUID?
     var noteId: UUID?
     
     final class Coordinator {
         var lastHandledCommandId: UUID?
         var lastExitMultiSelectToken: UUID?
+        var lastBodyFocusToken: UUID?
         var lastSentHighlightIds: Set<UUID>?
     }
     
@@ -36,7 +38,6 @@ struct BlockEditorRepresentableMac: NSViewControllerRepresentable {
     
     func makeNSViewController(context: Context) -> BlockEditorViewControllerMac {
         let controller = BlockEditorViewControllerMac(document: document)
-        controller.modelContext = modelContext
         controller.ownerId = ownerId
         controller.noteId = noteId
         controller.onDocumentChange = { doc in
@@ -57,19 +58,30 @@ struct BlockEditorRepresentableMac: NSViewControllerRepresentable {
             nsViewController.updateDocument(document)
         }
         
-        // Update attachment storage context
-        nsViewController.modelContext = modelContext
         nsViewController.ownerId = ownerId
         nsViewController.noteId = noteId
+        nsViewController.updateNotebookBackground(background)
         
         // Update header
         nsViewController.updateHeader(
             title: $title,
+            metadata: headerMetadata,
             linkBlocks: linkBlocks,
+            presentationMode: presentationMode,
             isWhiteboard: isWhiteboard,
             focusBridge: titleFocusBridge,
             onOpenNote: onOpenNote
         )
+        nsViewController.updatePresentationMode(presentationMode)
+
+        if context.coordinator.lastBodyFocusToken != bodyFocusToken {
+            context.coordinator.lastBodyFocusToken = bodyFocusToken
+            if presentationMode.isEditing {
+                DispatchQueue.main.async {
+                    nsViewController.focusPreferredTextBlock()
+                }
+            }
+        }
         
         // Update sent highlight
         if context.coordinator.lastSentHighlightIds != sentHighlightBlockIds {

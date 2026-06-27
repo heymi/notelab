@@ -5,6 +5,8 @@ import os
 enum AIClientError: Error {
     case invalidURL
     case missingAPIKey
+    case missingSubscriptionCredential
+    case quotaExhausted
     case badResponse(Int, String?)
     case decodingFailed
     case emptyResponse
@@ -23,6 +25,10 @@ extension AIClientError: LocalizedError {
             return "无效的请求地址"
         case .missingAPIKey:
             return "请先在设置中配置 API Key"
+        case .missingSubscriptionCredential:
+            return "订阅凭证未同步，请恢复购买后重试云端 AI"
+        case .quotaExhausted:
+            return "本月 AI 点数已用完"
         case .badResponse(let status, let message):
             if let message, !message.isEmpty {
                 return "请求失败 (\(status))：\(message)"
@@ -41,6 +47,7 @@ final class AIClient: ObservableObject {
     private let logger = Logger(subsystem: "NoteLab", category: "AI")
     private let requestTimeout: TimeInterval = 120
     private let aiSettings = AISettings.shared
+    private let proxyURL = URL(string: "https://notelab.aedc.cc/v1/ai/generate")!
 
     private func ensureAPIKey() throws -> String {
         let key = aiSettings.currentAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -50,13 +57,13 @@ final class AIClient: ObservableObject {
 
     func extractTasks(text: String) async throws -> [AITaskSuggestion] {
         let prompt = buildExtractTasksPrompt(text: text)
-        let response = try await sendPrompt(prompt)
+        let response = try await sendPrompt(prompt, feature: .extractTasks)
         let parsed = try decodeTasks(from: response)
         if !parsed.isEmpty {
             return parsed
         }
         logger.info("AI extractTasks empty result, retrying once")
-        let retryResponse = try await sendPrompt(prompt)
+        let retryResponse = try await sendPrompt(prompt, feature: .extractTasks)
         return try decodeTasks(from: retryResponse)
     }
 
@@ -67,19 +74,36 @@ final class AIClient: ObservableObject {
             logger.error("AI extractTasks decode failed response=\(Self.truncate(string: response), privacy: .public)")
             throw AIClientError.decodingFailed
         }
-        return result.tasks
+        return normalizeTasks(result.tasks)
     }
 
     func noteInsight(text: String, title: String, notebookContext: String? = nil, protectedAttachmentTokens: [String] = []) async throws -> (formattedMarkdown: String, report: AINoteInsightReport?, tasks: [AITaskSuggestion]) {
-        let prompt = buildNoteInsightPrompt(text: text, title: title, notebookContext: notebookContext, protectedAttachmentTokens: protectedAttachmentTokens)
-        let response = try await sendPrompt(prompt)
+        let linkTokens = LinkPreviewAIContext.extractTokens(from: text)
+        let tokenizedText = LinkPreviewAIContext.tokenize(text: text, tokens: linkTokens)
+        let linkPreviewContext = await LinkPreviewAIContext.block(for: text)
+        let prompt = buildNoteInsightPrompt(
+            text: tokenizedText,
+            title: title,
+            notebookContext: notebookContext,
+            protectedAttachmentTokens: protectedAttachmentTokens,
+            protectedLinkTokens: linkTokens.map(\.token),
+            linkPreviewContext: linkPreviewContext
+        )
+        let response = try await sendPrompt(prompt, feature: .organize)
         let parsed = try decodeNoteInsight(from: response)
         if parsed.report != nil {
-            return parsed
+            return restoreLinks(in: parsed, tokens: linkTokens)
         }
         logger.info("AI noteInsight missing report, retrying once")
-        let retryResponse = try await sendPrompt(prompt)
-        return try decodeNoteInsight(from: retryResponse)
+        let retryResponse = try await sendPrompt(prompt, feature: .organize)
+        return restoreLinks(in: try decodeNoteInsight(from: retryResponse), tokens: linkTokens)
+    }
+
+    private func restoreLinks(
+        in result: (formattedMarkdown: String, report: AINoteInsightReport?, tasks: [AITaskSuggestion]),
+        tokens: [LinkToken]
+    ) -> (formattedMarkdown: String, report: AINoteInsightReport?, tasks: [AITaskSuggestion]) {
+        (LinkPreviewAIContext.restoreAndEnsure(markdown: result.formattedMarkdown, tokens: tokens), result.report, result.tasks)
     }
 
     private func decodeNoteInsight(from response: String) throws -> (formattedMarkdown: String, report: AINoteInsightReport?, tasks: [AITaskSuggestion]) {
@@ -90,7 +114,7 @@ final class AIClient: ObservableObject {
         }
         if let result = try? JSONDecoder().decode(AINoteInsightData.self, from: data) {
             logger.info("AI noteInsight parsed report successfully")
-            return (result.formattedMarkdown, result.report, result.tasks ?? [])
+            return (result.formattedMarkdown, result.report, normalizeTasks(result.tasks ?? []))
         }
         if let partial = try? JSONDecoder().decode(AIPartialInsightData.self, from: data) {
             logger.info("AI noteInsight parsed partial data")
@@ -100,9 +124,25 @@ final class AIClient: ObservableObject {
         throw AIClientError.decodingFailed
     }
 
+    private func normalizeTasks(_ tasks: [AITaskSuggestion]) -> [AITaskSuggestion] {
+        var seen = Set<String>()
+        var normalized: [AITaskSuggestion] = []
+        for task in tasks {
+            let text = task.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            let key = text
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .lowercased()
+            guard seen.insert(key).inserted else { continue }
+            normalized.append(task)
+            if normalized.count == 7 { break }
+        }
+        return normalized
+    }
+
     func supplementHighlights(text: String, maxHighlights: Int) async throws -> [AIHighlightSuggestion] {
         let prompt = buildHighlightSupplementPrompt(text: text, maxHighlights: maxHighlights)
-        let response = try await sendPrompt(prompt)
+        let response = try await sendPrompt(prompt, feature: .highlight)
         let cleaned = cleanJSONResponse(response)
         guard let data = cleaned.data(using: .utf8),
               let result = try? JSONDecoder().decode(AIHighlightsData.self, from: data) else {
@@ -119,14 +159,19 @@ final class AIClient: ObservableObject {
         mode: AIRewriteMode,
         protectedAttachmentTokens: [String] = []
     ) async throws -> (title: String?, markdown: String) {
+        let linkTokens = LinkPreviewAIContext.extractTokens(from: text)
+        let tokenizedText = LinkPreviewAIContext.tokenize(text: text, tokens: linkTokens)
+        let linkPreviewContext = await LinkPreviewAIContext.block(for: text)
         let prompt = buildRewritePrompt(
-            text: text,
+            text: tokenizedText,
             title: title,
             notebookContext: notebookContext,
             mode: mode,
-            protectedAttachmentTokens: protectedAttachmentTokens
+            protectedAttachmentTokens: protectedAttachmentTokens,
+            protectedLinkTokens: linkTokens.map(\.token),
+            linkPreviewContext: linkPreviewContext
         )
-        let response = try await sendPrompt(prompt)
+        let response = try await sendPrompt(prompt, feature: .rewrite)
         let cleaned = cleanJSONResponse(response)
         guard let data = cleaned.data(using: .utf8),
               let result = try? JSONDecoder().decode(AIRewriteData.self, from: data) else {
@@ -137,12 +182,39 @@ final class AIClient: ObservableObject {
         if markdown.isEmpty {
             throw AIClientError.emptyResponse
         }
-        return (result.title, markdown)
+        return (result.title, LinkPreviewAIContext.restoreAndEnsure(markdown: markdown, tokens: linkTokens))
+    }
+
+    func organizeVoiceTranscript(
+        rawTranscript: String,
+        titleHint: String,
+        notebookContext: String? = nil
+    ) async throws -> VoiceNoteAIResult {
+        let prompt = buildVoiceNotePrompt(
+            rawTranscript: rawTranscript,
+            titleHint: titleHint,
+            notebookContext: notebookContext
+        )
+        let response = try await sendPrompt(prompt, feature: .organize)
+        let cleaned = cleanJSONResponse(response)
+        guard let data = cleaned.data(using: .utf8),
+              let result = try? JSONDecoder().decode(VoiceNoteAIResult.self, from: data) else {
+            logger.error("AI voice note decode failed response=\(Self.truncate(string: cleaned), privacy: .public)")
+            throw AIClientError.decodingFailed
+        }
+        let markdown = result.markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !markdown.isEmpty else { throw AIClientError.emptyResponse }
+        let title = NoteTitleDeriver.title(fromAI: result.title, fallback: titleHint)
+        return VoiceNoteAIResult(
+            title: title.isEmpty ? "语音笔记" : title,
+            summary: AISummaryText.normalized(result.summary),
+            markdown: markdown
+        )
     }
 
     func plan(mode: String, goal: String, tasks: [PlanTaskRequest]) async throws -> AIPlanData {
         let prompt = buildPlanPrompt(mode: mode, goal: goal, tasks: tasks)
-        let response = try await sendPrompt(prompt)
+        let response = try await sendPrompt(prompt, feature: .plan)
         
         let cleaned = cleanJSONResponse(response)
         guard let data = cleaned.data(using: .utf8),
@@ -155,7 +227,7 @@ final class AIClient: ObservableObject {
 
     func recentFocusPayload(digests: [NoteDigest]) async throws -> (report: AIRecentFocusReport?, markdown: String?) {
         let prompt = buildRecentFocusPrompt(digests: digests)
-        let response = try await sendPrompt(prompt)
+        let response = try await sendPrompt(prompt, feature: .recentFocus)
         
         let cleaned = cleanJSONResponse(response)
         guard let data = cleaned.data(using: .utf8) else {
@@ -173,7 +245,7 @@ final class AIClient: ObservableObject {
     func semanticConnections(digests: [NoteDigest], limit: Int) async throws -> [AIConnectionSuggestion] {
         guard !digests.isEmpty, limit > 0 else { return [] }
         let prompt = buildConnectionPrompt(digests: digests, limit: limit)
-        let response = try await sendPrompt(prompt)
+        let response = try await sendPrompt(prompt, feature: .semanticConnections)
         let cleaned = cleanJSONResponse(response)
         guard let data = cleaned.data(using: .utf8),
               let result = try? JSONDecoder().decode(AIConnectionData.self, from: data) else {
@@ -185,18 +257,39 @@ final class AIClient: ObservableObject {
     
     // MARK: - Core Request Methods
     
-    private func sendPrompt(_ prompt: String) async throws -> String {
-        let apiKey = try ensureAPIKey()
-        let provider = aiSettings.currentProvider
-        
-        logger.info("AI request using provider=\(provider.rawValue, privacy: .public)")
-        
-        switch provider {
-        case .gemini:
-            return try await sendGeminiRequest(prompt: prompt, apiKey: apiKey)
-        case .deepseek:
-            return try await sendDeepSeekRequest(prompt: prompt, apiKey: apiKey)
+    private func sendPrompt(_ prompt: String, feature: AIFeature) async throws -> String {
+        guard let credential = await SubscriptionManager.shared.currentEntitlementCredential() else {
+            throw AIClientError.missingSubscriptionCredential
         }
+
+        var request = URLRequest(url: proxyURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = requestTimeout
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
+        request.setValue(UUID().uuidString, forHTTPHeaderField: "Idempotency-Key")
+        request.httpBody = try JSONEncoder().encode(AIProxyRequest(feature: feature.rawValue, prompt: prompt))
+
+        logger.info("AI proxy request feature=\(feature.rawValue, privacy: .public)")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw AIClientError.badResponse(-1, nil)
+        }
+        if http.statusCode == 402 {
+            throw AIClientError.quotaExhausted
+        }
+        if !(200...299).contains(http.statusCode) {
+            throw AIClientError.badResponse(http.statusCode, Self.extractErrorMessage(from: data))
+        }
+        guard let payload = try? JSONDecoder().decode(AIProxyResponse.self, from: data) else {
+            logger.error("AI proxy response parse failed body=\(Self.truncate(data: data), privacy: .public)")
+            throw AIClientError.decodingFailed
+        }
+        guard !payload.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AIClientError.emptyResponse
+        }
+        return payload.text
     }
     
     private func sendGeminiRequest(prompt: String, apiKey: String) async throws -> String {
@@ -365,6 +458,15 @@ private struct AIPartialInsightData: Decodable {
     let formattedMarkdown: String
 }
 
+private struct AIProxyRequest: Encodable {
+    let feature: String
+    let prompt: String
+}
+
+private struct AIProxyResponse: Decodable {
+    let text: String
+}
+
 private func buildRecentFocusPrompt(digests: [NoteDigest]) -> String {
     var lines: [String] = []
     lines.append("你是 NoteLab 的助手。请基于最近 3 篇笔记摘要生成‘最近重点报告’。")
@@ -441,7 +543,7 @@ private func buildConnectionPrompt(digests: [NoteDigest], limit: Int) -> String 
     return lines.joined(separator: "\n")
 }
 
-private func buildNoteInsightPrompt(text: String, title: String, notebookContext: String? = nil, protectedAttachmentTokens: [String] = []) -> String {
+private func buildNoteInsightPrompt(text: String, title: String, notebookContext: String? = nil, protectedAttachmentTokens: [String] = [], protectedLinkTokens: [String] = [], linkPreviewContext: String? = nil) -> String {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     let charCount = trimmed.count
     let isVeryShort = charCount < 40
@@ -458,12 +560,15 @@ private func buildNoteInsightPrompt(text: String, title: String, notebookContext
     lines.append("}")
     lines.append("输出规则：")
     lines.append("1) formattedMarkdown 只输出正文重写，不要包含标题(H1)、摘要/要点/待办/表格等结构内容。")
-    lines.append("2) report 承担结构化内容：summary/sections/tables；tasks 只从原文显式可执行事项提取，不要编造。")
+    lines.append("2) report 承担结构化内容：title/summary/sections/tables；tasks 只提取真正需要后续跟进、决策、交付、确认或沟通的事项，不要编造。")
+    lines.append("2.0) report.title 必须是 AI 根据全文生成的短标题，中文不超过 10 个字；英文不超过 5 个词或 42 个字符。不能使用“摘要”“AI 摘要”“正文”“待办”“需求整理”等默认章节名或泛标题。")
     lines.append("2.1) tasks 字段必须存在（允许空数组）。")
     lines.append("2.2) report.tables 必须存在（允许空数组）。")
     lines.append("2.3) report.sections 必须存在（允许空数组）。")
-    lines.append("3) 计划/排期/时间线/里程碑/协作分工等结构性内容，必须放入 report.tables（默认倾向按天时间线；允许根据内容自动选择表格列）。")
-    lines.append("4) 所有待办事项必须输出到 tasks 数组（不要只写在正文里）。")
+    lines.append("3) 计划/排期/时间线/里程碑/协作分工等结构性内容，必须放入 report.tables（默认倾向按天时间线；允许根据内容自动选择表格列）。流程步骤、检查清单、操作指南优先放入正文 sections/tables，不要逐项转成待办。")
+    lines.append("3.1) report.tables 禁止生成“任务/状态”“待办/状态”这类假状态表；状态列如果全是“待办/未完成”没有信息价值，必须省略。真正待办只放 tasks 数组，由应用渲染为可勾选清单。")
+    lines.append("3.2) 如果确实需要用表格表达任务规划，表头必须包含“序号/标题/类型/重要程度”中的至少三项，不能只包含“任务/状态”。")
+    lines.append("4) 明确的后续行动必须输出到 tasks 数组（不要只写在正文里），但同一目标下的连续小步骤要合并为一个较高层级任务。")
     lines.append("4.1) 不要把 tasks 或 tables 放进 formattedMarkdown（否则会被去重剥离）。")
     lines.append("5) 代码/命令/配置片段必须使用 fenced code block：```代码```。")
     lines.append("6) 需要强调的重点请使用高亮语法：==yellow:重要内容==。可选颜色：yellow/green/blue/pink/orange/purple。")
@@ -471,9 +576,13 @@ private func buildNoteInsightPrompt(text: String, title: String, notebookContext
     lines.append("8) 高亮粒度优先 2-12 个字的短语，必要时可高亮整句；不要在代码块内插入高亮。")
     lines.append("9) 高亮内容类型优先：结论/决定、风险/注意事项、关键数字/日期、下一步、关键配置/命令说明。")
     lines.append("10) 禁止逐句复述原文，必须重组为“信息架构/数据规则/交互流程/校验规则/待办任务”。")
+    lines.append("10.1) 不要输出大段文字墙。每个 paragraph 建议 40-120 个中文字符；超过 160 个中文字符必须按主题拆成多个 paragraph 或 bullets。")
+    lines.append("10.2) 工作流、规则、步骤、排查过程优先拆成小标题 + bullets/numbered list；不要把多个流程节点塞进一个 paragraph。")
     lines.append("11) 字段清单必须输出为 Markdown 表格（至少 1 张表）。")
-    lines.append("12) 即使原文没有显式待办，也要把需求拆成 6-12 条可执行任务输出到 tasks（不需要标注推断）。")
-    lines.append("13) summary <= 2 句；sections <= 3；每节 bullets <= 6；避免套话与重复，不要在 summary 和 bullets 重复表达同一点。")
+    lines.append("12) 不要为了凑数量生成待办。没有明确后续责任、未决问题或交付动作时，tasks 返回空数组。通常 0-5 条；复杂项目最多 7 条。")
+    lines.append("12.1) 待办颗粒度要偏产品/项目管理层级，例如“完成图标资源清理与验证”，不要拆成“检查 A、删除 B、运行 C、确认 D”这类流程步骤。")
+    lines.append("12.2) 如果原文是流程文档、操作指南、规范说明或排查步骤，默认不生成待办，除非文中出现“需要/下一步/待确认/负责人/截止时间/阻塞/风险跟进”等明显任务信号。")
+    lines.append("13) summary <= 100 个中文字符，1-2 句；必须是分析性概括，综合主题、意图和关键判断，不得直接摘录标题、首句或原文连续片段；sections <= 3；每节 bullets <= 6；避免套话与重复，不要在 summary 和 bullets 重复表达同一点。")
     if isShort {
         lines.append("14) 原文较短时不要扩写或脑补，只做更清晰的表达与轻量结构化。")
         lines.append("15) 原文较短时 report.tables 必须为空，除非原文明确包含表格/字段/时间线/对比结构。")
@@ -485,6 +594,10 @@ private func buildNoteInsightPrompt(text: String, title: String, notebookContext
         lines.append("17) 文中包含附件占位符 token，代表原笔记中的图片或附件。必须原样保留，不得删除/改写/放入代码块。")
         lines.append("18) 尽量保持这些 token 在原有相对位置。")
         lines.append("附件占位符：\(protectedAttachmentTokens.joined(separator: ", "))")
+    }
+    if !protectedLinkTokens.isEmpty {
+        lines.append("19) 文中包含链接占位符 token，代表原笔记 URL。必须原样保留，不得删除/改写/放入代码块。")
+        lines.append("链接占位符：\(protectedLinkTokens.joined(separator: ", "))")
     }
     lines.append("")
     lines.append("JSON 示例（仅示意格式）：")
@@ -517,6 +630,11 @@ private func buildNoteInsightPrompt(text: String, title: String, notebookContext
     lines.append("原文字数：\(charCount)")
     lines.append("原文如下：")
     lines.append(trimmed.isEmpty ? "<empty>" : trimmed)
+    if let linkPreviewContext, !linkPreviewContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        lines.append("")
+        lines.append("链接预览上下文（只用于理解链接指向的内容，不要原样写入 formattedMarkdown）：")
+        lines.append(linkPreviewContext)
+    }
 
     return lines.joined(separator: "\n")
 }
@@ -530,13 +648,14 @@ private func buildExtractTasksPrompt(text: String) -> String {
     lines.append("  \"tasks\": [ { \"text\": string, \"dueDate\": string?, \"priority\": string, \"confidence\": number, \"sourceAnchor\": { \"paragraphIndex\": number } } ]")
     lines.append("}")
     lines.append("规则：")
-    lines.append("1) 允许轻度推断：将“下一步/风险/阻塞项/问题/待确认项”转成可执行待办，但不要编造事实。")
+    lines.append("1) 只提取真正需要后续跟进、决策、交付、确认或沟通的事项；允许把“下一步/风险/阻塞项/问题/待确认项”转成可执行待办，但不要编造事实。")
     lines.append("2) priority 为 \"high\", \"medium\", \"low\" 之一。")
     lines.append("3) confidence 为 0-1 之间的数字，表示这是待办事项的置信度。")
     lines.append("4) dueDate 格式为 ISO8601，如果没有明确日期则为 null。")
-    lines.append("5) 最多提取 12 个任务。")
-    lines.append("6) 如果没有任务，必须返回空数组：{\"tasks\": []}。")
-    lines.append("7) 不要输出除 JSON 外的任何文字。")
+    lines.append("5) 不要把流程步骤、操作指南、检查清单逐项转成待办；同一目标下的连续小步骤要合并成一个较高层级任务。")
+    lines.append("6) 不要为了凑数量生成待办。通常 0-5 条；复杂项目最多 7 条。")
+    lines.append("7) 如果没有任务，必须返回空数组：{\"tasks\": []}。")
+    lines.append("8) 不要输出除 JSON 外的任何文字。")
     lines.append("")
     lines.append("JSON 示例：")
     lines.append("{\"tasks\": [{\"text\": \"跟进日志异常原因\", \"dueDate\": null, \"priority\": \"medium\", \"confidence\": 0.62, \"sourceAnchor\": {\"paragraphIndex\": 3}}]}")
@@ -551,7 +670,9 @@ private func buildRewritePrompt(
     title: String,
     notebookContext: String? = nil,
     mode: AIRewriteMode,
-    protectedAttachmentTokens: [String] = []
+    protectedAttachmentTokens: [String] = [],
+    protectedLinkTokens: [String] = [],
+    linkPreviewContext: String? = nil
 ) -> String {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     let charCount = trimmed.count
@@ -646,6 +767,11 @@ private func buildRewritePrompt(
         lines.append("【附件保护】文中包含附件占位符 token，必须原样保留：")
         lines.append(protectedAttachmentTokens.joined(separator: ", "))
     }
+    if !protectedLinkTokens.isEmpty {
+        lines.append("")
+        lines.append("【链接保护】文中包含链接占位符 token，必须原样保留：")
+        lines.append(protectedLinkTokens.joined(separator: ", "))
+    }
     
     // 只在非 expand 模式下添加笔记本背景（expand 模式已在上面添加）
     if mode != .expand, let context = notebookContext, !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -658,7 +784,43 @@ private func buildRewritePrompt(
     lines.append("【原文标题】\(title)")
     lines.append("【原文内容】")
     lines.append(trimmed.isEmpty ? "<empty>" : trimmed)
+    if let linkPreviewContext, !linkPreviewContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        lines.append("")
+        lines.append("【链接预览上下文】只用于理解链接指向的内容，不要原样写入 markdown。")
+        lines.append(linkPreviewContext)
+    }
     
+    return lines.joined(separator: "\n")
+}
+
+private func buildVoiceNotePrompt(
+    rawTranscript: String,
+    titleHint: String,
+    notebookContext: String? = nil
+) -> String {
+    let trimmed = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+    var lines: [String] = []
+    lines.append("你是 NoteLab 的语音笔记整理助手。请把一段中文口语转写整理为可阅读的 Markdown 笔记，并只输出 JSON。")
+    lines.append("只输出 JSON，不要输出任何额外文字、注释或 markdown。")
+    lines.append("必须遵循以下 JSON 结构：")
+    lines.append("{\"title\": string, \"summary\": string, \"markdown\": string}")
+    lines.append("")
+    lines.append("整理规则：")
+    lines.append("1) 去除无意义口语填充词，例如“嗯、啊、呃、那个、就是、然后、你知道吧、对吧”等；如果这些词承担真实语义或连接关系，保留其语义但改写成书面表达。")
+    lines.append("2) 删除明显重复、口误、断裂重启的表达，但不得删掉事实、数字、日期、人名、地点、任务、决策和风险。")
+    lines.append("3) 根据内容自动加二级/三级标题、列表、待办和表格；不要为了格式而编造内容。")
+    lines.append("4) title 必须是根据全文生成的短标题，中文不超过 10 个字，不能用“语音笔记/摘要/正文/待办”等泛标题。")
+    lines.append("5) summary 不超过 100 个中文字符，概括主题、意图和关键结论。")
+    lines.append("6) markdown 不要包含 H1 标题；正文应比原始转写更清晰，但保留原意。")
+    if let notebookContext, !notebookContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        lines.append("")
+        lines.append("笔记本背景介绍：")
+        lines.append(notebookContext)
+    }
+    lines.append("")
+    lines.append("标题提示：\(titleHint)")
+    lines.append("原始转写如下：")
+    lines.append(trimmed.isEmpty ? "<empty>" : trimmed)
     return lines.joined(separator: "\n")
 }
 

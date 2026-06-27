@@ -23,15 +23,21 @@ enum CloudKitSchema {
     enum Field {
         static let id = "id"
         static let ownerId = "ownerId"
+        static let profileIdHash = "profileIdHash"
+        static let deviceId = "deviceId"
+        static let localRevision = "localRevision"
+        static let lastSyncedHash = "lastSyncedHash"
         static let notebookId = "notebookId"
         static let noteId = "noteId"
         static let title = "title"
         static let color = "color"
         static let iconName = "iconName"
+        static let backgroundId = "backgroundId"
         static let notebookDescription = "notebookDescription"
         static let summary = "summary"
         static let content = "content"
         static let contentRTF = "contentRTF"
+        static let conflictParentId = "conflictParentId"
         static let paragraphCount = "paragraphCount"
         static let bulletCount = "bulletCount"
         static let hasAdditionalContext = "hasAdditionalContext"
@@ -51,6 +57,10 @@ enum CloudKitSchema {
         CKRecord.ID(recordName: "\(type)-\(id.uuidString)", zoneID: zoneID)
     }
 
+    static func recordID(type: String, profileId: UUID, id: UUID) -> CKRecord.ID {
+        CKRecord.ID(recordName: "\(profileId.uuidString.lowercased()):\(type):\(id.uuidString.lowercased())", zoneID: zoneID)
+    }
+
     static func storagePath(ownerId: UUID, attachmentId: UUID, fileName: String) -> String {
         let ext = (fileName as NSString).pathExtension
         let storageName = ext.isEmpty ? attachmentId.uuidString : "\(attachmentId.uuidString).\(ext)"
@@ -62,6 +72,17 @@ enum CloudKitSchema {
         guard let last = parts.last else { return nil }
         let stem = (String(last) as NSString).deletingPathExtension
         return UUID(uuidString: stem)
+    }
+
+    static func ownerId(from storagePath: String) -> UUID? {
+        let parts = storagePath.split(separator: "/").map(String.init)
+        if parts.count >= 3, parts[0] == "icloud" {
+            return UUID(uuidString: parts[1])
+        }
+        if parts.count >= 2 {
+            return UUID(uuidString: parts[0])
+        }
+        return nil
     }
 }
 

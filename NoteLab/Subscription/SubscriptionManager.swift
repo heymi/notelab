@@ -31,6 +31,9 @@ final class SubscriptionManager: ObservableObject {
     
     /// 购买错误信息
     @Published var purchaseError: String?
+
+    /// 产品加载错误信息
+    @Published private(set) var productLoadError: String?
     
     /// 订阅过期时间
     @Published private(set) var expirationDate: Date?
@@ -47,6 +50,10 @@ final class SubscriptionManager: ObservableObject {
     // MARK: - Private State
     
     private var updateListenerTask: Task<Void, Never>?
+
+    #if DEBUG
+    private var debugTierOverride: SubscriptionTier?
+    #endif
     
     // MARK: - Computed Properties
     
@@ -71,7 +78,10 @@ final class SubscriptionManager: ObservableObject {
         // 从缓存恢复状态
         self.currentTier = entitlementCache.cachedTier
         self.expirationDate = entitlementCache.cachedExpiration
-        
+        #if DEBUG
+        applyDebugSubscriptionTokenIfAvailable()
+        #endif
+
         // 启动交易监听
         updateListenerTask = listenForTransactionUpdates()
         
@@ -103,12 +113,15 @@ final class SubscriptionManager: ObservableObject {
         }
         
         logger.info("Transaction update: \(transaction.productID)")
-        
+
+        let applied = applyEntitlement(from: transaction, jwsRepresentation: result.jwsRepresentation)
+
         // 完成交易
         await transaction.finish()
-        
-        // 刷新权益状态
-        await refreshEntitlementState()
+
+        if !applied {
+            await refreshEntitlementState(allowCachedFallback: false)
+        }
         
         // 发送通知
         NotificationCenter.default.post(name: .subscriptionStatusChanged, object: nil)
@@ -122,6 +135,7 @@ final class SubscriptionManager: ObservableObject {
         defer { isLoading = false }
         
         do {
+            productLoadError = nil
             let storeProducts = try await Product.products(for: SubscriptionProductID.allProductIds)
             
             // 按价格排序（年度在前）
@@ -141,8 +155,13 @@ final class SubscriptionManager: ObservableObject {
                 return p1.price > p2.price
             }
             
+            if products.isEmpty {
+                productLoadError = "未加载到订阅产品。请确认 App Store Connect 产品 ID，或使用 NoteLab Local StoreKit scheme 进行本地沙盒测试。"
+            }
+
             logger.info("Loaded \(storeProducts.count) products")
         } catch {
+            productLoadError = error.localizedDescription
             logger.error("Failed to load products: \(error.localizedDescription)")
         }
     }
@@ -150,10 +169,18 @@ final class SubscriptionManager: ObservableObject {
     // MARK: - Refresh Entitlement
     
     /// 刷新权益状态
-    func refreshEntitlementState() async {
+    func refreshEntitlementState(allowCachedFallback: Bool = true) async {
+        #if DEBUG
+        if applyDebugSubscriptionTokenIfAvailable() {
+            logger.info("Entitlement refresh skipped — debug subscription token active")
+            return
+        }
+        #endif
+
         var highestTier: SubscriptionTier = .free
         var latestExpiration: Date?
         var activeProductId: String?
+        var activeCredential: String?
 
         // 遍历当前权益
         for await result in Transaction.currentEntitlements {
@@ -161,23 +188,27 @@ final class SubscriptionManager: ObservableObject {
                 continue
             }
 
-            // 检查是否已撤销
-            if transaction.revocationDate != nil {
-                continue
-            }
-
-            // 检查是否已过期
-            if let expirationDate = transaction.expirationDate,
-               expirationDate < Date() {
-                continue
-            }
-
             // 根据产品 ID 确定等级
-            let tier = SubscriptionProductID.tier(for: transaction.productID)
+            let tier = SubscriptionProductID.activeTier(
+                for: transaction.productID,
+                expiration: transaction.expirationDate,
+                revocationDate: transaction.revocationDate
+            )
             if tier > highestTier {
                 highestTier = tier
                 latestExpiration = transaction.expirationDate
                 activeProductId = transaction.productID
+                activeCredential = result.jwsRepresentation
+            }
+        }
+
+        if highestTier == .free, allowCachedFallback {
+            let cachedTier = entitlementCache.cachedTier
+            if cachedTier > .free {
+                highestTier = cachedTier
+                latestExpiration = entitlementCache.cachedExpiration
+                activeProductId = currentProductId
+                logger.info("Entitlement refresh kept cached paid tier while StoreKit catches up")
             }
         }
 
@@ -197,8 +228,33 @@ final class SubscriptionManager: ObservableObject {
         
         // 缓存到 Keychain
         entitlementCache.cacheTier(highestTier, expiration: latestExpiration)
+        entitlementCache.cacheEntitlementCredential(activeCredential)
         
         logger.info("Entitlement refreshed: tier=\(highestTier.displayName), expires=\(latestExpiration?.description ?? "nil")")
+    }
+
+    @discardableResult
+    private func applyEntitlement(from transaction: Transaction, jwsRepresentation: String?) -> Bool {
+        let tier = SubscriptionProductID.activeTier(
+            for: transaction.productID,
+            expiration: transaction.expirationDate,
+            revocationDate: transaction.revocationDate
+        )
+
+        guard tier > .free else {
+            return false
+        }
+
+        if tier >= currentTier {
+            currentTier = tier
+            expirationDate = transaction.expirationDate
+            currentProductId = transaction.productID
+            entitlementCache.cacheTier(tier, expiration: transaction.expirationDate)
+            entitlementCache.cacheEntitlementCredential(jwsRepresentation)
+        }
+
+        logger.info("Entitlement applied from verified transaction: tier=\(tier.displayName), product=\(transaction.productID)")
+        return true
     }
     
     // MARK: - Purchase
@@ -221,12 +277,15 @@ final class SubscriptionManager: ObservableObject {
                 }
                 
                 logger.info("Purchase successful: \(product.id)")
+
+                let applied = applyEntitlement(from: transaction, jwsRepresentation: verification.jwsRepresentation)
                 
                 // 完成交易
                 await transaction.finish()
-                
-                // 刷新权益状态
-                await refreshEntitlementState()
+
+                if !applied {
+                    await refreshEntitlementState(allowCachedFallback: false)
+                }
                 
                 // 发送通知
                 NotificationCenter.default.post(name: .subscriptionStatusChanged, object: nil)
@@ -265,13 +324,11 @@ final class SubscriptionManager: ObservableObject {
         
         logger.info("Restoring purchases...")
         
-        // StoreKit 2 会自动同步，只需刷新权益
-        await refreshEntitlementState()
-        
         // 同步所有未完成的交易
         do {
             try await AppStore.sync()
             await refreshEntitlementState()
+            NotificationCenter.default.post(name: .subscriptionStatusChanged, object: nil)
             logger.info("Purchases restored successfully")
         } catch {
             logger.error("Failed to sync with App Store: \(error.localizedDescription)")
@@ -290,6 +347,71 @@ final class SubscriptionManager: ObservableObject {
     func recordAIUsage(_ feature: AIFeature) {
         usageTracker.recordUsage(feature)
     }
+
+    var monthlyAICreditAllowance: Int {
+        usageTracker.monthlyAllowance(tier: currentTier)
+    }
+
+    var remainingAICredits: Int {
+        usageTracker.remainingCredits(tier: currentTier)
+    }
+
+    func currentEntitlementCredential() async -> String? {
+        var bestTier: SubscriptionTier = .free
+        var credential: String?
+
+        for await result in Transaction.currentEntitlements {
+            guard case .verified(let transaction) = result else { continue }
+            let tier = SubscriptionProductID.activeTier(
+                for: transaction.productID,
+                expiration: transaction.expirationDate,
+                revocationDate: transaction.revocationDate
+            )
+            if tier > bestTier {
+                bestTier = tier
+                credential = result.jwsRepresentation
+            }
+        }
+
+        if let credential {
+            entitlementCache.cacheEntitlementCredential(credential)
+            return credential
+        }
+
+        if currentTier > .free, let cached = entitlementCache.cachedEntitlementCredential {
+            return cached
+        }
+
+        #if DEBUG
+        if let debugToken = debugSubscriptionToken {
+            return debugToken
+        }
+        #endif
+
+        return nil
+    }
+
+    #if DEBUG
+    @discardableResult
+    private func applyDebugSubscriptionTokenIfAvailable() -> Bool {
+        guard debugSubscriptionToken != nil else { return false }
+        currentTier = .pro
+        currentProductId = SubscriptionProductID.proMonthly
+        expirationDate = nil
+        return true
+    }
+
+    private var debugSubscriptionToken: String? {
+        if let token = Bundle.main.object(forInfoDictionaryKey: "NoteLabDevSubscriptionToken") as? String {
+            let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty, !trimmed.contains("$(") {
+                entitlementCache.cacheDebugSubscriptionToken(trimmed)
+                return trimmed
+            }
+        }
+        return entitlementCache.cachedDebugSubscriptionToken
+    }
+    #endif
     
     /// 检查是否可以创建笔记本
     func canCreateNotebook(currentCount: Int) -> Bool {
@@ -346,13 +468,18 @@ final class SubscriptionManager: ObservableObject {
     // MARK: - Debug
 
     #if DEBUG
-    private var debugTierOverride: SubscriptionTier?
-
     /// 设置订阅等级（仅用于测试）
     func debugSetTier(_ tier: SubscriptionTier) {
+        applyDebugTierOverride(tier)
+    }
+
+    private func applyDebugTierOverride(_ tier: SubscriptionTier) {
         debugTierOverride = tier
         self.currentTier = tier
-        entitlementCache.cacheTier(tier, expiration: Date().addingTimeInterval(86400 * 30))
+        let expiration = Date().addingTimeInterval(86400 * 30)
+        self.expirationDate = expiration
+        self.currentProductId = tier == .pro ? SubscriptionProductID.proYearly : nil
+        entitlementCache.cacheTier(tier, expiration: expiration)
     }
     #endif
 }

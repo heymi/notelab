@@ -43,22 +43,9 @@ enum PersistenceController {
         logger.info("makeContainer: attempting store at \(storePath, privacy: .public)")
         let start = Date()
 
-        do {
-            let container = try ModelContainer(for: schema, configurations: [configuration])
-            logger.info("makeContainer: success, elapsed=\(Date().timeIntervalSince(start), privacy: .public)s")
-            return container
-        } catch {
-            logger.error("makeContainer: first attempt failed (\(error.localizedDescription, privacy: .public)), resetting store")
-            do {
-                try resetStore()
-            } catch {
-                logger.error("makeContainer: resetStore also failed (\(error.localizedDescription, privacy: .public))")
-            }
-            let retryStart = Date()
-            let container = try ModelContainer(for: schema, configurations: [configuration])
-            logger.info("makeContainer: retry success after reset, elapsed=\(Date().timeIntervalSince(retryStart), privacy: .public)s")
-            return container
-        }
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        logger.info("makeContainer: success, elapsed=\(Date().timeIntervalSince(start), privacy: .public)s")
+        return container
     }
 
     nonisolated static func makeInMemoryContainer() throws -> ModelContainer {
